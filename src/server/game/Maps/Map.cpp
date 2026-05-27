@@ -2255,6 +2255,9 @@ MapDifficulty const* Map::GetMapDifficulty() const
 
 uint32 InstanceMap::GetMaxPlayers() const
 {
+    if (GetId() == 48)  // Heimdal: BFD as 10-player raid (Phase 1.1)
+        return 10;
+
     MapDifficulty const* mapDiff = GetMapDifficulty();
     if (mapDiff && mapDiff->maxPlayers)
         return mapDiff->maxPlayers;
