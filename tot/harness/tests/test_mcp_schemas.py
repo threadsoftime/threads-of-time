@@ -51,6 +51,43 @@ DAEMON_INJECTED_FIELDS = {
     "gm.run_console": {"request_id"},
 }
 
+# Fields that the adapter checks via args.contains() in an OR-gate
+# (i.e. "at least one of X or Y is required") rather than a hard
+# per-field gate.  The _extract_required() regex cannot distinguish the
+# OR-gate from a hard-required check, so these fields appear as
+# "adapter_required" when they are actually OR-optional.  We subtract
+# them from the required-field assertion so the pydantic schema can
+# correctly declare them Optional (the adapter enforces the OR at
+# runtime).
+# Fields in memory.* adapters that `args.contains("X")` checks as an
+# optional-presence guard (body-building block: "if present, include in
+# the HTTP body"), NOT as a hard-required gate.  The _extract_required()
+# regex cannot distinguish these two patterns, so we exclude them from
+# the required-field assertion here.  Pydantic correctly marks them
+# Optional; the adapter silently skips absent fields rather than rejecting.
+SCHEMA_OR_REQUIRED_FIELDS: dict[str, set[str]] = {
+    # memory.write: hard-required = bot_guid, content_text, episode_type, timestamp.
+    # Everything else is body-building (optional).
+    "memory.write": {"salience_hint", "entities", "metadata", "source"},
+    # memory.recall: hard-required = bot_guid, query_text.
+    # Scoring weights + filters are body-building (optional).
+    "memory.recall": {
+        "top_k", "entity_names", "episode_types", "time_filter",
+        "alpha", "beta", "gamma", "delta", "mmr_lambda",
+    },
+    # memory.search: hard-required = bot_guid + (query_text OR query_vec).
+    # Both query fields appear in an OR-gate; top_k is body-building.
+    "memory.search": {"query_text", "query_vec", "top_k"},
+    # memory.list: hard-required = bot_guid.
+    # All filter + pagination params are query-string building (optional).
+    "memory.list": {
+        "episode_type", "entity_name", "after", "before", "limit", "offset",
+    },
+    # memory.update: hard-required = bot_guid, episode_id.
+    # Mutable fields are OR-required (adapter enforces "at least one" at runtime).
+    "memory.update": {"content_text", "salience_score", "metadata"},
+}
+
 
 def _tool_to_adapter_filename(tool_name: str) -> str:
     """e.g. `gm.read_console_output` -> `GmReadConsoleOutputAdapter.cpp`."""
@@ -124,7 +161,11 @@ def test_schema_has_all_adapter_required_fields(tool_name, adapters_available):
         pytest.fail(f"no adapter file for tool {tool_name!r} at {path}")
 
     cpp = path.read_text()
-    adapter_required = _extract_required(cpp) - DAEMON_INJECTED_FIELDS.get(tool_name, set())
+    adapter_required = (
+        _extract_required(cpp)
+        - DAEMON_INJECTED_FIELDS.get(tool_name, set())
+        - SCHEMA_OR_REQUIRED_FIELDS.get(tool_name, set())
+    )
     schema_cls, _ = TOOL_SCHEMAS[tool_name]
     schema_required = _pydantic_required(schema_cls)
 
@@ -181,14 +222,18 @@ def test_schema_required_vs_optional_matches_adapter(tool_name, adapters_availab
         pytest.fail(f"no adapter file for tool {tool_name!r} at {path}")
 
     cpp = path.read_text()
-    adapter_required = _extract_required(cpp) - DAEMON_INJECTED_FIELDS.get(tool_name, set())
+    adapter_required = (
+        _extract_required(cpp)
+        - DAEMON_INJECTED_FIELDS.get(tool_name, set())
+        - SCHEMA_OR_REQUIRED_FIELDS.get(tool_name, set())
+    )
     adapter_optional = _extract_optional(cpp)
     schema_cls, _ = TOOL_SCHEMAS[tool_name]
     schema_required = _pydantic_required(schema_cls)
 
     # Fields the schema marks required, but the adapter treats as optional.
-    # adapter_required already excludes daemon-injected, so this catches
-    # the real over-strict case.
+    # adapter_required already excludes daemon-injected and OR-required
+    # fields, so this catches the real over-strict case.
     wrongly_required = schema_required & adapter_optional - adapter_required
     assert not wrongly_required, (
         f"{tool_name}: pydantic {schema_cls.__name__} marks "

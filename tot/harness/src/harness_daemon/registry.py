@@ -108,4 +108,12 @@ def build_v1_registry() -> Registry:
         ToolEntry("obs.get_talents",           "obs.get_talents",           "target_guid", True),
         # Daemon-direct
         ToolEntry("obs.query_db",              "obs.query_db",              None,          False),
+        # Memory subsystem (Phase 6B — V1 memory.* tools)
+        ToolEntry("memory.write",              "memory.write",              "bot_guid",    True),
+        ToolEntry("memory.read",               "memory.read",               "bot_guid",    True),
+        ToolEntry("memory.recall",             "memory.recall",             "bot_guid",    True),
+        ToolEntry("memory.search",             "memory.search",             "bot_guid",    True),
+        ToolEntry("memory.list",               "memory.list",               "bot_guid",    True),
+        ToolEntry("memory.update",             "memory.update",             "bot_guid",    True),
+        ToolEntry("memory.delete",             "memory.delete",             "bot_guid",    True),
     ])

@@ -278,6 +278,121 @@ class ObsQueryDbArgs(BaseModel):
     params:        dict  = Field(default_factory=dict, description="Template params")
 
 
+# --- memory.* (V1 memory subsystem — Phase 6B adapters) ---
+
+class _EpisodeType(str, Enum):
+    chat        = "chat"
+    combat      = "combat"
+    social      = "social"
+    quest       = "quest"
+    discovery   = "discovery"
+    goal        = "goal"
+    reflection  = "reflection"
+    observation = "observation"
+
+
+class MemoryWriteArgs(BaseModel):
+    bot_guid:      int              = Field(..., description="Low-32 GUID of the bot whose memory is written")
+    content_text:  str              = Field(..., description="Raw text of the episode to store")
+    episode_type:  _EpisodeType     = Field(..., description=(
+        "Episode category: chat|combat|social|quest|discovery|goal|reflection|observation"
+    ))
+    timestamp:     int              = Field(..., description="Unix epoch ms of the in-game event")
+    salience_hint: Optional[float]  = Field(None, description=(
+        "Caller-supplied salience in [0.0, 1.0]. Overrides the automatic salience scorer."
+    ))
+    entities:      Optional[list]   = Field(None, description=(
+        "List of entity strings (player names, NPC names, item names) referenced in this episode."
+    ))
+    metadata:      Optional[dict]   = Field(None, description=(
+        "Arbitrary key-value metadata stored alongside the episode (not embedded)."
+    ))
+    source:        Optional[str]    = Field(None, description=(
+        "Originating subsystem label, e.g. 'chat', 'combat_log', 'planner'."
+    ))
+
+
+class MemoryReadArgs(BaseModel):
+    bot_guid:   int = Field(..., description="Low-32 GUID of the bot")
+    episode_id: int = Field(..., description="Primary-key ID of the episode to retrieve")
+
+
+class MemoryRecallArgs(BaseModel):
+    bot_guid:      int             = Field(..., description="Low-32 GUID of the bot")
+    query_text:    str             = Field(..., description=(
+        "Natural-language query. The sidecar embeds this and ranks episodes by "
+        "hybrid relevance (semantic + recency + salience + MMR)."
+    ))
+    top_k:         Optional[int]   = Field(None, ge=1, description="Max episodes to return (default 10 in sidecar)")
+    entity_names:  Optional[list]  = Field(None, description="Filter to episodes referencing these entity strings")
+    episode_types: Optional[list]  = Field(None, description=(
+        "Filter to these episode_type values. Each element must be a valid _EpisodeType string."
+    ))
+    time_filter:   Optional[dict]  = Field(None, description=(
+        "Time-window filter: {\"after\": <epoch_ms>, \"before\": <epoch_ms>}. Either key is optional."
+    ))
+    alpha:         Optional[float] = Field(None, description="Semantic similarity weight (0–1; sidecar default 0.5)")
+    beta:          Optional[float] = Field(None, description="Recency weight (0–1; sidecar default 0.3)")
+    gamma:         Optional[float] = Field(None, description="Salience weight (0–1; sidecar default 0.15)")
+    delta:         Optional[float] = Field(None, description="Recall-count (familiarity) weight (0–1; sidecar default 0.05)")
+    mmr_lambda:    Optional[float] = Field(None, description=(
+        "MMR lambda: 1.0 = pure relevance, 0.0 = pure diversity (sidecar default 0.7)."
+    ))
+
+
+class MemorySearchArgs(BaseModel):
+    """Pure nearest-neighbour search — no side effects on recall counters.
+
+    At least one of query_text or query_vec must be provided. The adapter
+    validates this at runtime and returns BadArgs when both are absent.
+    """
+    bot_guid:   int             = Field(..., description="Low-32 GUID of the bot")
+    query_text: Optional[str]   = Field(None, description=(
+        "Natural-language query; sidecar embeds it for ANN search. "
+        "Provide either this or query_vec, not both."
+    ))
+    query_vec:  Optional[list]  = Field(None, description=(
+        "Pre-computed embedding vector (list of floats). "
+        "Provide either this or query_text, not both."
+    ))
+    top_k:      Optional[int]   = Field(None, ge=1, description="Max episodes to return (default 10)")
+
+
+class MemoryListArgs(BaseModel):
+    bot_guid:     int            = Field(..., description="Low-32 GUID of the bot")
+    episode_type: Optional[str]  = Field(None, description=(
+        "Filter by episode type: chat|combat|social|quest|discovery|goal|reflection|observation. "
+        "Omit to return all types."
+    ))
+    entity_name:  Optional[str]  = Field(None, description=(
+        "Filter to episodes referencing this entity string (exact match)."
+    ))
+    after:        Optional[int]  = Field(None, description="Unix epoch ms lower bound (inclusive)")
+    before:       Optional[int]  = Field(None, description="Unix epoch ms upper bound (inclusive)")
+    limit:        Optional[int]  = Field(None, ge=1, le=1000, description="Page size (default 50)")
+    offset:       Optional[int]  = Field(None, ge=0, description="Pagination offset (default 0)")
+
+
+class MemoryUpdateArgs(BaseModel):
+    """Update mutable fields of an existing episode.
+
+    At least one of content_text, salience_score, or metadata must be
+    provided. The adapter returns BadArgs when all three are absent/null.
+    """
+    bot_guid:      int            = Field(..., description="Low-32 GUID of the bot")
+    episode_id:    int            = Field(..., description="Primary-key ID of the episode to update")
+    content_text:  Optional[str]  = Field(None, description="New text; triggers re-embedding in the sidecar")
+    salience_score: Optional[float] = Field(None, ge=0.0, le=1.0, description=(
+        "Override salience score in [0.0, 1.0]."
+    ))
+    metadata:      Optional[dict] = Field(None, description="Replace the episode's metadata dict")
+
+
+class MemoryDeleteArgs(BaseModel):
+    bot_guid:   int = Field(..., description="Low-32 GUID of the bot")
+    episode_id: int = Field(..., description="Primary-key ID of the episode to hard-delete")
+
+
 # --- registry: name -> (schema_class, one-line description) ---
 
 TOOL_SCHEMAS: dict[str, tuple[type[BaseModel], str]] = {
@@ -314,4 +429,12 @@ TOOL_SCHEMAS: dict[str, tuple[type[BaseModel], str]] = {
     "obs.get_group":           (ObsGetGroupArgs,            "Party/raid roster, HP/mana%, distances."),
     "obs.get_talents":         (ObsGetTalentsArgs,          "Active-spec talents: flat list with tab/row/col/rank."),
     "obs.query_db":            (ObsQueryDbArgs,             "Run an allowlisted MySQL template against the auth/char DBs."),
+    # Memory subsystem (Phase 6B — V1 memory.* tools)
+    "memory.write":            (MemoryWriteArgs,            "Write a new episode to a bot's episodic memory store."),
+    "memory.read":             (MemoryReadArgs,             "Fetch a single episode by primary-key ID."),
+    "memory.recall":           (MemoryRecallArgs,           "Hybrid-ranked recall: semantic + recency + salience + MMR."),
+    "memory.search":           (MemorySearchArgs,           "Pure ANN search by text or pre-computed embedding vector."),
+    "memory.list":             (MemoryListArgs,             "Paginated episode listing with optional type/entity/time filters."),
+    "memory.update":           (MemoryUpdateArgs,           "Patch content, salience, or metadata on an existing episode."),
+    "memory.delete":           (MemoryDeleteArgs,           "Hard-delete an episode (cascades to entities + embeddings)."),
 }
