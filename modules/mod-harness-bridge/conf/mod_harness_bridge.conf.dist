@@ -1,0 +1,26 @@
+[worldserver]
+
+########################################
+# mod-harness-bridge config
+########################################
+#
+# Enable                Master switch. 0 = module dormant, no listener.
+# BindAddress           MUST stay 127.0.0.1. The daemon is the only client;
+#                       binding to 0.0.0.0 would expose game-state mutations
+#                       to the LAN.
+# Port                  Loopback port for the cpp-httplib server. 8091 by
+#                       default (daemon listens on 8090; do not collide).
+# MaxDispatchPerTick    Cap on tool calls drained per worldserver tick.
+# QueueCap              Hard cap on in-flight requests; 503 past this.
+# RequestTimeoutMs      Handler thread waits this long for the main-thread
+#                       drain to fulfill the promise before returning 504.
+# AuditPath             JSONL audit, one line per executor invocation.
+# LoggerLevel           1=error 2=warn 3=info 4=debug
+HarnessBridge.Enable = 1
+HarnessBridge.BindAddress = "127.0.0.1"
+HarnessBridge.Port = 8091
+HarnessBridge.MaxDispatchPerTick = 16
+HarnessBridge.QueueCap = 256
+HarnessBridge.RequestTimeoutMs = 2000
+HarnessBridge.AuditPath = "/azerothcore/env/dist/logs/harness_bridge.jsonl"
+HarnessBridge.LoggerLevel = 3
