@@ -135,3 +135,12 @@ data/
 
 # Logs
 *.log
+
+# === ToT-owned modules (override AC's /modules/* exclusion) ===
+# AC's stock .gitignore excludes /modules/* assuming operators install modules there.
+# ToT FORKS AC and owns these modules — they're tracked in this repo.
+!/modules/mod-agenticbots/
+!/modules/mod-bracket-sets/
+!/modules/mod-harness-bridge/
+!/modules/mod-rotation-mode/
+!/modules/mod-warforged/
