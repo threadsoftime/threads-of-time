@@ -37,6 +37,7 @@ set("AC_MODULE_LIST" "")
 set("AC_SCRIPTS_LIST" "")
 set(MOD_ALE_FOUND 0)
 set(MOD_ALE_PATH "")
+set(MOD_PLAYERBOTS_FOUND 0)
 
 foreach(include ${AC_ADD_SCRIPTS_INCLUDE})
   set("AC_SCRIPTS_INCLUDES" "#include \"${include}\"\n${AC_SCRIPTS_INCLUDES}")
@@ -79,6 +80,23 @@ foreach(SOURCE_MODULE ${MODULES_MODULE_LIST})
   # Use only static for mod-ALE
   if (SOURCE_MODULE MATCHES "mod-ale")
     ConfigureALEModule(${SOURCE_MODULE})
+  endif()
+
+  # Detect mod-playerbots and propagate -DMOD_PLAYERBOTS to the targets that
+  # need it. This mirrors the logic in Heimdal's AC fork:
+  #   - database (PRIVATE): DatabaseWorkerPool<PlayerbotsDatabaseConnection>
+  #     and DBUpdater<PlayerbotsDatabaseConnection> explicit instantiations
+  #   - game-interface (INTERFACE): MotionMaster::MovePointBackwards and other
+  #     #ifdef MOD_PLAYERBOTS hooks in the game core headers used by modules
+  #   - modules (PRIVATE): the mod-playerbots source files themselves
+  if (SOURCE_MODULE MATCHES "mod-playerbots")
+    set(MOD_PLAYERBOTS_FOUND 1)
+    target_compile_options(database
+      PRIVATE
+        -DMOD_PLAYERBOTS)
+    target_compile_options(game-interface
+      INTERFACE
+        -DMOD_PLAYERBOTS)
   endif()
 
   # Build the Graph values
@@ -370,6 +388,12 @@ target_compile_options(modules
 target_compile_options(modules
   INTERFACE
     -DCONFIG_FILE_LIST=$<1:"${CONFIG_LIST}">)
+
+if (MOD_PLAYERBOTS_FOUND)
+  target_compile_options(modules
+    PRIVATE
+      -DMOD_PLAYERBOTS)
+endif()
 
 if (MOD_ALE_FOUND)
   if (APPLE)
