@@ -38,10 +38,11 @@ step "Preparing build directory on Heimdal"
 ssh "$HEIMDAL" "rm -rf ${BUILD_DIR} && mkdir -p ${BUILD_DIR}"
 
 step "Rsyncing repo working tree to Heimdal (${BUILD_DIR})"
-# Exclude build artifacts, virtualenvs, git metadata, and the deploy/release
+# Exclude build artifacts, virtualenvs, and the deploy/release run-state
 # directories (Heimdal doesn't need them to compile the worldserver).
+# NOTE: .git is INCLUDED — apps/docker/Dockerfile bind-mounts source=.git for
+# AC's git-revision build metadata. Excluding it broke the Dockerfile bind.
 rsync -a --delete \
-    --exclude='.git' \
     --exclude='__pycache__' \
     --exclude='.venv' \
     --exclude='.pytest_cache' \

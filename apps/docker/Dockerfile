@@ -53,6 +53,11 @@ ARG CSCRIPTS_DEFAULT_LINKAGE="static"
 ARG CWITH_WARNINGS="ON"
 ARG CMAKE_EXTRA_OPTIONS=""
 ARG GIT_DISCOVERY_ACROSS_FILESYSTEM=1
+# Build-job parallelism. Hard-capped at 4 by default for the Heimdal build
+# environment (kb_adbafeda — GPU thermal headroom; never -j16/-j17 even when
+# more cores are available). Override via --build-arg MAKE_JOBS=N at your own
+# risk on different hosts.
+ARG MAKE_JOBS=4
 
 ARG CCACHE_DIR="/ccache"
 ARG CCACHE_MAXSIZE="1000MB"
@@ -101,7 +106,7 @@ RUN --mount=type=cache,target=/ccache,sharing=locked \
        -DCMAKE_CXX_COMPILER_LAUNCHER="ccache"          \
        -DCMAKE_C_COMPILER_LAUNCHER="ccache"            \
        -DBoost_USE_STATIC_LIBS="ON"                    \
-    && cmake --build . --config "$CTYPE" -j $(($(nproc) + 1)) \
+    && cmake --build . --config "$CTYPE" -j "$MAKE_JOBS" \
     && cmake --install . --config "$CTYPE"
 
 #############################
