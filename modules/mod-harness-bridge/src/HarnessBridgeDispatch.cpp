@@ -135,6 +135,13 @@ namespace HarnessBridge
 #include "Adapters/BotSetRoleAdapter.h"
 #include "Adapters/BotQueueForDungeonAdapter.h"
 #include "Adapters/BotEnterInstanceAdapter.h"
+#include "Adapters/MemoryWriteAdapter.h"
+#include "Adapters/MemoryReadAdapter.h"
+#include "Adapters/MemoryRecallAdapter.h"
+#include "Adapters/MemorySearchAdapter.h"
+#include "Adapters/MemoryListAdapter.h"
+#include "Adapters/MemoryUpdateAdapter.h"
+#include "Adapters/MemoryDeleteAdapter.h"
 
 #include <unordered_map>
 #include <functional>
@@ -150,6 +157,8 @@ namespace HarnessBridge
         // bot.set_role, bot.queue_for_dungeon, bot.enter_instance).
         // Daemon-direct obs.query_db brings the total exposed surface
         // to 32 tools across HTTP /v1/* and MCP /mcp/mcp.
+        // V1.5+ memory.* (Tasks 24-30): 7 adapters calling tot/memory sidecar
+        // via HARNESS_MEMORY_URL (default http://localhost:8090).
         static std::unordered_map<std::string, AdapterFn> const table = {
             {"obs.ping",                  &Adapters::ObsPing},
             {"obs.get_state",             &Adapters::ObsGetState},
@@ -182,6 +191,13 @@ namespace HarnessBridge
             {"bot.set_role",          &Adapters::BotSetRole},
             {"bot.queue_for_dungeon", &Adapters::BotQueueForDungeon},
             {"bot.enter_instance",    &Adapters::BotEnterInstance},
+            {"memory.write",          &Adapters::MemoryWrite},
+            {"memory.read",           &Adapters::MemoryRead},
+            {"memory.recall",         &Adapters::MemoryRecall},
+            {"memory.search",         &Adapters::MemorySearch},
+            {"memory.list",           &Adapters::MemoryList},
+            {"memory.update",         &Adapters::MemoryUpdate},
+            {"memory.delete",         &Adapters::MemoryDelete},
         };
         return table;
     }
