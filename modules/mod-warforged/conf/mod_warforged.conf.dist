@@ -1,0 +1,37 @@
+########################################
+# mod-warforged configuration
+########################################
+
+# Master enable flag
+Warforged.Enable = 1
+
+# Per-drop proc chance (% — integer 0-100)
+Warforged.ProcChance = 10
+
+# Per-drop bonus socket chance (% — integer 0-100, independent of Warforged)
+Warforged.SocketChance = 10
+
+# Quality range eligible for procs (ITEM_QUALITY_* values: 0=Poor, 1=Common, 2=Uncommon, 3=Rare, 4=Epic, 5=Legendary)
+Warforged.MinQuality = 2
+Warforged.MaxQuality = 4
+
+# Drop announcement audience:
+#   0 = off
+#   1 = whisper looter only
+#   2 = group-aware (whisper if solo, party-channel if in party, raid-channel if in raid)
+Warforged.AnnounceChannel = 2
+
+# Play a sound for the looter on proc
+Warforged.PlayLootSound = 1
+Warforged.LootSoundId = 3175
+
+# Warn players whose client is missing the patch-W.MPQ
+Warforged.WarnMissingPatch = 0
+
+# Minimum character level for bonus socket procs. Sockets require gems, and
+# Jewelcrafting socket-eligible gems come from Outland (TBC). Heimdal's bracket
+# design locks players pre-Outland through L60, but JC training + AH-sourced
+# gems become realistic around L56 transition. Below this level the looter
+# can't fill the socket, so the proc is suppressed. Set to 0 to disable the
+# gate (sockets proc at all levels).
+Warforged.SocketMinCharLevel = 56

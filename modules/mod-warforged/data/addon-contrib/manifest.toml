@@ -1,0 +1,17 @@
+# Per-mod contribution manifest. Read by tools/compose-tot-addon.py.
+#
+# priority — lower numbers load earlier. Core/shared files use 0-9; feature
+# mods use 10-89; integration/glue uses 90-99.
+#
+# files — load order within this contribution. Files outside this list are
+# IGNORED by the composer (lets you keep WIP files alongside production).
+
+mod = "mod-warforged"
+priority = 10
+
+files = [
+    "WarforgedStatBumps.lua",   # defines WF_STAT_BUMPS table; load first
+    "GameTooltip.lua",          # consumes WF_STAT_BUMPS
+    "ItemRef.lua",              # same shape as GameTooltip but for ItemRefTooltip
+    "WarforgedSentinel.lua",    # CHAT_MSG_ADDON responder
+]
