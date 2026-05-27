@@ -16,9 +16,17 @@ tested = "..."   # exact version CI runs against
 
 mod-agenticbots does **not** vendor, modify, or redistribute mod-playerbots's source. If a mod-agenticbots feature requires changes to mod-playerbots internals, that's either (a) a request to upstream, (b) a documented hard requirement on a specific mod-playerbots version, or (c) a redesign to use the public API.
 
-### Known upstream PR
+### Known upstream PR + 1.0.0 scope deferral
 
-The BFD instance-strategy registration (Plan 1 Task 18) requires 4 public static methods (`RegisterCustomStrategyContext`, `RegisterCustomActionContext`, `RegisterCustomTriggerContext`, `RegisterCustomInstanceStrategy`) to be added to mod-playerbots. See `tot/internal-docs/agenticbots-upstream-prs.md` for the PR tracker (created in Task 18).
+The BFD instance-strategy registration requires 4 public static methods (`RegisterCustomStrategyContext`, `RegisterCustomActionContext`, `RegisterCustomTriggerContext`, `RegisterCustomInstanceStrategy`) to be added to mod-playerbots. See [`tot/internal-docs/agenticbots-upstream-prs.md`](../../tot/internal-docs/agenticbots-upstream-prs.md) for the PR tracker.
+
+**ToT 1.0.0 scope deferral:** Until that upstream PR lands and `[playerbots-dependency].min` in `UPSTREAMS.toml` is bumped, mod-agenticbots ships in a degraded mode:
+
+- The 8 BFD-tuned strategy files in `src/{strategy,action,trigger}/bfd/` are compiled into the worldserver but not registered with mod-playerbots's strategy factory (no glue in `Addmod_agenticbotsScripts()`).
+- Bots in BFD raid play with generic mod-playerbots strategies (not BFD-tuned).
+- All other "alive bot" features (memory subsystem, decision loop, subset gating, harness integration) work normally — only the BFD-specific tactical layer is deferred.
+
+Activates in 1.1.0+ once the upstream PR is accepted.
 
 ## License
 
