@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dbc-patch-builder"
+version = "0.1.0"
+description = "Build the Bracket 1 tier-set UI patch MPQ (ItemSet.dbc + Spell.dbc) deterministically from authored fixtures."
+requires-python = ">=3.12"
+dependencies = []  # pure stdlib for parsing + DBC IO
+
+[project.optional-dependencies]
+test = ["pytest>=8.0", "pytest-cov>=4.0"]
+
+[project.scripts]
+dbc-patch-build = "dbc_patch_builder.build:main"
+dbc-patch-check = "dbc_patch_builder.check:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
