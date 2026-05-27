@@ -218,6 +218,7 @@ enum PlayerHook
     PLAYERHOOK_ON_GET_REPUTATION_PRICE_DISCOUNT,
     PLAYERHOOK_ON_LEARN_TAXI_NODE,
     PLAYERHOOK_ON_BEFORE_GET_LEVEL_FOR_XP_GAIN,
+    PLAYERHOOK_ON_BUILD_ITEM_QUERY_RESPONSE,
     PLAYERHOOK_END
 };
 
@@ -845,6 +846,14 @@ public:
      * @param level The level that should be used for XP gain calculations
      */
     virtual void OnPlayerBeforeGetLevelForXPGain(Player const* /*player*/, uint8& /*level*/) {}
+
+    /**
+     * @brief Fires from HandleItemQuerySingleOpcode before the ItemSet field
+     * is serialized into SMSG_ITEM_QUERY_SINGLE_RESPONSE. Consumers may mutate
+     * `itemSet` in place to rewrite the value the client sees. Added by ToT
+     * for mod-bracket-sets per-spec itemset rewriting.
+     */
+    virtual void OnPlayerBuildItemQueryResponse(Player* /*player*/, ItemTemplate const* /*proto*/, uint32& /*itemSet*/) {}
 };
 
 #endif

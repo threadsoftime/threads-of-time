@@ -516,7 +516,10 @@ void WorldSession::HandleItemQuerySingleOpcode(WorldPacket& recvData)
         queryData << pProto->RandomProperty;
         queryData << pProto->RandomSuffix;
         queryData << pProto->Block;
-        queryData << pProto->ItemSet;
+        // ToT hook — lets mod-bracket-sets rewrite itemset to per-spec ID.
+        uint32 itemSet = pProto->ItemSet;
+        sScriptMgr->OnPlayerBuildItemQueryResponse(_player, pProto, itemSet);
+        queryData << itemSet;
         queryData << pProto->MaxDurability;
         queryData << pProto->Area;
         queryData << pProto->Map;                                // Added in 1.12.x & 2.0.1 client branch
