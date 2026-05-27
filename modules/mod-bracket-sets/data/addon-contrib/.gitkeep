@@ -1,0 +1,4 @@
+# Reserved for mod-bracket-sets client-side contributions to the ToT AddOn.
+# Empty for now — bracket-sets ships server-only. When the bracket-set
+# tooltip UI lands, drop Lua files here + a manifest.toml and the
+# tools/compose-tot-addon.py composer will pick them up automatically.

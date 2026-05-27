@@ -1,0 +1,116 @@
+# total_candidates=114
+spell_id	class	tier	spec	piece	aura_type	name
+64735	Death Knight	8	Melee	2	107	Item - Death Knight T8 Melee 2P Bonus
+64736	Death Knight	8	Melee	4	4	Item - Death Knight T8 Melee 4P Bonus
+64744	Death Knight	8	Tank	2	108	Item - Death Knight T8 Tank 2P Bonus
+64745	Death Knight	8	Tank	4	109	Item - Death Knight T8 Tank 4P Bonus
+67115	Death Knight	9	Melee	2	42	Item - Death Knight T9 Melee 2P Bonus
+67118	Death Knight	9	Melee	4	286	Item - Death Knight T9 Melee 4P Bonus
+67119	Death Knight	9	Tank	2	107	Item - Death Knight T9 Tank 2P Bonus
+67120	Death Knight	9	Tank	4	107	Item - Death Knight T9 Tank 4P Bonus
+70655	Death Knight	10	Melee	2	108	Item - Death Knight T10 Melee 2P Bonus
+70656	Death Knight	10	Melee	4	42	Item - Death Knight T10 Melee 4P Bonus
+70650	Death Knight	10	Tank	2	4	Item - Death Knight T10 Tank 2P Bonus
+70652	Death Knight	10	Tank	4	42	Item - Death Knight T10 Tank 4P Bonus
+64818	Druid	8	Balance	2	107	Item - Druid T8 Balance 2P Bonus
+64824	Druid	8	Balance	4	42	Item - Druid T8 Balance 4P Bonus
+64752	Druid	8	Feral	2	42	Item - Druid T8 Feral 2P Bonus
+64754	Druid	8	Feral	4	107	Item - Druid T8 Feral 4P Bonus
+64756	Druid	8	Restoration	2	108	Item - Druid T8 Restoration 2P Bonus
+64760	Druid	8	Restoration	4	4	Item - Druid T8 Restoration 4P Bonus
+67125	Druid	9	Balance	2	286	Item - Druid T9 Balance 2P Bonus (Moonfire)
+67126	Druid	9	Balance	4	108	Item - Druid T9 Balance 4P Bonus (Starfire)
+67121	Druid	9	Feral	2	107	Item - Druid T9 Feral 2P Bonus
+67123	Druid	9	Feral	4	107	Item - Druid T9 Feral 4P Bonus
+67127	Druid	9	Restoration	2	107	Item - Druid T9 Restoration 2P Bonus (Nourish)
+67128	Druid	9	Restoration	4	286	Item - Druid T9 Restoration 4P Bonus (Rejuvenation)
+70718	Druid	10	Balance	2	4	Item - Druid T10 Balance 2P Bonus
+70723	Druid	10	Balance	4	4	Item - Druid T10 Balance 4P Bonus
+70724	Druid	10	Feral	2	108	Item - Druid T10 Feral 2P Bonus
+70726	Druid	10	Feral	4	286	Item - Druid T10 Feral 4P Bonus
+70658	Druid	10	Restoration	2	4	Item - Druid T10 Restoration 2P Bonus
+70664	Druid	10	Restoration	4	4	Item - Druid T10 Restoration 4P Bonus (Rejuvenation)
+64854	Hunter	8		2	108	Item - Hunter T8 2P Bonus
+64860	Hunter	8		4	42	Item - Hunter T8 4P Bonus
+67150	Hunter	9		2	286	Item - Hunter T9 2P Bonus
+67151	Hunter	9		4	42	Item - Hunter T9 4P Bonus (Steady Shot)
+70727	Hunter	10		2	42	Item - Hunter T10 2P Bonus
+70730	Hunter	10		4	42	Item - Hunter T10 4P Bonus
+64867	Mage	8		2	42	Item - Mage T8 2P Bonus
+64869	Mage	8		4	4	Item - Mage T8 4P Bonus
+67164	Mage	9		2	108	Item - Mage T9 2P Bonus
+67185	Mage	9		4	107	Item - Mage T9 4P Bonus (Fireball, Frostbolt, Frostfire Bolt, and Arcane Blast)
+70752	Mage	10		2	4	Item - Mage T10 2P Bonus
+70748	Mage	10		4	42	Item - Mage T10 4P Bonus
+64890	Paladin	8	Holy	2	4	Item - Paladin T8 Holy 2P Bonus
+64895	Paladin	8	Holy	4	4	Item - Paladin T8 Holy 4P Bonus
+64881	Paladin	8	Protection	2	108	Item - Paladin T8 Protection 2P Bonus
+64882	Paladin	8	Protection	4	42	Item - Paladin T8 Protection 4P Bonus
+64878	Paladin	8	Retribution	2	108	Item - Paladin T8 Retribution 2P Bonus
+64879	Paladin	8	Retribution	4	107	Item - Paladin T8 Retribution 4P Bonus
+67190	Paladin	9	Holy	2	107	Item - Paladin T9 Holy 2P Bonus (Judgement)
+67191	Paladin	9	Holy	4	226	Item - Paladin T9 Holy 4P Bonus (Flash of Light)
+67188	Paladin	9	Retribution	2	286	Item - Paladin T9 Retribution 2P Bonus (Righteous Vengeance)
+67189	Paladin	9	Retribution	4	107	Item - Paladin T9 Retribution 4P Bonus (Judgement)
+67186	Paladin	9	Tank	2	107	Item - Paladin T9 Tank 2P Bonus
+67187	Paladin	9	Tank	4	107	Item - Paladin T9 Tank 4P Bonus
+70755	Paladin	10	Holy	2	4	Item - Paladin T10 Holy 2P Bonus
+70756	Paladin	10	Holy	4	42	Item - Paladin T10 Holy 4P Bonus
+70758	Paladin	10	Protection	2	108	Item - Paladin T10 Protection 2P Bonus
+70761	Paladin	10	Protection	4	42	Item - Paladin T10 Protection 4P Bonus
+70765	Paladin	10	Retribution	2	4	Item - Paladin T10 Retribution 2P Bonus
+70762	Paladin	10	Retribution	4	108	Item - Paladin T10 Retribution 4P Bonus
+64910	Priest	8	Healer	2	107	Item - Priest T8 Healer 2P Bonus
+64912	Priest	8	Healer	4	42	Item - Priest T8 Healer 4P Bonus
+64906	Priest	8	Shadow	2	108	Item - Priest T8 Shadow 2P Bonus
+64908	Priest	8	Shadow	4	42	Item - Priest T8 Shadow 4P Bonus
+67201	Priest	9	Healing	2	4	Item - Priest T9 Healing 2P Bonus (Prayer of Mending)
+67202	Priest	9	Healing	4	4	Item - Priest T9 Healing 4P Bonus (Divine Aegis and Empowered Renew)
+67193	Priest	9	Shadow	2	107	Item - Priest T9 Shadow 2P Bonus (Vampiric Touch)
+67198	Priest	9	Shadow	4	107	Item - Priest T9 Shadow 4P Bonus (Mind Flay)
+70770	Priest	10	Healer	2	4	Item - Priest T10 Healer 2P Bonus
+70798	Priest	10	Healer	4	108	Item - Priest T10 Healer 4P Bonus
+70800	Priest	10	Shadow	2	107	Item - Priest T10 Shadow 2P Bonus
+70801	Priest	10	Shadow	4	107	Item - Priest T10 Shadow 4P Bonus
+64914	Rogue	8		2	42	Item - Rogue T8 2P Bonus
+64915	Rogue	8		4	108	Item - Rogue T8 4P Bonus
+67209	Rogue	9		2	42	Item - Rogue T9 2P Bonus (Rupture)
+67211	Rogue	9		4	107	Item - Rogue T9 4P Bonus (Hemorrhage, Sinister Strike, Backstab, and Mutilate)
+70805	Rogue	10		2	108	Item - Rogue T10 2P Bonus
+70803	Rogue	10		4	42	Item - Rogue T10 4P Bonus
+64925	Shaman	8	Elemental	2	108	Item - Shaman T8 Elemental 2P Bonus
+64928	Shaman	8	Elemental	4	4	Item - Shaman T8 Elemental 4P Bonus
+64916	Shaman	8	Enhancement	2	108	Item - Shaman T8 Enhancement 2P Bonus
+64917	Shaman	8	Enhancement	4	108	Item - Shaman T8 Enhancement 4P Bonus
+64921	Shaman	8	Restoration	2	107	Item - Shaman T8 Restoration 2P Bonus
+64922	Shaman	8	Restoration	4	107	Item - Shaman T8 Restoration 4P Bonus
+67227	Shaman	9	Elemental	2	107	Item - Shaman T9 Elemental 2P Bonus (Flame Shock)
+67228	Shaman	9	Elemental	4	4	Item - Shaman T9 Elemental 4P Bonus (Lava Burst)
+67220	Shaman	9	Enhancement	2	107	Item - Shaman T9 Enhancement 2P Bonus (Static Shock)
+67221	Shaman	9	Enhancment	4	108	Item - Shaman T9 Enhancment 4P Bonus (Stormstrike)
+67225	Shaman	9	Restoration	2	108	Item - Shaman T9 Restoration 2P Bonus (Riptide)
+67226	Shaman	9	Restoration	4	107	Item - Shaman T9 Restoration 4P Bonus (Chain Heal)
+70811	Shaman	10	Elemental	2	4	Item - Shaman T10 Elemental 2P Bonus
+70817	Shaman	10	Elemental	4	4	Item - Shaman T10 Elemental 4P Bonus
+70830	Shaman	10	Enhancement	2	42	Item - Shaman T10 Enhancement 2P Bonus
+70832	Shaman	10	Enhancement	4	4	Item - Shaman T10 Enhancement 4P Bonus
+70807	Shaman	10	Restoration	2	42	Item - Shaman T10 Restoration 2P Bonus
+70808	Shaman	10	Restoration	4	4	Item - Shaman T10 Restoration 4P Bonus
+64931	Warlock	8		2	108	Item - Warlock T8 2P Bonus
+64932	Warlock	8		4	107	Item - Warlock T8 4P Bonus
+67230	Warlock	9		2	107	Item - Warlock T9 2P Bonus
+67231	Warlock	9		4	108	Item - Warlock T9 4P Bonus (Immolate, Corruption, and Unstable Affliction)
+70839	Warlock	10		2	107	Item - Warlock T10 2P Bonus
+70841	Warlock	10		4	42	Item - Warlock T10 4P Bonus
+64938	Warrior	8	Melee	2	42	Item - Warrior T8 Melee 2P Bonus
+64939	Warrior	8	Melee	4	107	Item - Warrior T8 Melee 4P Bonus
+64933	Warrior	8	Protection	2	107	Item - Warrior T8 Protection 2P Bonus
+64936	Warrior	8	Protection	4	109	Item - Warrior T8 Protection 4P Bonus
+67234	Warrior	9	Melee	2	107	Item - Warrior T9 Melee 2P Bonus (Berserker Stance and Battle Stance)
+67268	Warrior	9	Melee	4	107	Item - Warrior T9 Melee 4P Bonus (Heroic Strike and Slam)
+67269	Warrior	9	Tank	2	107	Item - Warrior T9 Tank 2P Bonus (Taunt)
+67273	Warrior	9	Tank	4	107	Item - Warrior T9 Tank 4P Bonus (Shield Block)
+70854	Warrior	10	Melee	2	42	Item - Warrior T10 Melee 2P Bonus
+70847	Warrior	10	Melee	4	4	Item - Warrior T10 Melee 4P Bonus
+70843	Warrior	10	Protection	2	108	Item - Warrior T10 Protection 2P Bonus
+70844	Warrior	10	Protection	4	108	Item - Warrior T10 Protection 4P Bonus

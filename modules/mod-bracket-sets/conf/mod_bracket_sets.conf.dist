@@ -1,0 +1,20 @@
+[worldserver]
+
+########################################
+# mod-bracket-sets configuration
+########################################
+#
+#    BracketSets.Enable
+#        Description: Master switch for the bracket-locked tier set bonus system.
+#                     When 0, the module loads but skips all hook work. Equipped
+#                     items behave as vanilla (the engine's default set-effect
+#                     path applies whatever spell1..spell8 are configured in
+#                     item_set rows for itemsets 90101-90199).
+#                     When 1, the module's PlayerScript overrides the apply path:
+#                     it blocks the default set-effect spells for our itemsets
+#                     (90101-90199) and applies spec-morph bonuses from
+#                     bracket_set_bonus_map instead.
+#        Default:     1
+#
+
+BracketSets.Enable = 1

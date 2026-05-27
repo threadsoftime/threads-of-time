@@ -1,0 +1,55 @@
+spell_id	flavor	mechanic
+64938	The waters of Blackfathom remember every wound.	Your Rend deals 20% additional damage.
+64939	Each killing blow draws the depths' favor.	After landing a critical strike, your next Overpower costs no rage. Lasts 8 sec.
+67234	A drumbeat rises from the drowned halls, hungry and unending.	Your Cleave deals 15% additional damage.
+67268	Fury surges as freely as the undertow.	Your Heroic Strike has a 15% chance to cost no rage.
+64933	Shells of ancient leviathans lend their unyielding faces.	Your Shield Block grants 5% additional block value for 6 sec.
+64936	The temple's broken pillars whisper a slow, brutal cadence.	After casting Revenge, your next Thunder Clap costs 50% less rage. Lasts 5 sec.
+70755	The Tidescaller's blessing flows through your hands.	Your Flash of Light has a 10% chance to become instant.
+70756	Where the Light kisses brine, small mercies take root.	Your Holy Light has a 25% chance to apply a small heal-over-time.
+64881	A herald's cry cuts cleaner than any reef.	Your Hand of Reckoning generates 50% additional threat.
+64882	Holy fire scours the silt from every flagstone.	Your Consecration deals 20% additional damage per tick.
+64878	Justice burns even through the lightless trenches.	Your Seal of Righteousness deals 20% additional damage.
+64879	A verdict carried on currents, swift and certain.	Your Judgement deals 15% additional damage and critical strikes refund 2% of your maximum mana.
+64854	Beasts grown wild on tidewashed kelp answer the horn's call.	Your pet deals 5% additional damage.
+64860	The depths feed every creature that survives them.	Your pet regenerates health 50% faster while out of combat.
+67150	Your arrows carry the bite of jagged coral.	Your Arcane Shot reduces target armor by 5%. Lasts 8 sec.
+70724	The hunter who reads the current never misses twice.	After your Auto Shot critically strikes, your next Arcane Shot is guaranteed to critically strike. Lasts 8 sec.
+70727	Naga venom and seawater poison the same.	Your Serpent Sting deals 15% additional damage.
+70730	A spark in oil-slick water erupts louder beneath the waves.	Your Immolation Trap's initial damage is increased by 25%.
+64914	Cultist toxins, distilled in shells beneath the temple.	Your Garrote deals 20% additional damage.
+64915	Each gasping breath of the dying returns something to the killer.	Each tick of your Rupture has a 10% chance to restore 1 energy.
+67209	A blade slips between scales as easily as between ribs.	Your Sinister Strike has a 10% chance to restore 1 energy.
+67211	The longer the breath is held, the harder the kill.	Your Eviscerate deals 10% additional damage per combo point above 3.
+67186	Shadows pool deepest behind the unwary.	Your Backstab deals 10% additional damage when striking from behind.
+67187	The deep keeps no record of those who walk silent.	Your Vanish cooldown is reduced by 30 sec.
+67202	Pearl and prayer harden against the dark.	Your Power Word: Shield absorbs 10% more damage.
+70798	Beneath the ward, even old wounds drink deeper of the Light.	After casting Power Word: Shield, the target's healing received is increased by 5%. Lasts 8 sec.
+64910	Soft moonlight filters through fathoms of black water.	Each tick of your Renew has a 15% chance to heal for double.
+64912	Holy embers smolder where no flame should burn.	Your Holy Fire deals 25% additional damage over time.
+67193	The cultists' god-whisper splinters minds like rotten driftwood.	Your Mind Blast reduces target shadow resistance by 10. Lasts 8 sec.
+67198	What the shadow takes, the shadow also feeds.	Each tick of your Shadow Word: Pain restores 1% of your maximum health.
+67227	Lightning answers swiftest where the Tidescaller once walked.	Your Lightning Bolt critical strikes grant 2% haste. Lasts 6 sec.
+64925	Storms run unbroken across the sunless sea.	Your Lightning Bolt deals 5% additional damage, and its range is increased by 5 yards.
+67220	Static dances along the scales of every dying naga.	Your Lightning Shield deals 15% additional damage.
+67221	A torch left in the wet places of the world burns brightest.	Your Searing Totem deals 25% additional damage.
+67225	Water finds its course without effort or cost.	Your Healing Wave costs 10% less mana.
+67226	One wave readies the path the next will travel.	After casting Lesser Healing Wave, your next Healing Wave's cast time is reduced by 0.5 sec. Lasts 5 sec.
+64867	The last note of any spell-song carries the deepest weight.	Your Arcane Missiles' final tick has a 30% increased critical strike chance.
+67188	Echoes off coral walls lend the next casting unexpected force.	After casting Arcane Explosion, your next Arcane Missiles deals 10% additional damage. Lasts 8 sec.
+67164	Fire that finds purchase in drowned timber is slow to die.	Your Fireball's Ignite effect deals 25% additional damage.
+67185	Heat rises faster when there is nowhere for it to flee.	Your Fire Blast cooldown is reduced by 1 sec.
+67189	The cold of the trenches lingers in every captive thing.	Your Frost Nova's freeze duration is increased by 1 sec.
+70748	Ice that locks its prey shatters all it touches.	Your Frostbolt deals 30% additional damage against frozen targets.
+64931	The black temple sickens the flesh of all that visit it.	Your Corruption deals 15% additional damage.
+67231	Souls torn at the water's edge surrender twice over.	When you kill a target with Drain Soul, you regain 30% of your maximum mana.
+64932	The pact made beneath Aku'mai's gaze swells with shared malice.	Your pet deals 10% additional damage.
+67230	Blood and brine pass freely between bound things.	Your Health Funnel transfers 25% more health to your demon.
+70839	A second whisper of shadow falls before the first has faded.	After your Shadow Bolt critically strikes, your next Shadow Bolt's cast time is reduced by 0.5 sec. Lasts 6 sec.
+70841	Felfire takes root in waterlogged bone and refuses to leave.	Your Immolate's duration is increased by 6 sec.
+67125	Even drowned, the moon's eye watches over Elune's children.	Each tick of your Moonfire has a 15% increased critical strike chance.
+67126	Sunlight strikes the deeps as rarely as grace, and lingers as bright.	Your Wrath has a 10% chance to grant Nature's Grace — your next spell becomes instant. Lasts 8 sec.
+67121	The wild knows no waste in places this hungry.	Your Claw costs 5 less energy and your Maul costs 5 less rage.
+67123	A killing blow returns the breath spent earning it.	Your Maul has a 15% chance to refund its full rage cost.
+67127	Life persists where roots find footholds in stone and salt.	Your Rejuvenation's first periodic tick heals for double.
+67128	Petals bloom across the abyssal floor.	Your Regrowth's final bloom has a 25% chance to splash 2 nearby allies for 30% of its value within 8 yards.
