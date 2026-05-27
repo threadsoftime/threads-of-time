@@ -15,8 +15,6 @@
  * with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifdef MOD_PLAYERBOTS
-
 #ifndef _PlayerbotsDatabase_H
 #define _PlayerbotsDatabase_H
 
@@ -114,7 +112,5 @@ public:
     //- Loads database type specific prepared statements
     void DoPrepareStatements() override;
 };
-
-#endif
 
 #endif

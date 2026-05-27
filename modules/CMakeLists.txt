@@ -308,10 +308,18 @@ set_target_properties(modules
       "modules")
 
 # Generate precompiled header
-if (USE_SCRIPTPCH)
-  list(APPEND ALL_SCRIPT_PROJECTS modules ${DYNAMIC_SCRIPT_MODULE_PROJECTS})
-  add_cxx_pch("${ALL_SCRIPT_PROJECTS}" ${PRIVATE_PCH_HEADER})
-endif()
+# NOTE: PCH for the modules target is intentionally disabled. The modules
+# PCH would compile ModulesPCH.h -> ObjectMgr.h -> DatabaseEnv.h *without*
+# -DMOD_PLAYERBOTS (the PCH target runs before the PRIVATE compile option is
+# applied via add_cxx_pch), causing clang's PCH to cache DatabaseEnv.h
+# without PlayerbotsDatabase, then suppress the re-include from disk for
+# all TUs that include DatabaseEnv.h. Files that need PlayerbotsDatabase
+# must include DatabaseEnv.h explicitly AND must compile without the PCH
+# masking the MOD_PLAYERBOTS flag.
+# if (USE_SCRIPTPCH)
+#   list(APPEND ALL_SCRIPT_PROJECTS modules ${DYNAMIC_SCRIPT_MODULE_PROJECTS})
+#   add_cxx_pch("${ALL_SCRIPT_PROJECTS}" ${PRIVATE_PCH_HEADER})
+# endif()
 
 # Remove all shared libraries in the installl directory which
 # are contained in the static library already.

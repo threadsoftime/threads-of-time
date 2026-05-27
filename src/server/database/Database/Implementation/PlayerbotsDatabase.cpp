@@ -15,8 +15,6 @@
  * with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifdef MOD_PLAYERBOTS
-
 #include "PlayerbotsDatabase.h"
 #include "MySQLPreparedStatement.h"
 
@@ -125,5 +123,3 @@ PlayerbotsDatabaseConnection::PlayerbotsDatabaseConnection(ProducerConsumerQueue
 PlayerbotsDatabaseConnection::~PlayerbotsDatabaseConnection()
 {
 }
-
-#endif
