@@ -53,6 +53,30 @@ rsync -a --delete \
     --exclude='/env/' \
     "$REPO_ROOT/" "$HEIMDAL:${BUILD_DIR}/"
 
+step "Populating mod-playerbots into build tree (build-time dependency, not vendored)"
+# mod-playerbots is an external operator-installed dependency at RUNTIME, but
+# mod-harness-bridge + (future) mod-agenticbots glue both need its headers at
+# BUILD TIME (PlayerbotAI*, GET_PLAYERBOT_AI macro, Bot/LlmAgent/* headers).
+# Per spec §3.6 + §6.1: operators source-building must clone mod-playerbots
+# into modules/ before building; pre-built containers (the primary distribution
+# path) have it baked in by ToT's CI. Here on Heimdal we rsync from the
+# existing install at /opt/containers/wow/source/modules/mod-playerbots/.
+# Falls back to git clone if the local install isn't present.
+ssh "$HEIMDAL" "
+    set -e
+    if [ -d /opt/containers/wow/source/modules/mod-playerbots ]; then
+        echo 'Using existing mod-playerbots install at /opt/containers/wow/source/modules/mod-playerbots'
+        rsync -a --delete --exclude='.git' \\
+            /opt/containers/wow/source/modules/mod-playerbots/ \\
+            ${BUILD_DIR}/modules/mod-playerbots/
+    else
+        echo 'Local mod-playerbots install not found; cloning upstream'
+        git clone --depth=1 https://github.com/liyunfan1223/mod-playerbots.git \\
+            ${BUILD_DIR}/modules/mod-playerbots
+    fi
+    ls ${BUILD_DIR}/modules/mod-playerbots/src/ | head -5
+"
+
 step "Pinning libmysqlclient to 8.0.45-0ubuntu0.22.04.1 in AC Dockerfile (kb_57b453cd Step 2.5)"
 # Stock upstream Dockerfile installs libmysqlclient21 unpinned, which apt
 # resolves to whatever Ubuntu 22.04 ships at build time. The acore/ac-wotlk-*
