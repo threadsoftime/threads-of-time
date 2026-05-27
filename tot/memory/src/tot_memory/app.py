@@ -1,7 +1,16 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 from fastapi import FastAPI
 from tot_memory.config import Settings
-from tot_memory.routes import health, list_eps, read, recall, search, update, write
+from tot_memory.routes import (
+    delete,
+    health,
+    list_eps,
+    read,
+    recall,
+    search,
+    update,
+    write,
+)
 
 
 def create_app() -> FastAPI:
@@ -17,4 +26,5 @@ def create_app() -> FastAPI:
     app.include_router(recall.router)
     app.include_router(search.router)
     app.include_router(update.router)
+    app.include_router(delete.router)
     return app
