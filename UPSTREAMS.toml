@@ -20,7 +20,18 @@ note = "Stock AC merge-base of mod-playerbots/azerothcore-wotlk@f570462f"
 # is expected to work with any release >= 'min'.
 
 [playerbots-dependency]
-repo   = "https://github.com/liyunfan1223/mod-playerbots"
-min    = "FILL_IN_AFTER_AGENTICBOTS_AUTHORING"   # Set in Phase 5
-tested = "FILL_IN_AFTER_AGENTICBOTS_AUTHORING"   # Set in Phase 5
-note   = "Required for mod-agenticbots; see modules/mod-agenticbots/README.md for the dependency contract"
+repo        = "https://github.com/liyunfan1223/mod-playerbots"
+min         = "a02e4ca5c17e636ac0e36277108480293ab8358c"
+tested      = "a02e4ca5c17e636ac0e36277108480293ab8358c"
+tested_date = "2026-05-22"
+note        = """Required for mod-agenticbots; see modules/mod-agenticbots/README.md for the dependency contract.
+
+mod-agenticbots uses only mod-playerbots's public API (Strategy/Action/Trigger
+bases, AI_VALUE/AI_VALUE2 macros, GET_PLAYERBOT_AI, PlayerbotAI public methods).
+These have been stable in mod-playerbots for a long time. The min and tested
+pins reflect the exact commit ToT was developed + verified against; operators
+running newer mod-playerbots versions are likely OK but unverified until CI
+validates them (Plan 6 nightly drift job).
+
+BFD-tuned strategies require an upstream PR (see tot/internal-docs/agenticbots-upstream-prs.md);
+not blocking 1.0.0 — bots play BFD with generic strategies until the PR lands."""
