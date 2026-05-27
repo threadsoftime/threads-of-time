@@ -1,4 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-from . import health, recall, write
+from . import health, read, recall, write
 
-__all__ = ["health", "recall", "write"]
+__all__ = ["health", "read", "recall", "write"]
