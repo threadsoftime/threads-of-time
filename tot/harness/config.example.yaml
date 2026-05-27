@@ -1,0 +1,31 @@
+# Heimdal agentic-harness daemon config.
+# Deployed location on Heimdal: /opt/containers/wow/etc/harness/tokens.yaml
+# (root-owned, mode 600).
+
+max_augmented_bots: 1
+ac_bridge_url: "http://127.0.0.1:8091"
+audit_path: "/var/log/harness/daemon.jsonl"
+listen_address: "0.0.0.0:8090"
+
+tokens:
+  - token: "REPLACE_WITH_smoke_test_token"
+    identity: "smoke-test-runner"
+    scope: ["gm.*", "bot.*", "obs.*"]
+    note: "Phase 1.5 set-bonus smoke harness (laptop pytest)"
+
+  - token: "REPLACE_WITH_gm_token"
+    identity: "gm.tbrack"
+    scope: ["gm.*", "bot.*", "obs.*"]
+    note: "GM agent (V2 MCP)"
+
+  - token: "REPLACE_WITH_claude_code_token"
+    identity: "claude-code"
+    scope: ["gm.*", "bot.*", "obs.*"]
+    note: "Claude Code MCP client (laptop), reaches /mcp/mcp transport"
+
+  # V3 example (not in V1):
+  # - token: "REPLACE_WITH_bot_token"
+  #   identity: "bot.Krak'tar"
+  #   scope: ["bot.self.*", "obs.self.*"]
+  #   bound_to_guid: 12345
+  #   augmented: true

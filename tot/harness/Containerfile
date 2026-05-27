@@ -1,0 +1,21 @@
+# harness-daemon — Heimdal agentic harness (V1)
+#
+# Built on Heimdal via tools/harness-daemon/build.sh into
+# localhost/harness-daemon:current.
+
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+
+COPY pyproject.toml /app/
+COPY src /app/src
+
+RUN pip install --no-cache-dir . && \
+    python -c "import harness_daemon; print(harness_daemon.__version__)"
+
+EXPOSE 8090
+ENTRYPOINT ["harness-daemon"]
+CMD ["serve", "--config", "/etc/harness/tokens.yaml"]
