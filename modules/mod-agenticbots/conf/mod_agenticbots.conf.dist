@@ -1,0 +1,10 @@
+[mod-agenticbots]
+
+#
+# Agenticbots.Enabled
+#    Description: Toggle agenticbots strategies on/off
+#    Default:     1 (enabled)
+#
+Agenticbots.Enabled = 1
+
+# Additional configuration will land as features migrate from patches/mod-playerbots-bfd/
