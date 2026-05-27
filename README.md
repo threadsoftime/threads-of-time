@@ -22,7 +22,7 @@ See [`docs/superpowers/specs/2026-05-24-threads-of-time-1.0.0-design.md`](docs/s
 
 ## License
 
-AGPL-3.0-or-later. See [LICENSE](LICENSE) for the full text. See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor license.
+GPL-2.0-or-later, matching [AzerothCore](https://github.com/azerothcore/azerothcore-wotlk)'s license. See [LICENSE](LICENSE) for the full text. See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor license.
 
 ## Dependencies
 

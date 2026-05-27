@@ -4,7 +4,7 @@ Thank you for considering a contribution. This document covers the contributor l
 
 ## License of contributions
 
-By submitting a pull request to this repository, you certify that you have the right to license your contribution under AGPL-3.0-or-later and you agree to do so. This is the "inbound = outbound" model — your contribution ships under the same license as the project.
+By submitting a pull request to this repository, you certify that you have the right to license your contribution under GPL-2.0-or-later and you agree to do so. This is the "inbound = outbound" model — your contribution ships under the same license as the project (matching AzerothCore's license).
 
 No CLA, no DCO sign-off, no copyright assignment required.
 
@@ -21,10 +21,10 @@ No CLA, no DCO sign-off, no copyright assignment required.
 All new source files require an SPDX header on line 1:
 
 ```
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-2.0-or-later
 ```
 
-(Use `# SPDX-License-Identifier: AGPL-3.0-or-later` for Python and shell.)
+(Use `# SPDX-License-Identifier: GPL-2.0-or-later` for Python and shell.)
 
 ## Where to get help
 
