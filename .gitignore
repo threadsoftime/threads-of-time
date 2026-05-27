@@ -111,3 +111,27 @@ local.properties
 #  !modules/yourmodule
 #
 # ==================
+
+# === Threads of Time additions ===
+# Build artifacts
+/build/
+release-artifacts/
+
+# Sidecar dev artifacts
+tot/*/__pycache__/
+tot/*/.pytest_cache/
+tot/*/*.egg-info/
+tot/*/.venv/
+
+# Local operator state
+secrets/
+data/
+
+# Editor / OS noise
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# Logs
+*.log

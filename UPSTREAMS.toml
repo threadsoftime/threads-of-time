@@ -1,0 +1,26 @@
+# Threads of Time — pinned upstream versions.
+#
+# ToT forks stock AzerothCore and carries its own commits on top. The pinned SHA
+# below is the base commit ToT diverges from. AC upgrade workflow:
+#   1. git fetch upstream-ac master
+#   2. git rebase --onto upstream-ac/master <current pinned SHA> dev
+#   3. If clean: bump [ac].sha here, commit, smoke-test, ship as a PATCH release
+#
+# See spec §8 for the full AC upgrade workflow.
+
+[ac]
+repo = "https://github.com/azerothcore/azerothcore-wotlk"
+sha  = "6d83e35d19f65a0124b7f6e9588289db05eda0df"
+note = "Stock AC merge-base of mod-playerbots/azerothcore-wotlk@f570462f"
+
+# mod-playerbots is an external runtime dependency, not a vendored upstream.
+# Operators install mod-playerbots themselves (the install script in Plan 5
+# verifies presence and version). This block expresses the compatibility
+# contract — ToT 1.0.0 is built and tested against the 'tested' version and
+# is expected to work with any release >= 'min'.
+
+[playerbots-dependency]
+repo   = "https://github.com/liyunfan1223/mod-playerbots"
+min    = "FILL_IN_AFTER_AGENTICBOTS_AUTHORING"   # Set in Phase 5
+tested = "FILL_IN_AFTER_AGENTICBOTS_AUTHORING"   # Set in Phase 5
+note   = "Required for mod-agenticbots; see modules/mod-agenticbots/README.md for the dependency contract"
