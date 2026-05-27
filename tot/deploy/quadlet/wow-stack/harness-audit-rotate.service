@@ -1,0 +1,7 @@
+[Unit]
+Description=Harness audit rotation
+ConditionPathExists=/var/log/harness/daemon.jsonl
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/harness-rotate-audit.sh

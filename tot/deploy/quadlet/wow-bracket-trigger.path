@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch for in-game bracket advance flag
+After=wow-worldserver.service
+
+[Path]
+PathExists=/var/lib/wow-server/advance-to-bracket
+Unit=wow-bracket-trigger.service
+
+[Install]
+WantedBy=multi-user.target

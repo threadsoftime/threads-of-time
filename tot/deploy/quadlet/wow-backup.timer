@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily AzerothCore Database Backup
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

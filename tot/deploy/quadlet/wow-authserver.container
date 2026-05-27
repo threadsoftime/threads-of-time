@@ -1,0 +1,21 @@
+[Unit]
+Description=WoW Auth Server
+Requires=wow-database.service
+After=wow-database.service
+
+[Container]
+ContainerName=wow-authserver
+Image=docker.io/acore/ac-wotlk-authserver:master
+Pod=wow-server.pod
+Volume=/opt/containers/wow/etc:/azerothcore/env/dist/etc:Z
+Volume=/opt/containers/wow/logs:/azerothcore/env/dist/logs:Z
+EnvironmentFile=/opt/containers/wow/.env
+Environment=AC_LOGS_DIR=/azerothcore/env/dist/logs
+Environment=AC_TEMP_DIR=/azerothcore/env/dist/temp
+PodmanArgs=--tty
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target default.target

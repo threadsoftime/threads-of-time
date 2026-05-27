@@ -1,0 +1,12 @@
+[Unit]
+Description=WoW Server Pod (AzerothCore)
+
+[Pod]
+PodName=wow-server
+PublishPort=3724:3724
+PublishPort=8085:8085
+PublishPort=7878:7878
+PublishPort=192.168.1.3:8099:8099
+
+[Install]
+WantedBy=multi-user.target default.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily wow log rotation + aggregation
+Requires=wow-log-rotate.service
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly dungeon-progress capture
+Requires=wow-dungeon-progress.service
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target

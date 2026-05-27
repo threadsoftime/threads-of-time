@@ -1,0 +1,22 @@
+[Unit]
+Description=WoW Database (MySQL 8.4)
+Requires=wow-server-pod.service
+After=wow-server-pod.service
+
+[Container]
+ContainerName=wow-database
+Image=docker.io/library/mysql:8.4
+Pod=wow-server.pod
+Volume=wow-database.volume:/var/lib/mysql:Z
+EnvironmentFile=/opt/containers/wow/.env
+HealthCmd=mysqladmin ping -h 127.0.0.1 -uroot -p${MYSQL_ROOT_PASSWORD}
+HealthInterval=10s
+HealthTimeout=5s
+HealthRetries=10
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target default.target

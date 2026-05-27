@@ -1,0 +1,12 @@
+[Unit]
+Description=AzerothCore Database Backup
+After=wow-database.service
+Requires=wow-database.service
+ConditionPathIsDirectory=/var/mnt/nas/backups
+
+[Service]
+Type=oneshot
+EnvironmentFile=/opt/containers/wow/.env
+ExecStart=/usr/local/bin/wow-backup.sh
+StandardOutput=journal
+StandardError=journal

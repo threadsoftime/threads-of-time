@@ -1,0 +1,10 @@
+[Unit]
+Description=Run bracket advance triggered by in-game command
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '\
+    N=$(cat /var/lib/wow-server/advance-to-bracket || echo 0); \
+    rm -f /var/lib/wow-server/advance-to-bracket; \
+    [ "$N" -ge 1 ] && [ "$N" -le 7 ] && /usr/local/bin/advance-bracket.sh "$N" \
+'

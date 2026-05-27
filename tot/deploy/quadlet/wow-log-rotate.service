@@ -1,0 +1,7 @@
+[Unit]
+Description=Daily aggregation of F4 P4 ah/p4 log telemetry + Server.log truncation
+After=wow-database.service wow-worldserver.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/wow-log-rotate.sh

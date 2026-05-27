@@ -1,0 +1,30 @@
+[Unit]
+Description=WoW World Server
+Requires=wow-database.service
+After=wow-database.service
+
+[Container]
+ContainerName=wow-worldserver
+Image=localhost/wow-server:current
+Pod=wow-server.pod
+Volume=/opt/containers/wow/etc:/azerothcore/env/dist/etc:Z
+Volume=/opt/containers/wow/logs:/azerothcore/env/dist/logs:Z
+Volume=/opt/containers/wow/sql:/azerothcore/env/dist/sql-custom:Z,ro
+Volume=wow-client-data.volume:/azerothcore/env/dist/data:Z,ro
+# Modules source tree — required at runtime for mod-playerbots to auto-populate
+# its DB schema (it sources SQL files from /azerothcore/modules/mod-playerbots/data/sql/).
+# Populated during the initial build; persists in /opt/containers/wow/source/.
+Volume=/opt/containers/wow/source/modules:/azerothcore/modules:Z,ro
+EnvironmentFile=/opt/containers/wow/.env
+Environment=AC_DATA_DIR=/azerothcore/env/dist/data
+Environment=AC_LOGS_DIR=/azerothcore/env/dist/logs
+# --tty + --interactive equivalents — needed so gm.sh can attach to the
+# worldserver console via `podman attach --sig-proxy=false`.
+PodmanArgs=--tty --interactive
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target default.target
