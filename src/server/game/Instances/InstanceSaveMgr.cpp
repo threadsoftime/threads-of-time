@@ -579,7 +579,11 @@ void InstanceSaveMgr::_ResetOrWarnAll(uint32 mapid, Difficulty difficulty, bool 
         // calculate the next reset time
         uint32 diff = sWorld->getIntConfig(CONFIG_INSTANCE_RESET_TIME_HOUR) * HOUR;
 
-        uint32 period = uint32(((mapDiff->resetTime * sWorld->getRate(RATE_INSTANCE_RESET_TIME)) / DAY) * DAY);
+        // Heimdal: BFD (map 48) is overridden to a 3-day rolling reset.
+        // See patches/ac-bfd-raid/0003-bfd-raid-3day-lockout.patch.
+        uint32 period = (mapid == 48)
+            ? uint32(3 * DAY)
+            : uint32(((mapDiff->resetTime * sWorld->getRate(RATE_INSTANCE_RESET_TIME)) / DAY) * DAY);
         if (period < DAY)
             period = DAY;
 
