@@ -1,0 +1,16 @@
+[worldserver]
+
+########################################
+# mod-rotation-mode configuration
+########################################
+#
+#    RotationMode.Enable
+#        Description: Master switch for the rotation-mode wrapper. When 0,
+#                     the .heimbot chat command is not registered and the
+#                     PlayerScript skips all hook work. When 1, the module
+#                     activates and per-character heimbot_settings drive
+#                     bot-AI behavior on the player's character.
+#        Default:     1
+#
+
+RotationMode.Enable = 1
