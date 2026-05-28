@@ -61,7 +61,7 @@ async def test_cold_start_enrolls_n_bots():
     async def fetcher() -> WorldSnapshot:
         return snapshot
 
-    async def enroll_fn(g: int) -> None:
+    async def enroll_fn(g: int, snapshot=None) -> None:
         enrolled.add(g)
         # Mirror into state_store so _apply's post-apply list_active() is accurate.
         try:
@@ -136,7 +136,7 @@ async def test_player_logs_out_releases_all_phase_a():
         released.add(g)
         state_store.set_status(g, "released")
 
-    async def enroll_fn(g: int) -> None:
+    async def enroll_fn(g: int, snapshot=None) -> None:
         pass  # no enrolls expected in this scenario
 
     gate = SubsetGate(
@@ -191,7 +191,7 @@ async def test_player_logs_out_transitions_to_reduced_phase_b():
     async def fetcher() -> WorldSnapshot:
         return snap_empty
 
-    async def enroll_fn(g: int) -> None:
+    async def enroll_fn(g: int, snapshot=None) -> None:
         pass
 
     async def release_fn(g: int) -> None:

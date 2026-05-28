@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import logging
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -211,8 +212,97 @@ def create_app() -> FastAPI:
                 bots_raw = await harness.call("obs.list_bot_population", {})
                 return parse_world_snapshot(players_raw, bots_raw)
 
-            async def _enroll_via_api(bot_guid: int) -> None:
-                supervisor.enroll_bot(bot_guid)
+            async def _enroll_via_api(
+                bot_guid: int,
+                bot_snapshot: BotSnapshot | None = None,
+            ) -> None:
+                """Three-case enroll path used by SubsetGate.
+
+                1. Bot in living_bots with status='active' → idempotent start().
+                2. Bot in living_bots with status='released' → reactivate + start.
+                3. Bot missing → bootstrap default personality from BotSnapshot,
+                   then enroll + start. Bootstrap mirrors POST /enroll: pull
+                   identity from obs.get_state if available, morph v2 fields
+                   via LLM if available, seed memory cache. Failures here are
+                   non-fatal — log + propagate so SubsetGate's backoff kicks in.
+                """
+                existing = state_store.get_bot(bot_guid)
+                if existing is not None and existing.status == "active":
+                    supervisor.start(bot_guid)
+                    return
+                if existing is not None and existing.status == "released":
+                    state_store.reactivate(bot_guid)
+                    supervisor.start(bot_guid)
+                    return
+
+                # Bot is brand new — must bootstrap.
+                if bot_snapshot is None:
+                    raise RuntimeError(
+                        f"enroll_via_api: bot_guid={bot_guid} not in living_bots "
+                        f"and no BotSnapshot provided for bootstrap"
+                    )
+                from brain_sidecar.models import PersonalityCard
+                seed = PersonalityCard(
+                    name=bot_snapshot.name,
+                    race="Unknown",
+                    **{"class": "Unknown"},
+                    backstory="Adventurer encountered in the world.",
+                    talkativeness=0.5,
+                    courage=0.5,
+                    greed=0.3,
+                    attitude_to_master=0.0,
+                )
+                # Auto-populate name/race/class via obs.get_state — best-effort.
+                try:
+                    raw = await asyncio.wait_for(
+                        harness.call("obs.get_state", {"target_guid": bot_guid}),
+                        timeout=5.0,
+                    )
+                    obs = raw.get("result", raw) if isinstance(raw, dict) else {}
+                    self_obj = obs.get("self", {}) if isinstance(obs, dict) else {}
+                    live_name = self_obj.get("name") or ""
+                    live_race = self_obj.get("race") or ""
+                    live_class = self_obj.get("class") or ""
+                    if live_name and live_race and live_class:
+                        seed.name = live_name
+                        seed.race = live_race
+                        seed.class_ = live_class
+                except Exception as exc:
+                    log.warning(
+                        "subset_gate enroll bot_guid=%d: obs.get_state failed (%s); "
+                        "keeping seed values", bot_guid, exc,
+                    )
+                # Personality v2 morph — best-effort, never blocking.
+                if llm_client is not None:
+                    try:
+                        from brain_sidecar.morph import morph_personality
+                        seed = await morph_personality(seed, llm_client)
+                    except Exception as e:
+                        log.warning(
+                            "subset_gate enroll bot_guid=%d: morph_personality "
+                            "raised (%s); proceeding with seed card", bot_guid, e,
+                        )
+                # State store row first (so list_active() sees it before start).
+                now_ms = int(time.time() * 1000)
+                try:
+                    state_store.enroll(
+                        bot_guid=bot_guid,
+                        enrolled_at_ms=now_ms,
+                        personality_seed=seed,
+                    )
+                except ValueError:
+                    # Race: another path enrolled between get_bot and now. Treat
+                    # as success and continue to start.
+                    pass
+                # Seed personality cache so first tick can read without MCP RTT.
+                try:
+                    await personality_cache.seed(bot_guid, seed)
+                except Exception as e:
+                    log.warning(
+                        "subset_gate enroll bot_guid=%d: personality_cache.seed "
+                        "failed (%s); first tick will cold-fetch", bot_guid, e,
+                    )
+                supervisor.start(bot_guid)
 
             async def _release_via_api(bot_guid: int) -> None:
                 await supervisor.release_bot(bot_guid)

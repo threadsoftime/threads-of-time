@@ -361,8 +361,51 @@ def test_apply_calls_enroll_release_and_set_tier():
     asyncio.run(gate._apply(decision))
 
     release_fn.assert_awaited_once_with(1)
-    enroll_fn.assert_awaited_once_with(4)
+    enroll_fn.assert_awaited_once_with(4, None)
     set_tier_calls = state_store.set_tier.call_args_list
     assert any(c.args == (2, "full") for c in set_tier_calls)
     assert any(c.args == (3, "reduced") for c in set_tier_calls)
     assert any(c.args == (4, "full") for c in set_tier_calls)
+
+
+def test_apply_passes_bot_snapshot_to_enroll_fn():
+    """B4: enroll_fn receives the matching BotSnapshot so it can bootstrap missing bots."""
+    state_store = MagicMock()
+    state_store.list_active.return_value = iter([])
+    state_store.list_pinned.return_value = []
+    state_store.get_hysteresis.return_value = (0, 0)
+
+    enroll_fn = AsyncMock()
+    release_fn = AsyncMock()
+
+    bot_5 = BotSnapshot(bot_guid=5, name="Eve", map_id=0,
+                       x=1.0, y=2.0, z=3.0, level=12)
+    bot_7 = BotSnapshot(bot_guid=7, name="Gabe", map_id=0,
+                       x=4.0, y=5.0, z=6.0, level=14)
+    snapshot = WorldSnapshot(players=(), bots=(bot_5, bot_7))
+
+    gate = SubsetGate(
+        state_store=state_store,
+        snapshot_fetcher=AsyncMock(return_value=snapshot),
+        enroll_fn=enroll_fn,
+        release_fn=release_fn,
+        config=_cfg(),
+    )
+
+    decision = SubsetDecision(
+        target_living_set=frozenset({5, 7, 99}),
+        sticky_pinned=frozenset(),
+        proximity_picks=frozenset({5, 7, 99}),
+        to_enroll=frozenset({5, 7, 99}),  # 99 is not in the snapshot
+        to_release=frozenset(),
+        to_full=frozenset(),
+        to_reduced=frozenset(),
+        skipped_due_to_backoff=frozenset(),
+    )
+    asyncio.run(gate._apply(decision, snapshot=snapshot))
+
+    # Each enroll_fn call was made with the matching BotSnapshot (or None when absent).
+    by_guid = {c.args[0]: c.args[1] for c in enroll_fn.await_args_list}
+    assert by_guid[5] is bot_5
+    assert by_guid[7] is bot_7
+    assert by_guid[99] is None

@@ -250,7 +250,7 @@ def _reconcile(
 # ---------------------------------------------------------------------------
 
 SnapshotFetcher = Callable[[], Awaitable[WorldSnapshot]]
-EnrollFn = Callable[[int], Awaitable[None]]
+EnrollFn = Callable[[int, Optional[BotSnapshot]], Awaitable[None]]
 ReleaseFn = Callable[[int], Awaitable[None]]
 
 
@@ -300,7 +300,7 @@ class SubsetGate:
             hysteresis=hysteresis,
             config=self.config,
         )
-        await self._apply(decision)
+        await self._apply(decision, snapshot=snapshot)
         return decision
 
     def _expired_backoff_set(self) -> frozenset[int]:
@@ -309,16 +309,28 @@ class SubsetGate:
         self.backoff_state = live
         return frozenset(live.keys())
 
-    async def _apply(self, decision: SubsetDecision) -> None:
+    async def _apply(
+        self,
+        decision: SubsetDecision,
+        *,
+        snapshot: Optional[WorldSnapshot] = None,
+    ) -> None:
         for bot_guid in decision.to_release:
             try:
                 await self.release_fn(bot_guid)
             except Exception:
                 log.exception("subset gate release failed bot_guid=%d", bot_guid)
 
+        # Build per-bot snapshot lookup so enroll_fn can bootstrap missing bots
+        # (B4: new bots picked from population need name/level for personality
+        # bootstrap; snapshot is the authoritative source).
+        bot_by_guid: dict[int, BotSnapshot] = {}
+        if snapshot is not None:
+            bot_by_guid = {b.bot_guid: b for b in snapshot.bots}
+
         for bot_guid in decision.to_enroll:
             try:
-                await self.enroll_fn(bot_guid)
+                await self.enroll_fn(bot_guid, bot_by_guid.get(bot_guid))
             except Exception:
                 log.exception("subset gate enroll failed bot_guid=%d", bot_guid)
                 self.backoff_state[bot_guid] = time.time() + self.config.enroll_backoff_s

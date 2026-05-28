@@ -120,3 +120,45 @@ def test_set_pin_and_list_pinned(tmp_path):
     store.set_pin(1, False)
     assert store.list_pinned() == [3]
     store.close()
+
+
+# ---------------------------------------------------------------------------
+# B4 — reactivate (flip status='active' + reset hysteresis atomically)
+# ---------------------------------------------------------------------------
+
+def test_reactivate_released_bot_resets_status_and_hysteresis(tmp_path):
+    db = tmp_path / "test.sqlite"
+    store = StateStore(str(db))
+    store.migrate()
+    store.enroll(bot_guid=1, enrolled_at_ms=0, personality_seed=_make_personality())
+    store.set_status(1, "released")
+    store.bump_hysteresis(1, in_range=False)
+    store.bump_hysteresis(1, in_range=False)
+    assert store.get_hysteresis(1) == (0, 2)
+    store.reactivate(1)
+    bot = store.get_bot(1)
+    assert bot is not None and bot.status == "active"
+    assert store.get_hysteresis(1) == (0, 0)
+    store.close()
+
+
+def test_reactivate_already_active_is_idempotent(tmp_path):
+    db = tmp_path / "test.sqlite"
+    store = StateStore(str(db))
+    store.migrate()
+    store.enroll(bot_guid=1, enrolled_at_ms=0, personality_seed=_make_personality())
+    store.bump_hysteresis(1, in_range=True)
+    store.reactivate(1)
+    bot = store.get_bot(1)
+    assert bot is not None and bot.status == "active"
+    assert store.get_hysteresis(1) == (0, 0)
+    store.close()
+
+
+def test_reactivate_unknown_bot_no_op(tmp_path):
+    db = tmp_path / "test.sqlite"
+    store = StateStore(str(db))
+    store.migrate()
+    store.reactivate(9999)
+    assert store.get_bot(9999) is None
+    store.close()

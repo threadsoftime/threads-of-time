@@ -219,6 +219,20 @@ class StateStore:
             )
             return (in_ticks, out_ticks)
 
+    def reactivate(self, bot_guid: int) -> None:
+        """Flip a bot back to status='active' and reset hysteresis counters.
+
+        Used by SubsetGate when re-enrolling a bot whose status is 'released'
+        (e.g., warm-cache eviction). Atomic; no-op if the bot doesn't exist.
+        """
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE living_bots "
+                "SET status='active', in_range_ticks=0, out_of_range_ticks=0 "
+                "WHERE bot_guid = ?",
+                (bot_guid,),
+            )
+
     def set_pin(self, bot_guid: int, pinned: bool) -> None:
         with self._write_lock:
             self._conn.execute(

@@ -48,7 +48,7 @@ def _make_stub_gate(state_store, *, phase_b_enabled: bool = False):
         from brain_sidecar.subset_gate import WorldSnapshot
         return WorldSnapshot(players=(), bots=())
 
-    async def _enroll(g): pass
+    async def _enroll(g, snapshot=None): pass
     async def _release(g): pass
 
     return SubsetGate(

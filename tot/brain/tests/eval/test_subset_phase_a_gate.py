@@ -115,7 +115,7 @@ async def test_phase_a_eval_gate():
     bot_300_sticky_tick: int | None = None
     released_after_sticky: list[int] = []
 
-    async def enroll_fn(g: int) -> None:
+    async def enroll_fn(g: int, snapshot=None) -> None:
         enrolled.add(g)
         enroll_count[g] = enroll_count.get(g, 0) + 1
         try:
