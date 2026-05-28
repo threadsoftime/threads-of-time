@@ -13,6 +13,7 @@ from brain_sidecar.dispatch import (
     _display_name,
 )
 from brain_sidecar.models import Decision, DecisionKind
+from brain_sidecar.tool_policy import ToolPolicyEnforcer
 
 
 @pytest.fixture
@@ -298,3 +299,95 @@ def test_display_name_known_tools():
     assert _display_name("memory_write") == "remember that"
     assert _display_name("goals_create") == "set that as a goal"
     assert _display_name("memory.goals.create") == "set that as a goal"
+
+
+# ---------------------------------------------------------------------------
+# Task 27: ToolPolicyEnforcer integration in Dispatcher
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_dispatch_denies_bot_send_chat_in_reduced_tier(harness_mcp, memory_mcp):
+    """bot.send_chat must be denied in REDUCED tier when tool_policy is set."""
+    enforcer = ToolPolicyEnforcer()
+    dispatcher = Dispatcher(
+        harness_mcp=harness_mcp,
+        memory_mcp=memory_mcp,
+        tool_policy=enforcer,
+    )
+    decision = Decision(
+        kind=DecisionKind.ACTION,
+        tool="bot.send_chat",
+        args={"bot_guid": 1, "message": "hi", "channel": "say"},
+        confidence=0.9,
+        reasoning="wants to chat",
+    )
+    result = await dispatcher.dispatch(bot_guid=1, decision=decision, tier="reduced")
+    assert result.disposition == "policy_denied"
+    assert result.tool == "bot.send_chat"
+    # Assert the MCP client was NOT called with bot.send_chat.
+    for call in harness_mcp.call.await_args_list:
+        assert call.args[0] != "bot.send_chat", (
+            "harness MCP must NOT be called for a policy_denied tool"
+        )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_allows_bot_set_strategy_in_reduced_tier(harness_mcp, memory_mcp):
+    """bot.set_strategy is in REDUCED whitelist; must reach the MCP client."""
+    enforcer = ToolPolicyEnforcer()
+    dispatcher = Dispatcher(
+        harness_mcp=harness_mcp,
+        memory_mcp=memory_mcp,
+        tool_policy=enforcer,
+    )
+    decision = Decision(
+        kind=DecisionKind.ACTION,
+        tool="bot.set_strategy",
+        args={"bot_guid": 1, "add": ["grind"]},
+        confidence=0.9,
+        reasoning="grinding time",
+    )
+    result = await dispatcher.dispatch(bot_guid=1, decision=decision, tier="reduced")
+    # bot.set_strategy is allowed in REDUCED — must execute, not be denied.
+    assert result.disposition == "executed"
+    harness_mcp.call.assert_any_await("bot.set_strategy", {"bot_guid": 1, "add": ["grind"]})
+
+
+@pytest.mark.asyncio
+async def test_dispatch_no_policy_enforcer_allows_all(harness_mcp, memory_mcp):
+    """When tool_policy is None (default), all tools pass the gate regardless of tier."""
+    dispatcher = Dispatcher(
+        harness_mcp=harness_mcp,
+        memory_mcp=memory_mcp,
+        tool_policy=None,
+    )
+    decision = Decision(
+        kind=DecisionKind.ACTION,
+        tool="bot.send_chat",
+        args={"bot_guid": 1, "message": "hi", "channel": "say"},
+        confidence=0.9,
+        reasoning="no policy set",
+    )
+    result = await dispatcher.dispatch(bot_guid=1, decision=decision, tier="reduced")
+    # No enforcer → policy gate is skipped → should proceed to risk gate & execute.
+    assert result.disposition == "executed"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_full_tier_allows_bot_send_chat(harness_mcp, memory_mcp):
+    """FULL tier must allow bot.send_chat even with a ToolPolicyEnforcer installed."""
+    enforcer = ToolPolicyEnforcer()
+    dispatcher = Dispatcher(
+        harness_mcp=harness_mcp,
+        memory_mcp=memory_mcp,
+        tool_policy=enforcer,
+    )
+    decision = Decision(
+        kind=DecisionKind.ACTION,
+        tool="bot.send_chat",
+        args={"bot_guid": 1, "message": "hi", "channel": "say"},
+        confidence=0.9,
+        reasoning="chatting in full tier",
+    )
+    result = await dispatcher.dispatch(bot_guid=1, decision=decision, tier="full")
+    assert result.disposition == "executed"

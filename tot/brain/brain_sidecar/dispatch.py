@@ -4,11 +4,12 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 from brain_sidecar.decide import KNOWN_TOOLS
 from brain_sidecar.mcp_clients import McpClient
 from brain_sidecar.models import Decision, DecisionKind
+from brain_sidecar.tool_policy import ToolPolicyEnforcer
 
 log = logging.getLogger(__name__)
 
@@ -149,6 +150,7 @@ class Dispatcher:
     harness_mcp: McpClient | Any
     memory_mcp: McpClient | Any
     confirmation_channel: str = "whisper"
+    tool_policy: Optional[ToolPolicyEnforcer] = None
 
     def _cross_bot_violations(self, args: dict[str, Any], bot_guid: int) -> list[tuple[str, Any]]:
         """Return list of (key, value) where the arg is a bot-ownership key but the
@@ -171,7 +173,7 @@ class Dispatcher:
                 bad.append((k, v))
         return bad
 
-    async def dispatch(self, *, bot_guid: int, decision: Decision) -> DispatchResult:
+    async def dispatch(self, *, bot_guid: int, decision: Decision, tier: str = "full") -> DispatchResult:
         ts_ms = int(time.time() * 1000)
 
         if decision.kind is DecisionKind.NO_OP:
@@ -183,6 +185,23 @@ class Dispatcher:
 
         tool = _normalize_tool(decision.tool or "")
         args = decision.args or {}
+
+        # Phase B policy gate: tier-aware tool whitelist.  Applied before all
+        # other guards so a REDUCED-tier bot cannot slip through on high confidence.
+        # Only bot.* tools are governed by the whitelist; memory.* / obs.* are
+        # not gated (reads are always safe; memory writes are handled by risk gate).
+        if self.tool_policy is not None and tool.startswith("bot."):
+            if not self.tool_policy.is_allowed(tool, tier):
+                log.info(
+                    "policy_denied tool=%s tier=%s bot_guid=%s",
+                    tool, tier, bot_guid,
+                )
+                return DispatchResult(
+                    disposition="policy_denied",
+                    tool=tool,
+                    result=None,
+                    error=f"tier={tier} does not permit {tool}",
+                )
 
         # Unknown-tool guard (per spec §5.1; moved here from C4 in Task 7 fixes).
         # Runs BEFORE cross-bot guard so unknown tools produce "invalid_tool" not
