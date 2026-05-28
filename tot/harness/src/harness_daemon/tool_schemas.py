@@ -251,6 +251,14 @@ class ObsGetXpArgs(_TargetGuid):
     pass
 
 
+class ObsListPlayersArgs(BaseModel):
+    pass
+
+
+class ObsListBotPopulationArgs(BaseModel):
+    pass
+
+
 class ObsGetRpgStatusArgs(_TargetGuid):
     pass
 
@@ -423,6 +431,8 @@ TOOL_SCHEMAS: dict[str, tuple[type[BaseModel], str]] = {
     "obs.get_combat_log":      (ObsGetCombatLogArgs,        "Recent combat-log events for the player."),
     "obs.get_quest_log":       (ObsGetQuestLogArgs,         "Quest log: open quests + objectives + status."),
     "obs.get_xp":              (ObsGetXpArgs,               "Current XP, next-level threshold, rested XP, %."),
+    "obs.list_players":        (ObsListPlayersArgs,         "List all online players (bots + humans) with GUIDs and basic state."),
+    "obs.list_bot_population": (ObsListBotPopulationArgs,  "World-wide bot population snapshot: count, level distribution, zone spread."),
     "obs.get_rpg_status":      (ObsGetRpgStatusArgs,        "Playerbot NewRpgInfo: current goal + description."),
     "obs.get_money":           (ObsGetMoneyArgs,            "Gold/silver/copper balance."),
     "obs.get_position":        (ObsGetPositionArgs,         "Map/zone/area IDs + names + (x,y,z,o)."),
