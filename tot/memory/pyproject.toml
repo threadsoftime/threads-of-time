@@ -33,3 +33,9 @@ packages = ["src/tot_memory"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Phase 8 eval gate is slow (~seconds; seeds 200 episodes + runs 50 recalls).
+# Default `pytest` skips it; run explicitly with `pytest -m eval`.
+markers = [
+    "eval: quality-gate eval suite for hybrid retrieval (subspec §12.2)",
+]
+addopts = "-m 'not eval'"
