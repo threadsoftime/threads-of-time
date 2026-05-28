@@ -100,6 +100,8 @@ def build_v1_registry() -> Registry:
         # V1.3 additions
         ToolEntry("obs.get_quest_log",         "obs.get_quest_log",         "target_guid", True),
         ToolEntry("obs.get_xp",                "obs.get_xp",                "target_guid", True),
+        ToolEntry("obs.list_players",          "obs.list_players",          None,          True),
+        ToolEntry("obs.list_bot_population",   "obs.list_bot_population",   None,          True),
         ToolEntry("obs.get_rpg_status",        "obs.get_rpg_status",        "target_guid", True),
         ToolEntry("obs.get_money",             "obs.get_money",             "target_guid", True),
         ToolEntry("obs.get_position",          "obs.get_position",          "target_guid", True),
