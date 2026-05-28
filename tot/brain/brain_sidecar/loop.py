@@ -90,6 +90,32 @@ class LoopSupervisor:
     def list_active(self) -> list[int]:
         return [g for g, t in self._tasks.items() if not t.done()]
 
+    # ------------------------------------------------------------------
+    # SubsetGate integration (Plan 3 T21)
+    # The SubsetGate calls enroll_bot / release_bot via its enroll_fn /
+    # release_fn callbacks so that state_store stays consistent before
+    # _apply reads list_active() for hysteresis bumping.
+    # ------------------------------------------------------------------
+
+    def enroll_bot(self, bot_guid: int) -> None:
+        """Activate the brain loop for a bot already active in state_store.
+
+        Called by SubsetGate._enroll_via_api.  The bot MUST already be in
+        state_store with status='active' (placed there by POST /enroll).
+        This method is synchronous because supervisor.start() is synchronous.
+        """
+        self.start(bot_guid)
+
+    async def release_bot(self, bot_guid: int) -> None:
+        """Stop the brain loop and mark the bot released in state_store.
+
+        Called by SubsetGate._release_via_api.  Updates state_store BEFORE
+        returning so that _apply's post-apply list_active() call sees the
+        correct enrolled set for hysteresis bumping.
+        """
+        await self.stop(bot_guid)
+        self.state_store.set_status(bot_guid, "released")
+
     def start(self, bot_guid: int) -> None:
         if bot_guid in self._tasks and not self._tasks[bot_guid].done():
             return

@@ -34,7 +34,7 @@ class ReleaseResponse(BaseModel):
     status: str
 
 
-def make_router(*, state_store, personality_cache, supervisor, brain_bearer: str, harness_mcp=None, llm_client=None) -> APIRouter:
+def make_router(*, state_store, personality_cache, supervisor, brain_bearer: str, harness_mcp=None, llm_client=None, subset_gate=None) -> APIRouter:
     router = APIRouter()
 
     def _check_auth(authorization: Annotated[str | None, Header()] = None) -> None:
@@ -137,5 +137,52 @@ def make_router(*, state_store, personality_cache, supervisor, brain_bearer: str
         await supervisor.stop(req.bot_guid)
         state_store.set_status(req.bot_guid, "released")
         return ReleaseResponse(bot_guid=req.bot_guid, status="released")
+
+    # ------------------------------------------------------------------
+    # Admin endpoints — subset gate operator surface (Plan 3 T20, Spec §4.6)
+    # ------------------------------------------------------------------
+
+    @router.post("/admin/subset/pin/{bot_guid}", dependencies=[Depends(_check_auth)])
+    async def pin_bot(bot_guid: int):
+        if state_store.get_bot(bot_guid) is None:
+            raise HTTPException(404, f"bot_guid {bot_guid} not in living_bots")
+        state_store.set_pin(bot_guid, True)
+        return {"ok": True, "bot_guid": bot_guid, "pinned": True}
+
+    @router.post("/admin/subset/unpin/{bot_guid}", dependencies=[Depends(_check_auth)])
+    async def unpin_bot(bot_guid: int):
+        state_store.set_pin(bot_guid, False)
+        return {"ok": True, "bot_guid": bot_guid, "pinned": False}
+
+    @router.get("/admin/subset/snapshot", dependencies=[Depends(_check_auth)])
+    async def subset_snapshot():
+        config_payload: dict = {}
+        if subset_gate is not None:
+            config_payload = {
+                "living_bot_count": subset_gate.config.living_bot_count,
+                "recompute_interval_s": subset_gate.config.recompute_interval_s,
+                "phase_b_enabled": subset_gate.config.phase_b_enabled,
+            }
+        return {
+            "currently_enrolled": [
+                {"bot_guid": row.bot_guid, "tier": state_store.get_tier(row.bot_guid)}
+                for row in state_store.list_active()
+            ],
+            "pinned": list(state_store.list_pinned()),
+            "config": config_payload,
+        }
+
+    @router.post("/admin/subset/recompute", dependencies=[Depends(_check_auth)])
+    async def subset_recompute():
+        if subset_gate is None:
+            raise HTTPException(503, "SubsetGate not configured")
+        decision = await subset_gate._recompute_and_apply()
+        return {
+            "target": sorted(decision.target_living_set),
+            "to_enroll": sorted(decision.to_enroll),
+            "to_release": sorted(decision.to_release),
+            "to_full": sorted(decision.to_full),
+            "to_reduced": sorted(decision.to_reduced),
+        }
 
     return router
