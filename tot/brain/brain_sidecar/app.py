@@ -182,6 +182,53 @@ def create_app() -> FastAPI:
                         "personality_warm_failed bot_guid=%s err=%s", row.bot_guid, e,
                     )
 
+            # Plan 3 T21: wire SubsetGate — starts after LoopSupervisor.
+            # phase_b_enabled=False at this milestone; flipped in T30 (Phase B).
+            from brain_sidecar.subset_gate import (
+                SubsetGate, SubsetGateConfig,
+                WorldSnapshot, PlayerSnapshot, BotSnapshot,
+            )
+
+            async def _snapshot_fetcher() -> WorldSnapshot:
+                players_raw = await harness.call("obs.list_players", {})
+                bots_raw = await harness.call("obs.list_bot_population", {})
+                return WorldSnapshot(
+                    players=tuple(
+                        PlayerSnapshot(**p)
+                        for p in (players_raw.get("players") or [])
+                    ),
+                    bots=tuple(
+                        BotSnapshot(**b)
+                        for b in (bots_raw.get("bots") or [])
+                    ),
+                )
+
+            async def _enroll_via_api(bot_guid: int) -> None:
+                supervisor.enroll_bot(bot_guid)
+
+            async def _release_via_api(bot_guid: int) -> None:
+                await supervisor.release_bot(bot_guid)
+
+            subset_gate_config = SubsetGateConfig(
+                living_bot_count=settings.living_bot_count,
+                recompute_interval_s=settings.subset_recompute_interval_s,
+                hysteresis_out_ticks=settings.subset_hysteresis_out_ticks,
+                hysteresis_in_ticks=settings.subset_hysteresis_in_ticks,
+                enroll_backoff_s=settings.subset_enroll_backoff_s,
+                enabled=settings.subset_gate_enabled,
+                phase_b_enabled=False,  # Flipped to True in Phase B (T30).
+            )
+            subset_gate = SubsetGate(
+                state_store=state_store,
+                snapshot_fetcher=_snapshot_fetcher,
+                enroll_fn=_enroll_via_api,
+                release_fn=_release_via_api,
+                config=subset_gate_config,
+            )
+            subset_gate_task = asyncio.create_task(subset_gate.run(), name="subset_gate")
+            app.state.subset_gate = subset_gate
+            app.state.subset_gate_task = subset_gate_task
+
             # Expose components on app.state so the router and tests can reach them.
             app.state.supervisor = supervisor
             app.state.state_store = state_store
@@ -197,11 +244,17 @@ def create_app() -> FastAPI:
                 brain_bearer=settings.brain_bearer,
                 harness_mcp=harness,
                 llm_client=llm_client,
+                subset_gate=subset_gate,
             ))
 
             try:
                 yield
             finally:
+                # Cancel SubsetGate task first (it has no active bot state to flush).
+                subset_gate_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await subset_gate_task
+
                 # PARALLEL teardown: override Task 9's serial stop_all() so a full
                 # 15-bot allowlist (15 × 10 s timeout) doesn't block pod restart for
                 # up to 150 s. asyncio.gather fires all stop() coroutines concurrently;
