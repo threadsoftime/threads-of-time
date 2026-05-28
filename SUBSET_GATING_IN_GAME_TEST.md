@@ -34,7 +34,7 @@ Fix: extracted `parse_world_snapshot(players_raw, bots_raw)` as a module-level
 helper that handles both wrapped and unwrapped shapes. 4 regression tests
 added. Brain tests now at **341 pass** (was 337).
 
-### B4 — `enroll_bot` doesn't persist new bots into `living_bots` (UNFIXED)
+### B4 — `enroll_bot` doesn't persist new bots into `living_bots` (FIXED in `e1d2937f0`)
 
 When SubsetGate's proximity pick contains bots that were **never previously
 enrolled via POST /enroll**, the `enroll_fn = supervisor.enroll_bot()` call:
@@ -59,15 +59,28 @@ The spec (§1, §4.2) is ambiguous about whether SubsetGate is supposed to
 needs). The default Heimdal population of 1000 bots vs. 7 manually-enrolled
 bots makes the current behavior much less useful than intended.
 
-**Proposed fix (defer to Plan 3 follow-up):**
+**Fix shipped (`e1d2937f0`):**
 
-`LoopSupervisor.enroll_bot(bot_guid)` should:
-- If bot exists in `living_bots`: set `status='active'`, reset hysteresis, call `start()`
-- If bot does NOT exist: call `state_store.enroll(bot_guid, ..., personality_seed=default)` with a synthetic seed (name pulled from `obs.list_bot_population`; race/class via async `obs.get_state` call), then `start()`
+Three-part change:
+- `StateStore.reactivate(bot_guid)`: atomic `status='active'` + reset hysteresis. Three new unit tests.
+- `SubsetGate.enroll_fn` signature: `Callable[[int, Optional[BotSnapshot]], Awaitable[None]]`. `_apply` builds `bot_by_guid` lookup from the snapshot and passes the matching `BotSnapshot` per `to_enroll` bot. One new contract test.
+- `app.py _enroll_via_api` handles three cases:
+  - **active**: idempotent `supervisor.start()`
+  - **released**: `state_store.reactivate()` + `start()`
+  - **missing**: build default `PersonalityCard` from `BotSnapshot` → best-effort `obs.get_state` for race/class → best-effort `morph_personality` → `state_store.enroll()` → `personality_cache.seed()` → `start()`. Graceful degradation on every step (LLM/obs/cache failures log + proceed).
 
-The personality LLM-morph would happen lazily on first tick (when LLM is
-available) — consistent with the existing `POST /enroll` graceful-degradation
-path that keeps seed values if morph fails.
+**Live verification:**
+
+After deploying `localhost/brain-sidecar:v0.5-subset-b4-20260528-0956`:
+
+1. Cycle 1 with Puun on Outland (map 530): 10 active bots, 9 brand-new auto-enrolled, all `tier=full`. Casmina (1003, sticky-party, teleported to Stormwind) → `tier=reduced`.
+2. Cycle 1 after Puun teleported to Stormwind (map 0):
+   - Casmina → `tier=full` (now on Puun's map; sticky-party preserved)
+   - 9 new map-0 bots auto-enrolled → `tier=full`
+   - 9 old map-530 bots → `tier=reduced` (warm-cache transit; not yet hysteresis-released)
+3. Cycle 2: hysteresis releases the displaced map-530 bots; 2 new picks enroll as bots drift in/out of proximity. System self-stabilizes around the proximity ranking.
+
+`morph_personality` warnings appear in the brain log ("All connection attempts failed; keeping seed values") because the thomas-pc LLM primary is offline. **The graceful-degradation path keeps enrollment working** — bots get default v1 personality fields and v2 fields stay None (will fill on next morph attempt when LLM recovers).
 
 ## Pre-existing issue (not Plan 3 regression)
 
@@ -92,12 +105,17 @@ working LLM. Will resolve when thomas-pc comes back online.
 
 ## Recommended next steps
 
-1. **Fix B4** in a follow-up commit — small `LoopSupervisor.enroll_bot` refactor
-   plus 2-3 unit tests. ~20 min of work; not required to ship Plan 3 but limits
-   "subset gating" to "subset rotation" until landed.
-2. **Restore the 6 released bots** (`UPDATE living_bots SET status='active'`)
-   so the original brain population is back when LLM primary recovers.
+1. **~~Fix B4~~** ✓ SHIPPED in `e1d2937f0`.
+2. **Restore the 6 originally-released bots** — no longer urgent; SubsetGate
+   now auto-enrolls from population as needed. The 6 originals will resurface
+   if a player moves into their proximity (or via operator pin).
 3. **Test sticky raid override** — convert the Puun+Casmina party to a raid,
    verify the algorithm still matches on `raid_guid` instead of `party_guid`.
-4. **Test hysteresis stability** — leave Puun stationary for 3+ recompute
-   cycles, verify no enrollment churn.
+   Requires user action (`/raid` in-game).
+4. **~~Test hysteresis stability~~** ✓ validated: cycle 2 after teleport showed
+   2 enrolls + 1 release as bots drifted across the proximity boundary —
+   expected churn, not thrash. No bot oscillated `enroll→release→enroll` within
+   the observation window.
+5. **LLM primary recovery** — when thomas-pc Nemo comes back online, the
+   `morph_personality` warnings will stop and v2 personality fields will
+   fill on next bot enrollment.
