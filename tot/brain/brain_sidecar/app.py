@@ -21,7 +21,23 @@ from brain_sidecar.mcp_clients import open_mcp
 from brain_sidecar.personality import PersonalityCache
 from brain_sidecar.settings import get_settings
 from brain_sidecar.state import StateStore
+from brain_sidecar.subset_gate import WorldSnapshot, PlayerSnapshot, BotSnapshot
 from brain_sidecar.triage import TriageGate
+
+
+def parse_world_snapshot(players_raw: dict, bots_raw: dict) -> WorldSnapshot:
+    """Build a WorldSnapshot from raw harness.call() responses.
+
+    Harness tool responses are wrapped {"ok": True, "result": {...}} per
+    kb_87a7eade — unwrap before accessing the tool-specific payload. Falls
+    back to top-level lookup so tests that mock the unwrapped shape still work.
+    """
+    players_data = players_raw.get("result") if isinstance(players_raw.get("result"), dict) else players_raw
+    bots_data = bots_raw.get("result") if isinstance(bots_raw.get("result"), dict) else bots_raw
+    return WorldSnapshot(
+        players=tuple(PlayerSnapshot(**p) for p in (players_data.get("players") or [])),
+        bots=tuple(BotSnapshot(**b) for b in (bots_data.get("bots") or [])),
+    )
 
 
 async def validate_sse_endpoint_or_raise(
@@ -193,16 +209,7 @@ def create_app() -> FastAPI:
             async def _snapshot_fetcher() -> WorldSnapshot:
                 players_raw = await harness.call("obs.list_players", {})
                 bots_raw = await harness.call("obs.list_bot_population", {})
-                return WorldSnapshot(
-                    players=tuple(
-                        PlayerSnapshot(**p)
-                        for p in (players_raw.get("players") or [])
-                    ),
-                    bots=tuple(
-                        BotSnapshot(**b)
-                        for b in (bots_raw.get("bots") or [])
-                    ),
-                )
+                return parse_world_snapshot(players_raw, bots_raw)
 
             async def _enroll_via_api(bot_guid: int) -> None:
                 supervisor.enroll_bot(bot_guid)
