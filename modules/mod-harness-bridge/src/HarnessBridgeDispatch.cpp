@@ -123,6 +123,8 @@ namespace HarnessBridge
 #include "Adapters/ObsGetMoneyAdapter.h"
 #include "Adapters/ObsGetPositionAdapter.h"
 #include "Adapters/ObsGetGroupAdapter.h"
+#include "Adapters/ObsListBotPopulationAdapter.h"
+#include "Adapters/ObsListPlayersAdapter.h"
 #include "Adapters/BotSetStrategyAdapter.h"
 #include "Adapters/BotGetStrategiesAdapter.h"
 #include "Adapters/BotSendChatAdapter.h"
@@ -155,10 +157,12 @@ namespace HarnessBridge
         // V1.5 ships 31 tools (= V1.4's 25 + 6 grouping primitives:
         // bot.invite_to_group, bot.accept_invite, bot.leave_group,
         // bot.set_role, bot.queue_for_dungeon, bot.enter_instance).
-        // Daemon-direct obs.query_db brings the total exposed surface
-        // to 32 tools across HTTP /v1/* and MCP /mcp/mcp.
         // V1.5+ memory.* (Tasks 24-30): 7 adapters calling tot/memory sidecar
         // via HARNESS_MEMORY_URL (default http://localhost:8090).
+        // Plan-3 subset-gating (Tasks 4-5): +2 world-snapshot tools:
+        // obs.list_players, obs.list_bot_population.
+        // Total C++ adapters: 40. Daemon-direct obs.query_db brings the
+        // total exposed surface to 41 tools across HTTP /v1/* and MCP.
         static std::unordered_map<std::string, AdapterFn> const table = {
             {"obs.ping",                  &Adapters::ObsPing},
             {"obs.get_state",             &Adapters::ObsGetState},
@@ -171,6 +175,8 @@ namespace HarnessBridge
             {"obs.get_money",             &Adapters::ObsGetMoney},
             {"obs.get_position",          &Adapters::ObsGetPosition},
             {"obs.get_group",             &Adapters::ObsGetGroup},
+            {"obs.list_bot_population",   &Adapters::ObsListBotPopulation},
+            {"obs.list_players",          &Adapters::ObsListPlayers},
             {"gm.additem",                &Adapters::GmAdditem},
             {"gm.equip_all",              &Adapters::GmEquipAll},
             {"gm.teleport",               &Adapters::GmTeleport},
