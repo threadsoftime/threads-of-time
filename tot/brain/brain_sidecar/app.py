@@ -151,6 +151,7 @@ def create_app() -> FastAPI:
                 dispatcher=dispatcher,
                 state_store=state_store,
                 tick_interval_s=settings.tick_interval_s,
+                reduced_tick_interval_s=settings.reduced_tick_interval_s,
                 decision_log_writer=decision_log,
                 brain_sse_enabled=settings.brain_sse_enabled,
                 memory_mcp_url=memory_http_url,

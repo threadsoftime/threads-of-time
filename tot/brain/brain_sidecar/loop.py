@@ -59,6 +59,12 @@ class LoopSupervisor:
     brain_sse_coalesce_ms: int = 200
     brain_sse_dedup_capacity: int = 100
 
+    # Plan 3 Phase B: per-tier tick interval. REDUCED-tier bots tick every
+    # reduced_tick_interval_s seconds (default 300 s = 5 min) instead of the
+    # normal tick_interval_s. The dataclass default preserves all existing
+    # constructors; tests that don't supply this field get 300 s automatically.
+    reduced_tick_interval_s: float = 300.0
+
     # Plan 2 Task 33: optional new memory wiring. Both are None on legacy
     # construction paths (existing unit tests, pre-1.0.0 app boot); when
     # provided, the loop calls recall before decide and write_episode after
@@ -241,7 +247,17 @@ class LoopSupervisor:
                     last_state = await self._one_tick(bot_guid, last_state, sse_inputs=sse_inputs)
                     self._last_states[bot_guid] = last_state
             try:
-                await asyncio.wait_for(stop_ev.wait(), timeout=self.tick_interval_s)
+                # Phase B: tier-aware sleep interval.
+                # REDUCED bots tick every reduced_tick_interval_s (default 300 s);
+                # FULL bots tick every tick_interval_s. Tier is read at the
+                # loop-boundary so a tier transition takes effect on the NEXT sleep
+                # without restarting the task.
+                _tier = self.state_store.get_tier(bot_guid)
+                _interval = (
+                    self.reduced_tick_interval_s if _tier == "reduced"
+                    else self.tick_interval_s
+                )
+                await asyncio.wait_for(stop_ev.wait(), timeout=_interval)
             except asyncio.TimeoutError:
                 continue
         log.info("brain-loop stopped bot_guid=%s", bot_guid)
@@ -366,7 +382,8 @@ class LoopSupervisor:
             record["confidence"] = decision.confidence
             record["llm_latency_ms"] = llm_latency_ms
 
-            result = await self.dispatcher.dispatch(bot_guid=bot_guid, decision=decision)
+            tier = self.state_store.get_tier(bot_guid)
+            result = await self.dispatcher.dispatch(bot_guid=bot_guid, decision=decision, tier=tier)
             record["dispatch_result"] = result.disposition
             if result.error:
                 record["error"] = result.error
