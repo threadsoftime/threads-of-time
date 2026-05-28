@@ -4404,8 +4404,14 @@ AllowTwoSide.Interaction.Arena = 0
 #                     and would also take a Neutral auction house cut from auctions.
 #        Default:     0 - (Disabled)
 #                     1 - (Enabled)
+#        ToT note:    Default flipped to 1 so the mod-playerbots unified-AH design works.
+#                     Bots in mod-playerbots/Ai/World/Rpg/Action/AhVisit.cpp post explicitly
+#                     to AuctionHouseId::Neutral; with =0 stock AC, Alliance/Horde
+#                     auctioneers return faction-segregated maps and players see an empty
+#                     AH while the Neutral pool fills with bot listings. Flipping to =1
+#                     makes ALL auctioneer queries route to the same Neutral pool.
 
-AllowTwoSide.Interaction.Auction = 0
+AllowTwoSide.Interaction.Auction = 1
 
 #
 #    AllowTwoSide.Interaction.Mail
