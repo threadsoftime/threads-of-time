@@ -166,6 +166,72 @@ class StateStore:
         )
         self._conn.commit()
 
+    # ------------------------------------------------------------------
+    # Subset-gating helpers (Plan 3, Tasks 9-11)
+    # ------------------------------------------------------------------
+
+    def set_tier(self, bot_guid: int, tier: str) -> None:
+        if tier not in ("full", "reduced"):
+            raise ValueError(f"invalid tier {tier!r}")
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE living_bots SET tier = ? WHERE bot_guid = ?",
+                (tier, bot_guid),
+            )
+
+    def get_tier(self, bot_guid: int) -> str:
+        row = self._conn.execute(
+            "SELECT tier FROM living_bots WHERE bot_guid = ?",
+            (bot_guid,),
+        ).fetchone()
+        if row is None or row[0] is None:
+            return "full"
+        return row[0]
+
+    def get_hysteresis(self, bot_guid: int) -> tuple[int, int]:
+        row = self._conn.execute(
+            "SELECT in_range_ticks, out_of_range_ticks FROM living_bots WHERE bot_guid = ?",
+            (bot_guid,),
+        ).fetchone()
+        if row is None:
+            return (0, 0)
+        return (row[0] or 0, row[1] or 0)
+
+    def bump_hysteresis(self, bot_guid: int, *, in_range: bool) -> tuple[int, int]:
+        with self._write_lock:
+            row = self._conn.execute(
+                "SELECT in_range_ticks, out_of_range_ticks FROM living_bots WHERE bot_guid = ?",
+                (bot_guid,),
+            ).fetchone()
+            if row is None:
+                return (0, 0)
+            in_ticks = row[0] or 0
+            out_ticks = row[1] or 0
+            if in_range:
+                in_ticks += 1
+                out_ticks = 0
+            else:
+                in_ticks = 0
+                out_ticks += 1
+            self._conn.execute(
+                "UPDATE living_bots SET in_range_ticks = ?, out_of_range_ticks = ? WHERE bot_guid = ?",
+                (in_ticks, out_ticks, bot_guid),
+            )
+            return (in_ticks, out_ticks)
+
+    def set_pin(self, bot_guid: int, pinned: bool) -> None:
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE living_bots SET pinned = ? WHERE bot_guid = ?",
+                (1 if pinned else 0, bot_guid),
+            )
+
+    def list_pinned(self) -> list[int]:
+        rows = self._conn.execute(
+            "SELECT bot_guid FROM living_bots WHERE pinned = 1"
+        ).fetchall()
+        return [r[0] for r in rows]
+
     def decisions_recent(self, *, bot_guid: int, k: int) -> list[Decision]:
         rows = self._conn.execute(
             "SELECT decision_json FROM decisions_recent "
