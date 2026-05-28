@@ -222,9 +222,10 @@ def _reconcile(
         bot_by_guid = {b.bot_guid: b for b in snapshot.bots}
         for guid in kept:
             bot = bot_by_guid.get(guid)
-            if bot is None:
-                continue
-            if any(p.map_id == bot.map_id for p in snapshot.players):
+            # A bot absent from the snapshot (empty world / no players) has no
+            # co-located player → always REDUCED.  A bot present in the snapshot
+            # is FULL iff at least one player shares its map_id; otherwise REDUCED.
+            if bot is not None and any(p.map_id == bot.map_id for p in snapshot.players):
                 to_full.add(guid)
             else:
                 to_reduced.add(guid)

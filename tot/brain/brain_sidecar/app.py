@@ -183,8 +183,8 @@ def create_app() -> FastAPI:
                         "personality_warm_failed bot_guid=%s err=%s", row.bot_guid, e,
                     )
 
-            # Plan 3 T21: wire SubsetGate — starts after LoopSupervisor.
-            # phase_b_enabled=False at this milestone; flipped in T30 (Phase B).
+            # Plan 3 T21+T30: wire SubsetGate — starts after LoopSupervisor.
+            # phase_b_enabled=True (Phase B active): warm cache + REDUCED tier.
             from brain_sidecar.subset_gate import (
                 SubsetGate, SubsetGateConfig,
                 WorldSnapshot, PlayerSnapshot, BotSnapshot,
@@ -217,7 +217,7 @@ def create_app() -> FastAPI:
                 hysteresis_in_ticks=settings.subset_hysteresis_in_ticks,
                 enroll_backoff_s=settings.subset_enroll_backoff_s,
                 enabled=settings.subset_gate_enabled,
-                phase_b_enabled=False,  # Flipped to True in Phase B (T30).
+                phase_b_enabled=True,  # Phase B: warm cache + REDUCED tier
             )
             subset_gate = SubsetGate(
                 state_store=state_store,

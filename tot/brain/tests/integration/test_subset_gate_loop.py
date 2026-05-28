@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Integration: SubsetGate driving StateStore via mock snapshot + enroll/release lambdas.
 
-Tests verify Phase A behavior:
+Tests verify Phase A + Phase B behavior:
   - Cold start: 30 bots near a player → closest 10 enrolled.
-  - Player logout: 10 enrolled bots, players leave → all released after 2 cycles
+  - Player logout (Phase A): 10 enrolled bots, players leave → all released after 2 cycles
     (hysteresis_out_ticks=2; hysteresis_out_ticks+1 >= 2 triggers release on cycle 2).
+  - Player logout (Phase B): empty world keeps currently-enrolled bots alive in REDUCED tier.
 
 Spec: docs/superpowers/specs/2026-05-27-threads-of-time-1.0.0-subset-gating-design.md §9
 """
@@ -161,3 +162,67 @@ async def test_player_logs_out_releases_all_phase_a():
     # Cycle 2 — out_ticks bumped to 2; threshold (2+1 >= 2) → all released.
     await gate._recompute_and_apply()
     assert released == set(range(100, 110)), f"Expected all 10 released, got {released}"
+
+
+# ---------------------------------------------------------------------------
+# Test 3: Phase B — empty world transitions currently-enrolled bots to REDUCED
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_player_logs_out_transitions_to_reduced_phase_b():
+    """Phase B: empty world keeps currently-enrolled bots, transitions to REDUCED.
+
+    With phase_b_enabled=True and no players online, enrolled bots must NOT be
+    released — instead they remain enrolled and their tier is set to 'reduced'.
+    hysteresis_out_ticks=2 still applies, so two cycles are needed to confirm
+    the empty-world state, but both cycles should leave the bots alive (not released)
+    with tier='reduced'.
+
+    Spec §5 step 3 + step 5 + §10.
+    """
+    state_store = _fake_state_store()
+    for g in range(100, 110):
+        state_store.enroll(
+            bot_guid=g, enrolled_at_ms=0, personality_seed=_make_personality()
+        )
+
+    snap_empty = WorldSnapshot(players=(), bots=())
+
+    async def fetcher() -> WorldSnapshot:
+        return snap_empty
+
+    async def enroll_fn(g: int) -> None:
+        pass
+
+    async def release_fn(g: int) -> None:
+        state_store.set_status(g, "released")
+
+    gate = SubsetGate(
+        state_store=state_store,
+        snapshot_fetcher=fetcher,
+        enroll_fn=enroll_fn,
+        release_fn=release_fn,
+        config=SubsetGateConfig(
+            living_bot_count=10,
+            recompute_interval_s=60.0,
+            hysteresis_out_ticks=2,
+            hysteresis_in_ticks=1,
+            enroll_backoff_s=300.0,
+            enabled=True,
+            phase_b_enabled=True,
+        ),
+    )
+
+    await gate._recompute_and_apply()
+    await gate._recompute_and_apply()
+
+    # Phase B: nobody released; all transitioned to REDUCED.
+    for g in range(100, 110):
+        assert state_store.get_tier(g) == "reduced", (
+            f"Bot {g}: expected tier='reduced', got {state_store.get_tier(g)!r}"
+        )
+        bot_row = state_store.get_bot(g)
+        assert bot_row is not None, f"Bot {g} unexpectedly absent from state_store"
+        assert bot_row.status != "released", (
+            f"Bot {g}: expected status != 'released', got {bot_row.status!r}"
+        )
