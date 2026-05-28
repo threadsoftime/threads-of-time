@@ -1,17 +1,39 @@
-"""C2: per-bot decision loop supervisor."""
+"""C2: per-bot decision loop supervisor.
+
+Plan 2 Task 33 wires this loop to the new MemoryClient + SalienceScorer:
+
+  - Before `decider.decide(...)`, the loop calls `memory_client.recall(...)`
+    and injects the top-K episodes into `hot_inputs["recalled_memories"]`.
+    The existing prompt template (decide.py `_project_hot_inputs`) passes
+    unknown hot_inputs keys through unchanged, so the LLM sees the recalled
+    memories in the user prompt without any prompt-template change.
+
+  - After `dispatcher.dispatch(...)`, the loop scores salience from the
+    perception (triage hot_inputs) + decision + dispatch result. If the score
+    clears `salience_scorer.threshold`, a new episode is written via
+    `memory_client.write_episode(...)`.
+
+Brain prompt-engineering for *using* recalls effectively is out of scope per
+Plan 2 header — the wiring here is the minimum to get recalls into the prompt
+and notable events into the store.
+"""
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Optional, Protocol
 
 from brain_sidecar.decide import Decider
 from brain_sidecar.dedup import SeenMemoryIds
 from brain_sidecar.dispatch import Dispatcher
-from brain_sidecar.models import TickState, TriageResult
+from brain_sidecar.memory_client import MemoryClient, RecalledEpisode
+from brain_sidecar.models import Decision, TickState, TriageResult
+from brain_sidecar.salience import SalienceScorer
 from brain_sidecar.state import StateStore
 from brain_sidecar.triage import TriageGate, CHAT_PREFIXES
 
@@ -36,6 +58,14 @@ class LoopSupervisor:
     memory_bearer: str = ""
     brain_sse_coalesce_ms: int = 200
     brain_sse_dedup_capacity: int = 100
+
+    # Plan 2 Task 33: optional new memory wiring. Both are None on legacy
+    # construction paths (existing unit tests, pre-1.0.0 app boot); when
+    # provided, the loop calls recall before decide and write_episode after
+    # dispatch.
+    memory_client: Optional[MemoryClient] = None
+    salience_scorer: Optional[SalienceScorer] = None
+    memory_recall_top_k: int = 5
 
     # Per-bot: periodic tick coroutines
     _tasks: dict[int, asyncio.Task] = field(default_factory=dict)
@@ -262,6 +292,29 @@ class LoopSupervisor:
                             seen.mark(mid)
                     triage.hot_inputs["fresh_chat"] = filtered
 
+            # Plan 2 Task 33: recall top-K relevant episodes before the LLM call,
+            # inject into hot_inputs. The existing prompt template forwards
+            # unknown hot_inputs keys unchanged via decide._project_hot_inputs,
+            # so the LLM sees them in the user-prompt JSON without any
+            # prompt-template change.
+            if self.memory_client is not None:
+                try:
+                    query_text = self._recall_query_from_hot_inputs(triage.hot_inputs)
+                    recalled = await self.memory_client.recall(
+                        bot_guid=str(bot_guid),
+                        query_text=query_text,
+                        top_k=self.memory_recall_top_k,
+                    )
+                    triage.hot_inputs["recalled_memories"] = [
+                        _recalled_to_dict(ep) for ep in recalled
+                    ]
+                except Exception as recall_err:  # noqa: BLE001 — graceful degradation
+                    log.warning(
+                        "memory_recall_failed bot_guid=%s err=%r",
+                        bot_guid, recall_err,
+                    )
+                    triage.hot_inputs["recalled_memories"] = []
+
             record["llm_called"] = True
             decision, llm_latency_ms, at_cap = await self.decider.decide(
                 bot_guid=bot_guid, hot_inputs=triage.hot_inputs,
@@ -299,6 +352,36 @@ class LoopSupervisor:
                 self._append_decision_sync,
                 bot_guid, now_ms, decision,
             )
+
+            # Plan 2 Task 33: score salience and write the episode if it
+            # clears the threshold. Server-side tot/memory scorer is the
+            # authoritative voice; this brain-side score is passed along as
+            # the salience_hint so the brain's read on importance wins when
+            # it has one.
+            if self.memory_client is not None and self.salience_scorer is not None:
+                try:
+                    perception = self._perception_from_hot_inputs(triage.hot_inputs)
+                    action_result = self._action_result_from_dispatch(result)
+                    salience = self.salience_scorer.score(
+                        perception=perception,
+                        decision=decision.model_dump(),
+                        action_result=action_result,
+                    )
+                    if salience >= self.salience_scorer.threshold:
+                        await self.memory_client.write_episode(
+                            bot_guid=str(bot_guid),
+                            content_text=self._episode_text(
+                                triage.hot_inputs, decision, result
+                            ),
+                            episode_type=perception.get("episode_type", "observation"),
+                            timestamp_iso=_iso_from_ms(now_ms),
+                            salience_score=salience,
+                        )
+                except Exception as write_err:  # noqa: BLE001 — graceful degradation
+                    log.warning(
+                        "memory_write_failed bot_guid=%s err=%r",
+                        bot_guid, write_err,
+                    )
         except Exception as e:
             log.exception("uncaught tick exception bot=%s", bot_guid)
             record["error"] = f"tick_exception: {e}"
@@ -317,6 +400,91 @@ class LoopSupervisor:
         except Exception:
             log.exception("decision log write failed")
 
+    # ------------------------------------------------------------------
+    # Plan 2 Task 33 helpers — recall query construction + episode framing
+    # ------------------------------------------------------------------
+
+    def _recall_query_from_hot_inputs(self, hot_inputs: dict[str, Any]) -> str:
+        """Build a single-sentence recall query from the tick's hot inputs.
+
+        Heuristic, deliberately simple:
+            - fresh_chat → first sender + first message text
+            - else → the triage-supplied episode_type (or "current situation")
+
+        The brain prompt-engineering for *better* query construction is out of
+        scope for Plan 2 Phase 7 (per the plan header); this just gets a
+        non-empty query into recall so the server can score against something.
+        """
+        if not isinstance(hot_inputs, dict):
+            return "current situation"
+        fresh_chat = hot_inputs.get("fresh_chat") or []
+        if isinstance(fresh_chat, list) and fresh_chat:
+            first = fresh_chat[0]
+            if isinstance(first, dict):
+                sender = first.get("from") or first.get("sender") or ""
+                text = first.get("text") or first.get("content") or ""
+                if sender or text:
+                    return f"{sender}: {text}".strip(": ").strip() or "recent chat"
+        ep_type = hot_inputs.get("episode_type")
+        if isinstance(ep_type, str) and ep_type:
+            return f"recent {ep_type}"
+        return "current situation"
+
+    def _perception_from_hot_inputs(self, hot_inputs: dict[str, Any]) -> dict[str, Any]:
+        """Project hot_inputs to the SalienceScorer's expected perception dict.
+
+        Recognized keys (passed straight through):
+            - episode_type (str)
+            - source (str)         — for chat episodes
+            - salience_hint (float) — brain override
+        """
+        if not isinstance(hot_inputs, dict):
+            return {}
+        out: dict[str, Any] = {}
+        for k in ("episode_type", "source", "salience_hint"):
+            if k in hot_inputs:
+                out[k] = hot_inputs[k]
+        return out
+
+    def _action_result_from_dispatch(self, result: Any) -> dict[str, Any]:
+        """Extract the salience-relevant fields from the dispatch result.
+
+        DispatchResult exposes `disposition` + optionally `error` today;
+        downstream tools may attach `outcome` or `event` per the salience
+        rules in design subspec §8.3. We read both via getattr to keep this
+        forward-compatible with whatever the dispatcher decides to surface.
+        """
+        if result is None:
+            return {}
+        return {
+            "outcome": getattr(result, "outcome", None),
+            "event":   getattr(result, "event", None),
+            "disposition": getattr(result, "disposition", None),
+        }
+
+    def _episode_text(
+        self,
+        hot_inputs: dict[str, Any],
+        decision: Decision,
+        result: Any,
+    ) -> str:
+        """Render the episode text written to memory.
+
+        Plan 2 Phase 7 is wire-up, not prompt-engineering — this is a terse,
+        machine-parseable summary the server can embed. A later task can
+        replace it with a brain-rendered narrative line.
+        """
+        payload = {
+            "decision_kind": decision.kind.value,
+            "tool": decision.tool,
+            "reasoning": decision.reasoning[:200] if decision.reasoning else "",
+            "disposition": getattr(result, "disposition", None),
+            "triage": hot_inputs.get("episode_type") or "tick",
+        }
+        text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        # subspec §1.1 hard limit: 4000 chars
+        return text[:4000]
+
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -324,3 +492,22 @@ def _now_ms() -> int:
 
 def _eid() -> str:
     return str(uuid.uuid4())
+
+
+def _iso_from_ms(ms: int) -> str:
+    """Render a Unix-ms timestamp as an ISO-8601 string (UTC).
+
+    Used by memory.write_episode — the harness expects an ISO timestamp string.
+    """
+    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).isoformat()
+
+
+def _recalled_to_dict(ep: RecalledEpisode) -> dict[str, Any]:
+    """Convert a RecalledEpisode dataclass to a plain dict for prompt injection."""
+    return {
+        "episode_id": ep.episode_id,
+        "content_text": ep.content_text,
+        "timestamp": ep.timestamp,
+        "salience_score": ep.salience_score,
+        "score": ep.score,
+    }
