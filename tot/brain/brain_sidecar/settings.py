@@ -35,6 +35,14 @@ class Settings:
     brain_sse_dedup_capacity: int
     # V3.6: at-cap derivation cap
     max_player_level: int
+    # Plan 3: subset gating
+    subset_gate_enabled: bool
+    living_bot_count: int
+    subset_recompute_interval_s: float
+    subset_hysteresis_out_ticks: int
+    subset_hysteresis_in_ticks: int
+    subset_enroll_backoff_s: float
+    reduced_tick_interval_s: float
 
 
 def _parse_bool(val: str) -> bool:
@@ -44,6 +52,16 @@ def _parse_bool(val: str) -> bool:
 
 def get_settings() -> Settings:
     """Read live environment on each call. Tests can monkeypatch env vars."""
+    subset_gate_enabled = os.getenv("TOT_SUBSET_GATE_ENABLED", "true").lower() == "true"
+    living_bot_count = int(os.getenv("TOT_LIVING_BOT_COUNT", "10"))
+    if not 5 <= living_bot_count <= 15:
+        raise ValueError(f"TOT_LIVING_BOT_COUNT must be 5-15, got {living_bot_count}")
+    subset_recompute_interval_s = float(os.getenv("TOT_SUBSET_RECOMPUTE_INTERVAL_S", "60"))
+    subset_hysteresis_out_ticks = int(os.getenv("TOT_SUBSET_HYSTERESIS_OUT_TICKS", "2"))
+    subset_hysteresis_in_ticks = int(os.getenv("TOT_SUBSET_HYSTERESIS_IN_TICKS", "1"))
+    subset_enroll_backoff_s = float(os.getenv("TOT_SUBSET_ENROLL_BACKOFF_S", "300"))
+    reduced_tick_interval_s = float(os.getenv("TOT_REDUCED_TICK_INTERVAL_S", "300"))
+
     return Settings(
         bind_host=os.getenv("BRAIN_BIND_HOST", "0.0.0.0"),
         bind_port=int(os.getenv("BRAIN_BIND_PORT", "8091")),
@@ -65,4 +83,11 @@ def get_settings() -> Settings:
         brain_sse_coalesce_ms=int(os.getenv("BRAIN_SSE_COALESCE_MS", "200")),
         brain_sse_dedup_capacity=int(os.getenv("BRAIN_SSE_DEDUP_CAPACITY", "100")),
         max_player_level=int(os.getenv("BRAIN_MAX_PLAYER_LEVEL", "25")),
+        subset_gate_enabled=subset_gate_enabled,
+        living_bot_count=living_bot_count,
+        subset_recompute_interval_s=subset_recompute_interval_s,
+        subset_hysteresis_out_ticks=subset_hysteresis_out_ticks,
+        subset_hysteresis_in_ticks=subset_hysteresis_in_ticks,
+        subset_enroll_backoff_s=subset_enroll_backoff_s,
+        reduced_tick_interval_s=reduced_tick_interval_s,
     )
