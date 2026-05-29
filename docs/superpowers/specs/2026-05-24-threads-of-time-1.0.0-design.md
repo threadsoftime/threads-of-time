@@ -172,6 +172,13 @@ mod-agenticbots, brain sidecar, memory subsystem, harness daemon, and client MPQ
 
 ToT depends on **mod-playerbots** as an external module installed by the operator. The dependency is expressed as a compatible version range in `UPSTREAMS.toml` (e.g., `min = "<min mod-playerbots tag>"`, `tested = "<exact tag CI validated against>"`). The install script (§6.2) verifies the operator's mod-playerbots install satisfies the range and refuses to start if not. ToT does not ship, distribute, or modify mod-playerbots — it is an operator-installed dependency, same model as MySQL or the LLM endpoint.
 
+**Important caveat — build-time vs runtime:** mod-playerbots is needed at **both** build time and runtime, not just runtime. mod-harness-bridge's tool adapters and (1.1.0+) mod-agenticbots's BFD strategy glue both `#include` mod-playerbots headers and link against its symbols. Implications by operator path:
+
+- **Pre-built container operators (the primary distribution path):** mod-playerbots is baked into the worldserver image by ToT's CI before publishing to GHCR. Operators pulling `ghcr.io/threadsoftime/worldserver:X.Y.Z` get a self-contained image; no separate mod-playerbots install required at deploy time.
+- **Source-build operators:** Must clone mod-playerbots into `modules/mod-playerbots/` BEFORE running the build. The build pipeline (`tot/release/build.sh`) rsyncs/clones it into the ephemeral build tree.
+
+ToT's "no redistribution" stance (§10.2) is preserved either way: the ToT git repo never contains mod-playerbots source; the build-tree copy is ephemeral and doesn't appear in any ToT release artifact.
+
 ---
 
 ## 4. Dev workflow
@@ -370,7 +377,7 @@ client_assets = ["DBFilesClient/ItemSet.dbc", "DBFilesClient/Spell.dbc"]
 | RAM | 8 GB | 16+ GB | Worldserver + 50 bots ~6 GB; brain + memory ~1 GB each |
 | Disk | 20 GB | 50+ GB SSD | Images + MySQL + memory store growth |
 | Database | MySQL 8.x or MariaDB 10.6+ | MySQL 8.x | AC requirement; ToT inherits |
-| **mod-playerbots** | Installed alongside ToT modules | Latest mod-playerbots stable | Per-version compatibility range declared in `UPSTREAMS.toml`; install script verifies (§6.2) |
+| **mod-playerbots** | Installed alongside ToT modules — **build-time + runtime** | Latest mod-playerbots stable | Per-version compatibility range declared in `UPSTREAMS.toml`; install script verifies (§6.2). Pre-built container operators don't need to install separately (ToT's CI bakes mod-playerbots into the worldserver image). Source-build operators must clone mod-playerbots into `modules/mod-playerbots/` BEFORE running the build — mod-harness-bridge's adapters and (1.1.0+) mod-agenticbots's BFD glue both need its headers at compile time. ToT does not vendor mod-playerbots source (no redistribution per §10.2); the build pipeline rsyncs/clones it into the ephemeral build tree only. |
 | LLM endpoint | OpenAI-compatible chat + embeddings | Local Ollama with `qwen2.5:14b-instruct` + `nomic-embed-text` | BYOLLM |
 | WoW 3.3.5a client | Player-side | — | Players install MPQ separately |
 
