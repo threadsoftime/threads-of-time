@@ -1,0 +1,21 @@
+# tot/memory/Containerfile — ToT memory subsystem sidecar.
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Package confirmed: tot_memory
+# Factory confirmed: tot_memory.app:create_app  (see tot/memory/src/tot_memory/app.py:16)
+# Env vars confirmed from config.py:
+#   MEMORY_DATA_DIR   — path to SQLite store dir (replaces plan-draft MEM_DB_PATH)
+#   BRAIN_EMBEDDINGS_URL / BRAIN_EMBEDDINGS_MODEL / BRAIN_EMBEDDINGS_API_KEY
+FROM python:3.12-slim
+WORKDIR /app
+COPY pyproject.toml ./
+COPY src/ ./src/
+RUN pip install --no-cache-dir . && pip install --no-cache-dir "uvicorn[standard]"
+ENV PYTHONPATH=/app/src \
+    MEMORY_DATA_DIR=/var/memory \
+    MEM_BIND_HOST=0.0.0.0 \
+    MEM_BIND_PORT=8090
+EXPOSE 8090
+# Factory path confirmed against tot/memory/src/tot_memory/app.py:create_app
+# __main__.py also uses this path: uvicorn.run("tot_memory.app:create_app", factory=True)
+CMD ["uvicorn", "tot_memory.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8090"]
