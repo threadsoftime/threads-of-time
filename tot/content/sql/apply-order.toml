@@ -1,0 +1,35 @@
+# Explicit apply order for ToT content SQL (these files are undated; this
+# manifest is the single source of truth for sequence + target DB).
+# Applied by firstboot AFTER AC dbimport (stock + module SQL).
+# db is one of: world, characters, auth.
+
+[[apply]]
+file = "bracket1/world_bracket1_items.sql"
+db   = "world"
+[[apply]]
+file = "bracket1/world_bracket1_loot.sql"
+db   = "world"
+[[apply]]
+file = "bracket1/world_discovery_npc.sql"
+db   = "world"
+[[apply]]
+file = "bracket1/world_dk_stats_stub.sql"
+db   = "world"
+[[apply]]
+file = "bracket1/world_starter_respawn.sql"
+db   = "world"
+[[apply]]
+file = "bracket1-raid/world_bfd_raid_items.sql"
+db   = "world"
+[[apply]]
+file = "bracket1-raid/world_bfd_raid_creatures.sql"
+db   = "world"
+[[apply]]
+file = "bracket1-raid/world_bfd_raid_smart_scripts.sql"
+db   = "world"
+[[apply]]
+file = "bracket1-raid/world_bfd_raid_lockout.sql"
+db   = "world"
+[[apply]]
+file = "bracket1/characters_wipe_bots.sql"
+db   = "characters"
