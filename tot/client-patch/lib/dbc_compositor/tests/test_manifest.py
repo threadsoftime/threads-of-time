@@ -111,3 +111,39 @@ def test_range_registry_same_ids_different_dbc_no_collision():
     reg = RangeRegistry()
     reg.add("mod-bracket-sets", "Spell.dbc", [(70724, 70841)])
     reg.add("mod-warforged", "SpellItemEnchantment.dbc", [(70001, 70063)])  # different file -> fine
+
+
+def test_range_registry_rejects_touching_endpoints():
+    """ID 20 is claimed by both modules — touching endpoints are an overlap."""
+    reg = RangeRegistry()
+    reg.add("mod-a", "Spell.dbc", [(10, 20)])
+    with pytest.raises(CollisionError):
+        reg.add("mod-b", "Spell.dbc", [(20, 30)])
+
+
+def test_load_manifest_rejects_inverted_range(tmp_path):
+    """A range with min > max must raise ValueError before the registry sees it."""
+    mpath = _write(
+        tmp_path,
+        """
+        [manifest]
+        mod = "bad-mod"
+        [recipe]
+        entry = "build_dbc"
+        [id_ranges]
+        "Spell.dbc" = [{ min = 200, max = 100 }]
+        """,
+    )
+    with pytest.raises(ValueError, match="inverted"):
+        load_manifest(mpath)
+
+
+def test_range_registry_overlap_message_includes_coordinates():
+    """Strengthen the overlap message: coordinates must appear for debuggability."""
+    reg = RangeRegistry()
+    reg.add("mod-a", "Spell.dbc", [(10, 20)])
+    with pytest.raises(CollisionError) as exc:
+        reg.add("mod-b", "Spell.dbc", [(15, 25)])
+    msg = str(exc.value)
+    # overlap coords: max(10,15)=15, min(20,25)=20 must both appear
+    assert "15" in msg and "20" in msg

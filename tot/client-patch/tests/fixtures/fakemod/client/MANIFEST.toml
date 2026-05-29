@@ -1,0 +1,7 @@
+[manifest]
+mod = "fakemod"
+[recipe]
+entry = "build_dbc"
+# Deliberately OVERLAPS mod-bracket-sets Spell.dbc cluster 64854-64939.
+[id_ranges]
+"Spell.dbc" = [{ min = 64900, max = 65000 }]

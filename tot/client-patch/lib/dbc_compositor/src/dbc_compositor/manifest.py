@@ -60,7 +60,16 @@ def load_manifest(manifest_path: Path) -> Manifest:
 
     id_ranges: dict[str, list[tuple[int, int]]] = {}
     for dbc_name, ranges in data.get("id_ranges", {}).items():
-        id_ranges[dbc_name] = [(int(r["min"]), int(r["max"])) for r in ranges]
+        parsed: list[tuple[int, int]] = []
+        for r in ranges:
+            lo, hi = int(r["min"]), int(r["max"])
+            if lo > hi:
+                raise ValueError(
+                    f"{manifest_path}: [id_ranges] {dbc_name!r} has inverted range "
+                    f"[{lo}, {hi}] (min > max). Correct the MANIFEST.toml."
+                )
+            parsed.append((lo, hi))
+        id_ranges[dbc_name] = parsed
 
     return Manifest(
         mod=mod,
