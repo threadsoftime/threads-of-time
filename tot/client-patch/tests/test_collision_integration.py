@@ -22,7 +22,9 @@ def test_real_manifests_load():
 
 
 def test_two_real_modules_do_not_collide():
-    """Different files => no collision even though 70001-70063 ⊂ 70724-70841 numerically."""
+    """Different files => no collision: warforged SpellItemEnchantment.dbc (70001-70063)
+    and bracket-sets Spell.dbc (70724-70841) both sit in the 70k space but on different
+    DBC files, so RangeRegistry (which keys by filename) does not flag them."""
     reg = RangeRegistry()
     for mpath in (BRACKET, WARFORGED):
         m = load_manifest(mpath)
