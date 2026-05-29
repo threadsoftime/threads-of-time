@@ -68,11 +68,12 @@ def _probe_obs_ping(url: str, tok: str) -> None:
 
 
 def _probe_obs_list_bot_population(url: str, tok: str) -> None:
-    """obs.list_bot_population must return a non-empty result list."""
+    """obs.list_bot_population must return a non-empty bot list."""
     resp = call(url, tok, "obs.list_bot_population")
-    # Response shape: {"ok": true, "result": [...]} — unwrap before checking.
+    # Response shape: {"ok": true, "result": {"bots": [...]}} — unwrap both layers.
     result = resp.get("result") if isinstance(resp, dict) else resp
-    if not result:
+    bots = result.get("bots") if isinstance(result, dict) else result
+    if not bots:
         raise AssertionError(
             f"obs.list_bot_population returned no bots — "
             f"worldserver may not have spawned bot population yet "
@@ -97,12 +98,14 @@ def _probe_obs_list_players(url: str, tok: str) -> None:
 def _probe_obs_shape(url: str, tok: str) -> None:
     """Shape smoke: list_bot_population result entries must be dicts with a guid."""
     resp = call(url, tok, "obs.list_bot_population")
+    # Response shape: {"ok": true, "result": {"bots": [...]}} — unwrap both layers.
     result = resp.get("result") if isinstance(resp, dict) else resp
-    if result:
-        entry = result[0]
+    bots = result.get("bots") if isinstance(result, dict) else result
+    if bots:
+        entry = bots[0]
         if not isinstance(entry, dict):
             raise AssertionError(
-                f"obs.list_bot_population result[0] is not a dict: {entry!r}"
+                f"obs.list_bot_population result.bots[0] is not a dict: {entry!r}"
             )
         # The obs layer exposes bot entries; any entry must be a mapping.
         # We do NOT assert a specific key set here — that would make this
