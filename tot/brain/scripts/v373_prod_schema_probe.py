@@ -26,8 +26,8 @@ from brain_sidecar.mcp_clients import McpClient
 LLAMA_URL = "http://192.168.1.3:8080/v1/chat/completions"
 HARNESS_URL = "http://192.168.1.3:8099/mcp/mcp"
 MEMORY_URL = "http://192.168.1.3:8090/mcp/mcp"
-HARNESS_BEARER = "***REMOVED***"
-MEMORY_BEARER = "***REMOVED***"
+HARNESS_BEARER = os.environ.get("HARNESS_BEARER", "")
+MEMORY_BEARER = os.environ.get("MEMORY_BEARER", "")
 
 
 SYSTEM = (
