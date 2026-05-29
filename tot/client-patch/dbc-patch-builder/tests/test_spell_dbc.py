@@ -10,8 +10,8 @@ from dbc_patch_builder.spell_dbc import (
 )
 from dbc_patch_builder.dbc_io import HEADER_SIZE, WDBC_MAGIC
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-BASELINE = REPO_ROOT / "tools" / "dbc-patch-builder" / "baseline" / "spell_dbc_baseline.tsv"
+PKG_ROOT = Path(__file__).resolve().parents[1]  # tot/client-patch/dbc-patch-builder/
+BASELINE = PKG_ROOT / "baseline" / "spell_dbc_baseline.tsv"
 
 
 def test_baseline_has_54_rows():

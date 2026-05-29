@@ -12,13 +12,14 @@ from .itemset_dbc import build_itemset_dbc, compose_27_class_spec_rows, fallback
 from .spell_dbc import SpellOverride, load_baseline, build_spell_dbc_overrides
 from .mpq_pack import pack_mpq
 
-# Repo-relative paths (this file lives at tools/dbc-patch-builder/src/dbc_patch_builder/)
-REPO_ROOT = Path(__file__).resolve().parents[4]
+# Repo-relative paths (this file lives at tot/client-patch/dbc-patch-builder/src/dbc_patch_builder/)
+REPO_ROOT = Path(__file__).resolve().parents[5]
+PKG_ROOT = Path(__file__).resolve().parents[2]  # tot/client-patch/dbc-patch-builder/
 BONUS_SEED = REPO_ROOT / "modules" / "mod-bracket-sets" / "data" / "sql" / "world" / "2026_05_13_01_bracket_set_bonus_map_seed.sql"
 DESCRIPTIONS = REPO_ROOT / "modules" / "mod-bracket-sets" / "data" / "fixtures" / "bracket_set_descriptions.tsv"
 ITEMSET_MAP_SEED = REPO_ROOT / "modules" / "mod-bracket-sets" / "data" / "sql" / "world" / "2026_05_23_07_bracket_set_itemset_map_seed.sql"
-BASELINE = REPO_ROOT / "tools" / "dbc-patch-builder" / "baseline" / "spell_dbc_baseline.tsv"
-BUILD_DIR = REPO_ROOT / "tools" / "dbc-patch-builder" / "build"
+BASELINE = PKG_ROOT / "baseline" / "spell_dbc_baseline.tsv"
+BUILD_DIR = PKG_ROOT / "build"
 MPQ_OUT = BUILD_DIR / "patch-Z.MPQ"
 
 BRACKET_WINDOW_LINE = "Active while in Bracket 1 (L25-34)"
