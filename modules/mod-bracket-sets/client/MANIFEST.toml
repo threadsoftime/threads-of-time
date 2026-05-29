@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# mod-bracket-sets client DBC contribution for the MPQ compositor.
+# Source paths are relative to the MODULE ROOT (modules/mod-bracket-sets/).
+
+[manifest]
+mod = "mod-bracket-sets"
+
+[sources]
+bonus_map      = "data/sql/world/2026_05_13_01_bracket_set_bonus_map_seed.sql"
+itemset_map    = "data/sql/world/2026_05_23_07_bracket_set_itemset_map_seed.sql"
+descriptions   = "data/fixtures/bracket_set_descriptions.tsv"
+spell_baseline = "client/baseline/spell_dbc_baseline.tsv"
+
+[recipe]
+entry = "build_dbc"
+
+[id_ranges]
+# ItemSet.dbc: fallback row 90101 + 27 class+spec rows, all within 90100-90199.
+"ItemSet.dbc" = [{ min = 90100, max = 90199 }]
+# Spell.dbc: 54 overrides in three disjoint clusters (18 + 27 + 9 = 54).
+"Spell.dbc" = [
+    { min = 64854, max = 64939 },
+    { min = 67121, max = 67268 },
+    { min = 70724, max = 70841 },
+]

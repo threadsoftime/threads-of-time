@@ -1,26 +1,41 @@
-# tools/dbc-patch-builder/src/dbc_patch_builder/build.py
-"""End-to-end builder: bonus_map_seed + descriptions + baseline -> patch-Z.MPQ + migration SQL."""
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""mod-bracket-sets client DBC recipe.
+
+Composes the Bracket 1 tier-set client DBCs (ItemSet.dbc + Spell.dbc) from the
+module's authored sources. Exposes the MPQ-compositor recipe contract:
+
+    build(sources: dict[str, Path]) -> {dbc_name: bytes}
+
+`sources` is supplied by the compositor from this module's MANIFEST.toml
+[sources] table (already resolved to absolute paths). Expected keys:
+    bonus_map      -> bracket_set_bonus_map seed SQL (54 rows)
+    itemset_map    -> bracket_set_itemset_map seed SQL (27 (class,spec)->itemset)
+    descriptions   -> bracket_set_descriptions.tsv (54 rows: flavor + mechanic)
+    spell_baseline -> spell_dbc_baseline.tsv (54 raw 936-byte records)
+
+The output blobs are byte-locked by golden/ regression anchors captured from the
+legacy dbc-patch-builder (itemset sha=2a5685d6, spell sha=476cedea). Any change
+to the compose logic or the tables below WILL break the golden tests — that is
+the intended safety net.
+"""
 from __future__ import annotations
-import argparse
+
 import csv
-import sys
+import re
 from pathlib import Path
 from typing import Dict, List
 
 from dbc_compositor.bonus_map_parser import parse_bonus_map_seed
-from dbc_compositor.itemset_dbc import build_itemset_dbc, compose_27_class_spec_rows, fallback_row
-from dbc_compositor.spell_dbc import SpellOverride, load_baseline, build_spell_dbc_overrides
-from dbc_compositor.mpq_pack import pack_mpq
-
-# Repo-relative paths (this file lives at tot/client-patch/dbc-patch-builder/src/dbc_patch_builder/)
-REPO_ROOT = Path(__file__).resolve().parents[5]
-PKG_ROOT = Path(__file__).resolve().parents[2]  # tot/client-patch/dbc-patch-builder/
-BONUS_SEED = REPO_ROOT / "modules" / "mod-bracket-sets" / "data" / "sql" / "world" / "2026_05_13_01_bracket_set_bonus_map_seed.sql"
-DESCRIPTIONS = REPO_ROOT / "modules" / "mod-bracket-sets" / "data" / "fixtures" / "bracket_set_descriptions.tsv"
-ITEMSET_MAP_SEED = REPO_ROOT / "modules" / "mod-bracket-sets" / "data" / "sql" / "world" / "2026_05_23_07_bracket_set_itemset_map_seed.sql"
-BASELINE = REPO_ROOT / "modules" / "mod-bracket-sets" / "client" / "baseline" / "spell_dbc_baseline.tsv"
-BUILD_DIR = PKG_ROOT / "build"
-MPQ_OUT = BUILD_DIR / "patch-Z.MPQ"
+from dbc_compositor.itemset_dbc import (
+    build_itemset_dbc,
+    compose_27_class_spec_rows,
+    fallback_row,
+)
+from dbc_compositor.spell_dbc import (
+    SpellOverride,
+    build_spell_dbc_overrides,
+    load_baseline,
+)
 
 BRACKET_WINDOW_LINE = "Active while in Bracket 1 (L25-34)"
 
@@ -28,6 +43,8 @@ BRACKET_WINDOW_LINE = "Active while in Bracket 1 (L25-34)"
 # on 2026-05-25. Each class's set is composed of (class-appropriate armor) + misc.
 # The ItemSet.dbc itemId[17] field must contain at least one non-zero entry or the
 # 3.3.5a client treats the set as malformed and skips bonus rendering.
+# These tables are copied verbatim from the legacy dbc-patch-builder build.py;
+# they are load-bearing for the golden blobs and MUST NOT be reordered/edited.
 _ITEMS_MISC    = [90004, 90005, 90009, 90020, 90025, 90037, 90039, 90044, 90048]   # neck/ring/cloak/trinket (9)
 _ITEMS_CLOTH   = [90007, 90038, 90040, 90041, 90042, 90043, 90046, 90051, 90201, 90205]  # 10
 _ITEMS_LEATHER = [90003, 90010, 90012, 90024, 90027, 90033, 90049, 90203]               # 8
@@ -50,10 +67,10 @@ CLASS_ITEMS = {
 }
 
 
-def load_descriptions(tsv_path: Path) -> Dict[int, tuple[str, str]]:
+def _load_descriptions(tsv_path: Path) -> Dict[int, tuple[str, str]]:
     """Parse the descriptions TSV: spell_id -> (flavor, mechanic)."""
     out: Dict[int, tuple[str, str]] = {}
-    with tsv_path.open() as f:
+    with Path(tsv_path).open() as f:
         reader = csv.reader(f, delimiter="\t")
         for row in reader:
             if not row:
@@ -68,10 +85,9 @@ def load_descriptions(tsv_path: Path) -> Dict[int, tuple[str, str]]:
     return out
 
 
-def parse_itemset_map_seed(sql_path: Path) -> Dict[tuple[int, int], int]:
+def _parse_itemset_map_seed(sql_path: Path) -> Dict[tuple[int, int], int]:
     """Pull (class, spec) -> itemset_id from the seed SQL for Bracket 1 (bracket_id=1)."""
-    import re
-    text = sql_path.read_text()
+    text = Path(sql_path).read_text()
     out: Dict[tuple[int, int], int] = {}
     # Match: ( cls, spec, 1, itemset_id), tolerating whitespace
     for m in re.finditer(r"\(\s*(\d+)\s*,\s*(\d+)\s*,\s*1\s*,\s*(\d+)\s*\)", text):
@@ -80,36 +96,31 @@ def parse_itemset_map_seed(sql_path: Path) -> Dict[tuple[int, int], int]:
     return out
 
 
-def main(argv: List[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Build patch-Z.MPQ for Bracket 1 tier-set UI")
-    parser.add_argument("--out", type=Path, default=MPQ_OUT, help="Output MPQ path")
-    args = parser.parse_args(argv)
+def build(sources: Dict[str, Path]) -> Dict[str, bytes]:
+    """Compose the Bracket 1 client DBCs.
 
-    print(f"Reading bonus map: {BONUS_SEED}")
-    bonus_rows = parse_bonus_map_seed(BONUS_SEED)
+    Returns {"ItemSet.dbc": <bytes>, "Spell.dbc": <bytes>} — the patch-local
+    override blocks the compositor packs into the unified patch MPQ.
+    """
+    bonus_rows = parse_bonus_map_seed(sources["bonus_map"])
     assert len(bonus_rows) == 54, f"expected 54 bonus rows, got {len(bonus_rows)}"
 
-    print(f"Reading itemset map: {ITEMSET_MAP_SEED}")
-    itemset_map = parse_itemset_map_seed(ITEMSET_MAP_SEED)
+    itemset_map = _parse_itemset_map_seed(sources["itemset_map"])
     assert len(itemset_map) == 27, f"expected 27 itemset rows, got {len(itemset_map)}"
 
-    print(f"Reading descriptions: {DESCRIPTIONS}")
-    descriptions = load_descriptions(DESCRIPTIONS)
+    descriptions = _load_descriptions(sources["descriptions"])
     assert len(descriptions) == 54, f"expected 54 description rows, got {len(descriptions)}"
 
-    print(f"Reading Spell.dbc baseline: {BASELINE}")
-    baseline = load_baseline(BASELINE)
+    baseline = load_baseline(sources["spell_baseline"])
     assert len(baseline) == 54, f"expected 54 baseline rows, got {len(baseline)}"
 
     # Compose ItemSet.dbc — 28 rows (1 fallback + 27 class+spec)
-    print("Composing ItemSet.dbc (28 rows)")
     itemset_rows = [fallback_row()] + compose_27_class_spec_rows(
         bonus_rows, itemset_map, class_items=CLASS_ITEMS
     )
     itemset_blob = build_itemset_dbc(itemset_rows)
 
     # Compose Spell.dbc overrides (54 rows). Order by spell_id for deterministic output.
-    print("Composing Spell.dbc overrides (54 rows)")
     name_by_spell = {r.spell_id: r.display_name for r in bonus_rows}
     overrides: List[SpellOverride] = []
     for spell_id in sorted(descriptions.keys()):
@@ -121,18 +132,4 @@ def main(argv: List[str] | None = None) -> int:
         ))
     spell_blob = build_spell_dbc_overrides(baseline, overrides)
 
-    # Pack MPQ
-    print(f"Packing MPQ -> {args.out}")
-    pack_mpq(args.out, {
-        "DBFilesClient\\ItemSet.dbc": itemset_blob,
-        "DBFilesClient\\Spell.dbc": spell_blob,
-    })
-
-    import hashlib
-    sha = hashlib.sha256(args.out.read_bytes()).hexdigest()
-    print(f"DONE: {args.out} ({args.out.stat().st_size} bytes, sha256={sha[:16]}...)")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    return {"ItemSet.dbc": itemset_blob, "Spell.dbc": spell_blob}

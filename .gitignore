@@ -123,6 +123,10 @@ tot/*/.pytest_cache/
 tot/*/*.egg-info/
 tot/*/.venv/
 
+# Python build artifacts (any module client recipe / tests)
+__pycache__/
+.pytest_cache/
+
 # Local operator state
 secrets/
 data/

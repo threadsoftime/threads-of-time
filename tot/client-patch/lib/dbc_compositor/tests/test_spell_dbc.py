@@ -10,8 +10,13 @@ from dbc_compositor.spell_dbc import (
 )
 from dbc_compositor.dbc_io import HEADER_SIZE, WDBC_MAGIC
 
-CLIENT_PATCH = Path(__file__).resolve().parents[3]  # tot/client-patch/
-BASELINE = CLIENT_PATCH / "dbc-patch-builder" / "baseline" / "spell_dbc_baseline.tsv"
+# Baseline TSV moved under modules/mod-bracket-sets/client/ in MPQ-compositor Task 3.
+# REPO root is parents[5] from this file (tot/client-patch/lib/dbc_compositor/tests/).
+# NOTE: this lib test now reads module data — a known transitional cross-package
+# coupling (Task 1 review M3); kept green here until the module owns its own tests.
+REPO_ROOT = Path(__file__).resolve().parents[5]
+BASELINE = REPO_ROOT / "modules" / "mod-bracket-sets" / "client" / "baseline" / "spell_dbc_baseline.tsv"
+assert BASELINE.exists(), f"baseline not found at {BASELINE}"
 
 
 def test_baseline_has_54_rows():
