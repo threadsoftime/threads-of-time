@@ -1,0 +1,30 @@
+name: ToT Release
+# Triggered by pushing a vX.Y.Z tag. Runs release.sh --dry-run to validate
+# artifacts, verifies checksums, then creates the GitHub Release.
+# GHCR images for worldserver/db-import are pushed by the maintainer's local
+# release.sh run prior to tagging — documented in the release runbook.
+on:
+  push:
+    tags: ['v*.*.*']
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build release artifacts (steps 1-8, no publish)
+        run: bash tot/release/release.sh "${GITHUB_REF_NAME}" --dry-run
+      - name: Verify checksums
+        run: cd release-artifacts && (sha256sum -c SHA256SUMS || shasum -a256 -c SHA256SUMS)
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+        run: |
+          gh release create "${GITHUB_REF_NAME}" release-artifacts/* \
+            --title "Threads of Time ${GITHUB_REF_NAME}" \
+            --generate-notes
