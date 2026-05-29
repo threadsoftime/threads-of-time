@@ -149,3 +149,12 @@ data/
 !/modules/mod-harness-bridge/
 !/modules/mod-rotation-mode/
 !/modules/mod-warforged/
+
+# Internal development artifacts — kept locally, not published (Heimdal-specific build notes)
+/docs/superpowers/
+/FOUNDATION_STATE.md
+/MEMORY_SUBSYSTEM_STATE.md
+/MPQ_COMPOSITOR_STATE.md
+/SUBSET_GATING_STATE.md
+/SUBSET_GATING_IN_GAME_TEST.md
+/OPERATOR_INSTALL_STATE.md

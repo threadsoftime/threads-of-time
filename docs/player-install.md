@@ -1,7 +1,7 @@
 # Threads of Time — Player Install Guide
 
 **Version:** see the filename of the MPQ you downloaded  
-**Realm:** Heimdal (private; invitation only)
+**Realm:** whatever address your server operator gives you
 
 ---
 
@@ -33,16 +33,15 @@ WoW/
 The `ZZ` suffix loads last among all patch files, ensuring ToT overrides take
 precedence over any other addons or patches.
 
-### Step 2 — Point your client at the Heimdal realm
+### Step 2 — Point your client at your realm
 
 Edit (or create) `WoW/Data/enUS/realmlist.wtf` and set:
 
 ```
-set realmlist heimdal.example.com
+set realmlist realm.example.com
 ```
 
-Replace `heimdal.example.com` with the actual realm address provided by your
-invitation.
+Replace `realm.example.com` with the address your server operator gave you.
 
 ### Step 3 — Launch the game
 
@@ -115,8 +114,7 @@ You do NOT need to uninstall anything; overwriting the file is sufficient.
 
 ## Legal / Disclaimer
 
-Threads of Time is a fan-made private-server project not affiliated with or
+Threads of Time is a non-commercial, fan-made project not affiliated with or
 endorsed by Blizzard Entertainment. World of Warcraft® and all related assets
 are the property of Blizzard Entertainment, Inc. This patch is provided for
-educational and entertainment purposes on a private, invitation-only server.
-Redistribution outside the Heimdal community is not permitted.
+educational and entertainment purposes only.
