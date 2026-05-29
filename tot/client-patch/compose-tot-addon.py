@@ -53,10 +53,11 @@ def discover_contributions() -> list[dict]:
     # rather than modules/, so it is discovered separately.
     branding = SCRIPT_DIR / "branding" / "addon-contrib" / "manifest.toml"
     print(f"  branding manifest path: {branding}")
-    assert branding.exists(), (
-        f"branding manifest not found at {branding}; "
-        "create tot/client-patch/branding/addon-contrib/manifest.toml"
-    )
+    if not branding.exists():
+        raise SystemExit(
+            f"branding manifest not found at {branding}; "
+            "create tot/client-patch/branding/addon-contrib/manifest.toml"
+        )
     manifest_paths.append(branding)
 
     contribs = []
