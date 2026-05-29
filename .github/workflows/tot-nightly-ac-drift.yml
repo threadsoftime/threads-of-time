@@ -1,0 +1,40 @@
+name: ToT Nightly AC Drift
+# Nightly rebase dry-run against upstream AzerothCore master.
+# Opens a GitHub issue (labelled 'ac-drift') if merge conflicts are detected.
+on:
+  schedule:
+    - cron: '0 7 * * *'
+  workflow_dispatch: {}
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Attempt rebase onto upstream/ac@HEAD
+        id: rebase
+        run: |
+          git remote add upstream-ac https://github.com/azerothcore/azerothcore-wotlk || true
+          git fetch upstream-ac master
+          git config user.email ci@threadsoftime
+          git config user.name tot-ci
+          BASE=$(grep '^sha' UPSTREAMS.toml | head -1 | cut -d'"' -f2)
+          if git rebase --onto upstream-ac/master "$BASE" HEAD 2>rebase.log; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            git rebase --abort || true
+          fi
+      - name: Open issue on conflict
+        if: steps.rebase.outputs.clean == 'false'
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+        run: |
+          gh issue create \
+            --title "AC drift: rebase conflicts $(date -u +%F)" \
+            --body-file rebase.log \
+            --label ac-drift || true
