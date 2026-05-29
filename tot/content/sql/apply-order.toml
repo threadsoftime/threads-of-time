@@ -29,7 +29,7 @@ file = "bracket1-raid/world_bfd_raid_smart_scripts.sql"
 db   = "world"
 [[apply]]
 file = "bracket1-raid/world_bfd_raid_lockout.sql"
-db   = "world"
+db   = "characters"
 [[apply]]
 file = "bracket1/characters_wipe_bots.sql"
 db   = "characters"
