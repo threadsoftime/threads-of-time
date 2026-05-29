@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tot/release/release.sh vX.Y.Z [--dry-run] [--skip-images]
+# tot/release/release.sh vX.Y.Z [--dry-run] [--skip-images] [--skip-tests]
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
 # 11-step ToT release orchestrator.
@@ -12,21 +12,27 @@
 #   --skip-images  Skip step 5 (image build). Use when Heimdal is
 #                  unavailable (the -j4 worldserver build cannot run
 #                  locally). Implied by --dry-run on hosts without podman.
+#   --skip-tests   Skip step 3 (pytest suite). Use when brain_sidecar or
+#                  other packages are not installed in the local env (CI
+#                  installs everything; local smoke may not have all deps).
 #
 # Usage:
-#   bash release.sh v1.0.0                                # full release
-#   bash release.sh v0.0.1-dryrun --dry-run --skip-images # local smoke
+#   bash release.sh v1.0.0                                      # full release
+#   bash release.sh v0.0.1-dryrun --dry-run --skip-images       # local smoke
+#   bash release.sh v0.0.1-dryrun --dry-run --skip-images --skip-tests  # minimal
 set -euo pipefail
 
-VERSION="${1:?usage: release.sh vX.Y.Z [--dry-run] [--skip-images]}"
+VERSION="${1:?usage: release.sh vX.Y.Z [--dry-run] [--skip-images] [--skip-tests]}"
 shift || true
 
 DRY=0
 SKIP_IMAGES=0
+SKIP_TESTS=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run)      DRY=1 ;;
     --skip-images)  SKIP_IMAGES=1 ;;
+    --skip-tests)   SKIP_TESTS=1 ;;
     *) echo "unknown flag: $arg" >&2; exit 2 ;;
   esac
 done
@@ -35,8 +41,9 @@ V="${VERSION#v}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ART="${REPO}/release-artifacts"
 
-# Clean + recreate artifact dir (use mv-to-trash, never rm -rf in prod;
-# this directory is ephemeral build output, not source).
+# Clean + recreate artifact dir.
+# Use mv (not rm -rf) so the previous run is recoverable from release-artifacts.prev-*.
+# The .gitignore pattern release-artifacts.prev-*/ keeps these out of git status.
 [ -d "${ART}" ] && mv "${ART}" "${ART}.prev-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
 mkdir -p "${ART}/ac-patches"
 
@@ -79,7 +86,12 @@ grep -A2 '^\[ac\]' "${REPO}/UPSTREAMS.toml" | grep '^sha'
 
 # ---------------------------------------------------------------------------
 step "3/11 full test suite"
-( cd "${REPO}" && python3 -m pytest tot/ tests/ -q )
+if [ "${SKIP_TESTS}" = "1" ]; then
+  echo "  SKIPPED (--skip-tests). Run manually on a host with all deps installed:"
+  echo "    pip install -e tot/memory -e tot/brain && python3 -m pytest tot/ tests/ -q"
+else
+  ( cd "${REPO}" && python3 -m pytest tot/ tests/ -q )
+fi
 
 # ---------------------------------------------------------------------------
 step "4/11 AC patch series"
@@ -117,22 +129,28 @@ fi
 
 # ---------------------------------------------------------------------------
 step "7/11 bundle reference stack"
-STACK_EXTRAS=""
-for f in docs/install.md docs/operator-troubleshooting.md docs/byollm-setup.md; do
-  [ -f "${REPO}/${f}" ] && STACK_EXTRAS="${STACK_EXTRAS} ${f}"
+# Conditionally include files that may not yet exist (authored in later phases).
+STACK_ITEMS="tot/deploy"
+for f in install-tot.sh docs/install.md docs/operator-troubleshooting.md docs/byollm-setup.md; do
+  if [ -f "${REPO}/${f}" ]; then
+    STACK_ITEMS="${STACK_ITEMS} ${f}"
+  else
+    echo "  NOTE: ${f} not yet authored (future phase) — omitted from bundle"
+  fi
 done
 # shellcheck disable=SC2086
-( cd "${REPO}" && tar czf "${ART}/tot-${V}-stack.tar.gz" \
-    tot/deploy install-tot.sh ${STACK_EXTRAS} )
+( cd "${REPO}" && tar czf "${ART}/tot-${V}-stack.tar.gz" ${STACK_ITEMS} )
 echo "  stack bundle: tot-${V}-stack.tar.gz"
 
 # ---------------------------------------------------------------------------
 step "8/11 checksums"
+# SC2094 false positive: SHA256SUMS excluded from find via ! -name SHA256SUMS.
+# shellcheck disable=SC2094
 ( cd "${ART}" && {
     if command -v sha256sum >/dev/null 2>&1; then
-      sha256sum ./*
+      find . -maxdepth 1 -type f ! -name SHA256SUMS -exec sha256sum {} +
     else
-      shasum -a 256 ./*
+      find . -maxdepth 1 -type f ! -name SHA256SUMS -exec shasum -a 256 {} +
     fi
   } > SHA256SUMS )
 echo "  SHA256SUMS written ($(grep -c '' "${ART}/SHA256SUMS") entries)"
@@ -143,6 +161,7 @@ if [ "${DRY}" = "1" ]; then
   echo "DRY RUN complete (steps 1-8). Artifacts in ${ART}"
   echo "Skipped: step 9 (tag+push), step 10 (push images), step 11 (GH Release)"
   [ "${SKIP_IMAGES}" = "1" ] && echo "Note: step 5 (image build) was also skipped (--skip-images)."
+  [ "${SKIP_TESTS}" = "1" ]  && echo "Note: step 3 (full test suite) was also skipped (--skip-tests)."
   exit 0
 fi
 

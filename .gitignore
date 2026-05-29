@@ -116,6 +116,7 @@ local.properties
 # Build artifacts
 /build/
 release-artifacts/
+release-artifacts.prev-*/
 
 # Sidecar dev artifacts
 tot/*/__pycache__/
