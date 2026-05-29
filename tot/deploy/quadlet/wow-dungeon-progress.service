@@ -1,7 +1,0 @@
-[Unit]
-Description=Hourly bracket-1 dungeon-participation snapshot
-After=wow-database.service wow-worldserver.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/dungeon-progress-check.sh
