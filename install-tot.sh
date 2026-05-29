@@ -23,6 +23,9 @@ else echo "    not present; pre-built image operators can ignore. To source-buil
 say "3/7 scaffolding $TOT_HOME"
 mkdir -p "$TOT_HOME"/secrets "$TOT_HOME"/data/brain "$TOT_HOME"/data/memory \
          "$TOT_HOME"/etc/harness "$TOT_HOME"/logs/harness "$TOT_HOME"/logs/brain "$TOT_HOME"/backups
+# Containers run as UID 1000 (acore); ensure they can write to runtime dirs.
+chmod 777 "$TOT_HOME"/secrets "$TOT_HOME"/data "$TOT_HOME"/logs \
+          "$TOT_HOME"/etc "$TOT_HOME"/logs/harness "$TOT_HOME"/logs/brain 2>/dev/null || true
 # fetch stack assets (from release tarball if curl-installed; from repo if local)
 if [ -d tot/deploy ]; then SRC=tot/deploy; else
   curl -fsSL "https://github.com/threadsoftime/threads-of-time/releases/download/v$TOT_VERSION/tot-$TOT_VERSION-stack.tar.gz" \
