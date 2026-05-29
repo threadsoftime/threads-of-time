@@ -1,17 +1,17 @@
 # tools/dbc-patch-builder/tests/test_spell_dbc.py
 import struct
 from pathlib import Path
-from dbc_patch_builder.spell_dbc import (
+from dbc_compositor.spell_dbc import (
     SpellOverride,
     load_baseline,
     build_spell_dbc_overrides,
     SPELL_RECORD_SIZE,
     SPELL_FIELD_COUNT,
 )
-from dbc_patch_builder.dbc_io import HEADER_SIZE, WDBC_MAGIC
+from dbc_compositor.dbc_io import HEADER_SIZE, WDBC_MAGIC
 
-PKG_ROOT = Path(__file__).resolve().parents[1]  # tot/client-patch/dbc-patch-builder/
-BASELINE = PKG_ROOT / "baseline" / "spell_dbc_baseline.tsv"
+CLIENT_PATCH = Path(__file__).resolve().parents[3]  # tot/client-patch/
+BASELINE = CLIENT_PATCH / "dbc-patch-builder" / "baseline" / "spell_dbc_baseline.tsv"
 
 
 def test_baseline_has_54_rows():

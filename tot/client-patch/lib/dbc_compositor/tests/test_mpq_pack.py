@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from dbc_patch_builder.mpq_pack import pack_mpq
+from dbc_compositor.mpq_pack import pack_mpq
 
 
 def test_pack_creates_file():

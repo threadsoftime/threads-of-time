@@ -1,7 +1,7 @@
 # tools/dbc-patch-builder/tests/test_itemset_dbc.py
 import struct
-from dbc_patch_builder.itemset_dbc import ItemSetRow, build_itemset_dbc
-from dbc_patch_builder.dbc_io import HEADER_SIZE, WDBC_MAGIC
+from dbc_compositor.itemset_dbc import ItemSetRow, build_itemset_dbc
+from dbc_compositor.dbc_io import HEADER_SIZE, WDBC_MAGIC
 
 
 def make_warrior_arms_row():

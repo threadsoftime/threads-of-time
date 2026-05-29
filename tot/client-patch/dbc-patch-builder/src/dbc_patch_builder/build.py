@@ -7,10 +7,10 @@ import sys
 from pathlib import Path
 from typing import Dict, List
 
-from .bonus_map_parser import parse_bonus_map_seed
-from .itemset_dbc import build_itemset_dbc, compose_27_class_spec_rows, fallback_row
-from .spell_dbc import SpellOverride, load_baseline, build_spell_dbc_overrides
-from .mpq_pack import pack_mpq
+from dbc_compositor.bonus_map_parser import parse_bonus_map_seed
+from dbc_compositor.itemset_dbc import build_itemset_dbc, compose_27_class_spec_rows, fallback_row
+from dbc_compositor.spell_dbc import SpellOverride, load_baseline, build_spell_dbc_overrides
+from dbc_compositor.mpq_pack import pack_mpq
 
 # Repo-relative paths (this file lives at tot/client-patch/dbc-patch-builder/src/dbc_patch_builder/)
 REPO_ROOT = Path(__file__).resolve().parents[5]

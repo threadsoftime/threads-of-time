@@ -18,3 +18,4 @@ dbc-patch-check = "dbc_patch_builder.check:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src", "../lib/dbc_compositor/src"]

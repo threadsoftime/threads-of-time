@@ -1,8 +1,8 @@
 # tools/dbc-patch-builder/tests/test_bonus_map_parser.py
 from pathlib import Path
-from dbc_patch_builder.bonus_map_parser import parse_bonus_map_seed, BonusRow
+from dbc_compositor.bonus_map_parser import parse_bonus_map_seed, BonusRow
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = Path(__file__).resolve().parents[5]
 SEED_SQL = REPO_ROOT / "modules" / "mod-bracket-sets" / "data" / "sql" / "world" / "2026_05_13_01_bracket_set_bonus_map_seed.sql"
 
 
