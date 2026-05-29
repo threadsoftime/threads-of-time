@@ -1,0 +1,24 @@
+[Unit]
+Description=Threads of Time first-boot bootstrap (DB schema + seed)
+Requires=tot-database.service
+After=tot-database.service
+Before=tot-worldserver.service tot-authserver.service
+
+[Container]
+ContainerName=tot-firstboot
+Image=@GHCR_NS@/db-import:@TOT_VERSION@
+Pod=tot-server.pod
+EnvironmentFile=@TOT_HOME@/.env
+Volume=@TOT_HOME@/data:/tot/data:Z
+Volume=@TOT_HOME@/secrets:/tot/secrets:Z
+Volume=@TOT_HOME@/firstboot:/tot/firstboot:Z,ro
+Volume=@TOT_HOME@/content-sql:/tot/content-sql:Z,ro
+Exec=/usr/bin/env bash /tot/firstboot/firstboot.sh
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target default.target
