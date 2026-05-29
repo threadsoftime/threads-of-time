@@ -11,7 +11,8 @@ Volume=@TOT_HOME@/etc/harness:/etc/harness:z,ro
 Volume=@TOT_HOME@/logs/harness:/var/log/harness:z
 EnvironmentFile=@TOT_HOME@/.env
 Exec=serve --config /etc/harness/tokens.yaml
-PodmanArgs=--memory=${TOT_HARNESS_MEM_LIMIT}
+# Quadlet can't interpolate ${VAR}; fixed default. Compose honors TOT_HARNESS_MEM_LIMIT.
+PodmanArgs=--memory=200m
 
 [Service]
 Restart=on-failure

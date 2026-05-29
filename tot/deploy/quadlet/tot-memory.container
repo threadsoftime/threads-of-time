@@ -12,7 +12,8 @@ EnvironmentFile=@TOT_HOME@/.env
 Environment=MEMORY_DATA_DIR=/var/memory
 Environment=MEM_BIND_HOST=127.0.0.1
 Environment=MEM_BIND_PORT=8090
-PodmanArgs=--memory=${TOT_MEMORY_MEM_LIMIT}
+# Quadlet can't interpolate ${VAR}; fixed default. Compose honors TOT_MEMORY_MEM_LIMIT.
+PodmanArgs=--memory=512m
 
 [Service]
 Restart=on-failure

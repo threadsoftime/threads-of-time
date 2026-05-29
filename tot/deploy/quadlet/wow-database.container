@@ -10,7 +10,9 @@ Pod=tot-server.pod
 Volume=tot-database.volume:/var/lib/mysql:Z
 EnvironmentFile=@TOT_HOME@/.env
 Environment=MYSQL_DATABASE=tot_world
-HealthCmd=mysqladmin ping -h 127.0.0.1 -uroot -p${MYSQL_ROOT_PASSWORD}
+# $$ becomes a literal $ after systemd→podman ExecStart quoting; the container shell expands MYSQL_ROOT_PASSWORD.
+# Verify on Linux/Tier-2: Quadlet $$→$ escaping is macOS-unverifiable (no Quadlet generator locally).
+HealthCmd=/bin/sh -c "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"
 HealthInterval=10s
 HealthTimeout=5s
 HealthRetries=10

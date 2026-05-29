@@ -14,10 +14,9 @@ EnvironmentFile=@TOT_HOME@/.env
 Environment=AC_DATA_DIR=/azerothcore/env/dist/data
 Environment=AC_LOGS_DIR=/azerothcore/env/dist/logs
 Environment=AC_UPDATES_ENABLE_DATABASES=0
-Environment=AC_LOGIN_DATABASE_INFO="127.0.0.1;3306;${MYSQL_USER};${MYSQL_PASSWORD};tot_auth"
-Environment=AC_WORLD_DATABASE_INFO="127.0.0.1;3306;${MYSQL_USER};${MYSQL_PASSWORD};tot_world"
-Environment=AC_CHARACTER_DATABASE_INFO="127.0.0.1;3306;${MYSQL_USER};${MYSQL_PASSWORD};tot_characters"
-PodmanArgs=--tty --interactive --memory=${TOT_WORLDSERVER_MEM_LIMIT}
+# AC_*_DATABASE_INFO comes from .env (install-tot.sh resolves them; Quadlet can't interpolate ${VAR}).
+# Quadlet can't interpolate ${VAR}; fixed default. Compose honors TOT_*_MEM_LIMIT.
+PodmanArgs=--tty --interactive --memory=6g
 
 [Service]
 Restart=on-failure

@@ -69,8 +69,6 @@ services:
     env_file: [.env]
     environment:
       MEMORY_DATA_DIR: /var/memory
-      MEM_EMBED_ENDPOINT: ${BRAIN_EMBEDDINGS_URL}
-      MEM_EMBED_MODEL: ${BRAIN_EMBEDDINGS_MODEL}
     volumes: [./data/memory:/var/memory]
     restart: on-failure
   brain:
