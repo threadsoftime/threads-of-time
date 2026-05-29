@@ -1,7 +1,7 @@
 [Unit]
-Description=Harness audit rotation
-ConditionPathExists=/var/log/harness/daemon.jsonl
+Description=Threads of Time harness audit log rotation
+ConditionPathExists=@TOT_HOME@/logs/harness/daemon.jsonl
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/harness-rotate-audit.sh
+ExecStart=/usr/bin/find @TOT_HOME@/logs/harness -name '*.jsonl' -size +100M -delete
