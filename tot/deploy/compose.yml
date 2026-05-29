@@ -1,0 +1,90 @@
+# Threads of Time reference Compose stack (alternative to Quadlet).
+# `docker compose` / `podman-compose` read .env automatically for ${VAR}.
+name: tot
+services:
+  database:
+    image: docker.io/library/mysql:8.4
+    container_name: tot-database
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: tot_world
+    volumes: [tot-database:/var/lib/mysql]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  firstboot:
+    image: ${GHCR_NS:-ghcr.io/threadsoftime}/db-import:${TOT_VERSION}
+    container_name: tot-firstboot
+    depends_on:
+      database: {condition: service_healthy}
+    env_file: [.env]
+    volumes:
+      - ./data:/tot/data
+      - ./secrets:/tot/secrets
+      - ./firstboot:/tot/firstboot:ro
+      - ./content-sql:/tot/content-sql:ro
+    entrypoint: ["/usr/bin/env", "bash", "/tot/firstboot/firstboot.sh"]
+    restart: "no"
+  authserver:
+    image: ${GHCR_NS:-ghcr.io/threadsoftime}/authserver:${TOT_VERSION}
+    container_name: tot-authserver
+    depends_on:
+      firstboot: {condition: service_completed_successfully}
+    env_file: [.env]
+    environment:
+      AC_LOGIN_DATABASE_INFO: "database;3306;${MYSQL_USER};${MYSQL_PASSWORD};tot_auth"
+    ports: ["3724:3724"]
+    volumes: [./etc:/azerothcore/env/dist/etc, ./logs:/azerothcore/env/dist/logs]
+    restart: on-failure
+  worldserver:
+    image: ${GHCR_NS:-ghcr.io/threadsoftime}/worldserver:${TOT_VERSION}
+    container_name: tot-worldserver
+    depends_on:
+      firstboot: {condition: service_completed_successfully}
+    env_file: [.env]
+    environment:
+      AC_UPDATES_ENABLE_DATABASES: "0"
+      AC_WORLD_DATABASE_INFO: "database;3306;${MYSQL_USER};${MYSQL_PASSWORD};tot_world"
+      AC_CHARACTER_DATABASE_INFO: "database;3306;${MYSQL_USER};${MYSQL_PASSWORD};tot_characters"
+      AC_LOGIN_DATABASE_INFO: "database;3306;${MYSQL_USER};${MYSQL_PASSWORD};tot_auth"
+    ports: ["8085:8085", "7878:7878"]
+    volumes: [tot-client-data:/azerothcore/env/dist/data:ro, ./etc:/azerothcore/env/dist/etc, ./logs:/azerothcore/env/dist/logs]
+    stdin_open: true
+    tty: true
+    restart: on-failure
+  harness:
+    image: ${GHCR_NS:-ghcr.io/threadsoftime}/harness:${TOT_VERSION}
+    container_name: tot-harness
+    depends_on: [worldserver]
+    env_file: [.env]
+    command: ["serve", "--config", "/etc/harness/tokens.yaml"]
+    ports: ["8099:8099"]
+    volumes: [./etc/harness:/etc/harness:ro, ./logs/harness:/var/log/harness]
+    restart: on-failure
+  memory:
+    image: ${GHCR_NS:-ghcr.io/threadsoftime}/memory:${TOT_VERSION}
+    container_name: tot-memory
+    env_file: [.env]
+    environment:
+      MEMORY_DATA_DIR: /var/memory
+      MEM_EMBED_ENDPOINT: ${BRAIN_EMBEDDINGS_URL}
+      MEM_EMBED_MODEL: ${BRAIN_EMBEDDINGS_MODEL}
+    volumes: [./data/memory:/var/memory]
+    restart: on-failure
+  brain:
+    image: ${GHCR_NS:-ghcr.io/threadsoftime}/brain:${TOT_VERSION}
+    container_name: tot-brain
+    depends_on: [harness, memory]
+    env_file: [.env]
+    environment:
+      HARNESS_MCP_URL: http://harness:8099/mcp/mcp
+      MEMORY_MCP_URL: http://memory:8090/mcp/mcp
+      LLM_BASE_URL: ${BRAIN_LLM_URL}
+      LLM_MODEL: ${BRAIN_LLM_MODEL}
+    volumes: [./data/brain:/var/lib/brain, ./logs/brain:/var/log/brain]
+    restart: on-failure
+volumes:
+  tot-database:
+  tot-client-data:
