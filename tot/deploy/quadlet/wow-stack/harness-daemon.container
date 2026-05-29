@@ -1,28 +1,17 @@
-# /etc/containers/systemd/wow-stack/harness-daemon.container
-# Symlinked into /etc/containers/systemd/ on Heimdal.
-
 [Unit]
-Description=Heimdal agentic harness daemon
-After=wow-worldserver.service
-Wants=wow-worldserver.service
+Description=Threads of Time agentic harness daemon
+After=tot-worldserver.service
+Wants=tot-worldserver.service
 
 [Container]
-Image=localhost/harness-daemon:current
-ContainerName=harness-daemon
-Pod=wow-server.pod
-
-Volume=/opt/containers/wow/etc/harness:/etc/harness:z,ro
-Volume=/opt/containers/wow/logs/harness:/var/log/harness:z
-EnvironmentFile=/opt/containers/wow/etc/harness/mysql.env
+Image=@GHCR_NS@/harness:@TOT_VERSION@
+ContainerName=tot-harness
+Pod=tot-server.pod
+Volume=@TOT_HOME@/etc/harness:/etc/harness:z,ro
+Volume=@TOT_HOME@/logs/harness:/var/log/harness:z
+EnvironmentFile=@TOT_HOME@/.env
 Exec=serve --config /etc/harness/tokens.yaml
-
-# Resource budget (kb_adbafeda): daemon stays light on the gaming PC.
-PodmanArgs=--memory=200m --cpus=0.5
-
-# Network: pod-shared with wow-worldserver — daemon reaches AC bridge
-# at 127.0.0.1:8091 via the pod's loopback. External listener at 8099.
-# Port 8090 is taken by memory-sidecar; port publishing lives on the pod.
-# NOTE: Port publishing must live on the pod (wow-server.pod) not the container.
+PodmanArgs=--memory=${TOT_HARNESS_MEM_LIMIT}
 
 [Service]
 Restart=on-failure
