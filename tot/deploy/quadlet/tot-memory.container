@@ -1,0 +1,23 @@
+[Unit]
+Description=Threads of Time memory subsystem
+After=tot-worldserver.service
+Wants=tot-worldserver.service
+
+[Container]
+Image=@GHCR_NS@/memory:@TOT_VERSION@
+ContainerName=tot-memory
+Pod=tot-server.pod
+Volume=@TOT_HOME@/data/memory:/var/memory:Z
+EnvironmentFile=@TOT_HOME@/.env
+Environment=MEMORY_DATA_DIR=/var/memory
+Environment=MEM_BIND_HOST=127.0.0.1
+Environment=MEM_BIND_PORT=8090
+PodmanArgs=--memory=${TOT_MEMORY_MEM_LIMIT}
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target default.target
