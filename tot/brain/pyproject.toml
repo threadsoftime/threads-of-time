@@ -34,10 +34,10 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "contract: tests that require live harness:8099 + memory:8090 (skipped by default)",
-    "heimdal: tests that require a live Heimdal worldserver + harness daemon (skipped by default)",
-    "warforged: mod-warforged integration tests (subset of heimdal-marked tests)",
+    "live_server: tests that require a live ToT worldserver + harness daemon (skipped by default)",
+    "warforged: mod-warforged integration tests (subset of live_server-marked tests)",
 ]
-addopts = "-m 'not contract and not heimdal'"
+addopts = "-m 'not contract and not live_server'"
 
 [tool.ruff]
 line-length = 100

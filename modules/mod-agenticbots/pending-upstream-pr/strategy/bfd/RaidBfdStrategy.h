@@ -3,12 +3,12 @@
 // NOTE: This strategy is not yet wired into mod-agenticbots's startup. It depends
 // on mod-playerbots exposing 4 custom-context registration methods — see
 // docs/superpowers/plans/2026-05-24-threads-of-time-1.0.0-foundation.md Task 18.
-// Once the upstream PR lands (or a Heimdal-internal patch is shipped), the
+// Once the upstream PR lands (or a ToT-internal patch is shipped), the
 // AgenticbotsRegistration.cpp glue will register this strategy.
 
 // RaidBfdStrategy.h
 //
-// Heimdal-specific playerbots strategy for Blackfathom Deeps as a 10-player
+// ToT-specific playerbots strategy for Blackfathom Deeps as a 10-player
 // raid (map 48). Mounted when PlayerbotAI::ApplyInstanceStrategies(48) fires.
 //
 // The 7 raid bosses are detailed in

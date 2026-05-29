@@ -50,7 +50,7 @@ def _resolve_refs(node: Any, defs: dict[str, Any], stack: tuple[str, ...] = ()) 
 def unwrap_fastmcp_args(input_schema: dict[str, Any]) -> dict[str, Any]:
     """Strip the FastMCP `{args: ...}` envelope and recursively resolve all $refs.
 
-    Both heimdal-harness and memory-sidecar register their tools via FastMCP
+    Both tot-harness and memory-sidecar register their tools via FastMCP
     with handler signatures `_handler(ctx, args: SchemaModel)`. FastMCP exposes
     this as an inputSchema with `args` as the sole top-level property; the
     real per-tool args are nested under `properties.args` and may contain

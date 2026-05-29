@@ -1,4 +1,4 @@
-"""Heimdal agentic harness — V1 daemon.
+"""Threads of Time agentic harness — V1 daemon.
 
 Bearer-token-auth, scope-filtered HTTP front end over the
 mod-harness-bridge AC module. See

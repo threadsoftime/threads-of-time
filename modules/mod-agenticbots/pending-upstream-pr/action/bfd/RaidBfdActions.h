@@ -3,7 +3,7 @@
 // NOTE: These actions are not yet wired into mod-agenticbots's startup. They depend
 // on mod-playerbots exposing 4 custom-context registration methods — see
 // docs/superpowers/plans/2026-05-24-threads-of-time-1.0.0-foundation.md Task 18.
-// Once the upstream PR lands (or a Heimdal-internal patch is shipped), the
+// Once the upstream PR lands (or a ToT-internal patch is shipped), the
 // AgenticbotsRegistration.cpp glue will register these actions via RaidBfdActionContext.
 
 // RaidBfdActions.h

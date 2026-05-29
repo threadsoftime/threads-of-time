@@ -10,7 +10,7 @@
 // intentionally standalone. It only depends on <cstdint> and does NOT
 // include WarforgedConstants.h. The ilvl band bounds are duplicated
 // here as ILVL_BAND_BOUNDS_PICKER_INTERNAL with a sync contract enforced
-// by a static_assert in WarforgedEnchantPicker.cpp (Heimdal-side build,
+// by a static_assert in WarforgedEnchantPicker.cpp (server-side build,
 // where WarforgedConstants.h is available). This mirrors the Task 2
 // WarforgedRng.h pattern: pure logic stays free of AC includes so the
 // laptop doctest target can link against the header without compiling

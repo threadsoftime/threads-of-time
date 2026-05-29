@@ -5,9 +5,9 @@
 # Build + tag all 6 ToT images:
 #   worldserver, authserver, db-import, harness, brain, memory
 #
-# worldserver + db-import are built on Heimdal via build.sh (-j4 gated;
-# the -j4 cap is non-negotiable per kb_adbafeda + kb_f9bf8ed1). This
-# script then RETAGS the build.sh output names to the GHCR namespace.
+# worldserver + db-import are built on the build host via build.sh (-j4
+# gated; the -j4 cap is non-negotiable). This script then RETAGS the
+# build.sh output names to the GHCR namespace.
 # harness/brain/memory build anywhere (no C++ toolchain needed).
 #
 # Environment:
@@ -23,7 +23,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 NS="${GHCR_NS:-ghcr.io/threadsoftime}"
 PUSH="${PUSH:-0}"
 
-echo "== [1/4] worldserver + db-import (Heimdal build.sh, -j4) =="
+echo "== [1/4] worldserver + db-import (build-host build.sh, -j4) =="
 # build.sh tags locally as:
 #   wow-server:$VERSION  (the worldserver runtime image)
 #   wow-db-import:$VERSION (the AC dbimport image)
@@ -31,7 +31,7 @@ echo "== [1/4] worldserver + db-import (Heimdal build.sh, -j4) =="
 TAG="${VERSION}" bash "${REPO}/tot/release/build.sh"
 
 # Retag build.sh output names to the operator GHCR namespace.
-# This runs on Heimdal where the images were just built; retag is a
+# This runs on the build host where the images were just built; retag is a
 # local metadata operation (no network, no re-build).
 echo "== [1b/4] retag worldserver + db-import to ${NS} =="
 podman tag "wow-server:${VERSION}"    "${NS}/worldserver:${VERSION}"

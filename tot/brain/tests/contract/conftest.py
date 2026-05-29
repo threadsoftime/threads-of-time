@@ -1,8 +1,8 @@
 """Session-scoped fixtures for contract tests.
 
 Bearers are loaded from env (HARNESS_BEARER, MEMORY_BEARER). On laptop, export
-before running `pytest -m contract`. On Heimdal, source from /etc/containers/
-systemd/brain-sidecar.env before invoking build.sh.
+before running `pytest -m contract`. On the build host, source from
+/etc/containers/systemd/brain-sidecar.env before invoking build.sh.
 
 Missing bearers → pytest.skip (no false reds on fresh checkout).
 """
@@ -19,12 +19,12 @@ from brain_sidecar.mcp_clients import McpClient, open_mcp
 
 @pytest.fixture(scope="session")
 def harness_url() -> str:
-    return os.environ.get("HARNESS_MCP_URL", "http://192.168.1.3:8099/mcp/mcp")
+    return os.environ.get("HARNESS_MCP_URL", "http://127.0.0.1:8099/mcp/mcp")
 
 
 @pytest.fixture(scope="session")
 def memory_url() -> str:
-    return os.environ.get("MEMORY_MCP_URL", "http://192.168.1.3:8090/mcp/mcp")
+    return os.environ.get("MEMORY_MCP_URL", "http://127.0.0.1:8090/mcp/mcp")
 
 
 @pytest.fixture(scope="session")

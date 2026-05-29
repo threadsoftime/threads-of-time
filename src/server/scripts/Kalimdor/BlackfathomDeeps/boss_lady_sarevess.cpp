@@ -1,5 +1,5 @@
 /*
- * Heimdal BFD-as-raid: stub for Lady Sarevess (Forked Lightning + add waves).
+ * ToT BFD-as-raid: stub for Lady Sarevess (Forked Lightning + add waves).
  * Mechanics ship in Phase 1.1 Step 4. This stub only registers
  * the script name "boss_lady_sarevess_raid" so creature_template.ScriptName can bind.
  */

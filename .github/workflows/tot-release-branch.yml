@@ -1,7 +1,7 @@
 name: ToT Release Branch
 # Builds + pushes harness/brain/memory rc images on push to release/* branches.
 # worldserver + authserver + db-import are built on-demand via tot/release/build.sh
-# (the -j4 Heimdal step) and pushed by release.sh.
+# (the -j4 build-host step) and pushed by release.sh.
 # A self-hosted runner for the C++ worldserver build is deferred to 1.1.0.
 on:
   push:

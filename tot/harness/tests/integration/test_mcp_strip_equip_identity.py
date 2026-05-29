@@ -6,9 +6,9 @@ FastMCP streamable-HTTP transport at /mcp/mcp instead of the HTTP
 
 Env vars (required to run; skipped otherwise):
 
-    HEIMDAL_HARNESS_URL     e.g. http://192.168.1.3:8099  (default)
-    HEIMDAL_HARNESS_TOKEN   bearer token
-    HEIMDAL_TEST_BOT_GUID   online bot low-32 GUID
+    TOT_HARNESS_URL     e.g. http://<harness-host>:8099  (default: localhost)
+    TOT_HARNESS_TOKEN   bearer token
+    TOT_TEST_BOT_GUID   online bot low-32 GUID
 """
 
 from __future__ import annotations
@@ -22,13 +22,13 @@ import httpx
 import pytest
 
 
-URL_ENV = "HEIMDAL_HARNESS_URL"
-TOKEN_ENV = "HEIMDAL_HARNESS_TOKEN"
-BOT_GUID_ENV = "HEIMDAL_TEST_BOT_GUID"
+URL_ENV = "TOT_HARNESS_URL"
+TOKEN_ENV = "TOT_HARNESS_TOKEN"
+BOT_GUID_ENV = "TOT_TEST_BOT_GUID"
 
 
 def _require_env() -> tuple[str, str, int]:
-    base = os.environ.get(URL_ENV, "http://192.168.1.3:8099")
+    base = os.environ.get(URL_ENV, "http://127.0.0.1:8099")
     token = os.environ.get(TOKEN_ENV)
     guid = os.environ.get(BOT_GUID_ENV)
     if not token:

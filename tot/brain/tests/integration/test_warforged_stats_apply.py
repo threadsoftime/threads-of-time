@@ -68,7 +68,7 @@ def _pick_test_bot(harness: HarnessClient) -> int:
     return online[0]["guid"]
 
 
-@pytest.mark.heimdal
+@pytest.mark.live_server
 @pytest.mark.warforged
 def test_warforged_stats_apply(harness: HarnessClient) -> None:
     bot_guid = _pick_test_bot(harness)

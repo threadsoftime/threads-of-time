@@ -47,7 +47,7 @@ namespace ModWarforged::Manager
                 r.warforged = StatApplier::ApplyWarforged(*item, enchantId);
         }
 
-        // Socket gate — Heimdal's bracket design locks players in pre-Outland
+        // Socket gate — the ToT bracket design locks players in pre-Outland
         // phases through L60, but Jewelcrafting + AH-sourced gems become realistic
         // around L56. Below that, a procced socket is dead inventory.
         if (rollSoc && player->GetLevel() >= gConfig.socketMinCharLevel)

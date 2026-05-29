@@ -24,7 +24,7 @@
 //      mirroring how the production wrappers wire it up.
 //
 // CAVEAT: this shadow does NOT prevent drift between WarforgedConfig.h
-// and the shadow itself. Heimdal-side integration validation is what
+// and the shadow itself. Server-side integration validation is what
 // surfaces that. (Same caveat as mod-harness-bridge/tests/test_config.cpp.)
 namespace ModWarforged
 {
@@ -164,7 +164,7 @@ TEST_CASE("RollWarforgedWith and RollSocketWith are independent given independen
     // independent (AC guarantees), the two procs are statistically
     // independent.
     //
-    // The on-Heimdal distribution test (Task 10+) verifies the empirical
+    // The server-side distribution test (Task 10+) verifies the empirical
     // joint distribution to ±0.2pp tolerance over 100k samples.
 
     ModWarforged::Config c;

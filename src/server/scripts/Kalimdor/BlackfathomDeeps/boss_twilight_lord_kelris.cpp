@@ -1,7 +1,7 @@
 /*
- * Heimdal BFD-as-raid: Twilight Lord Kelris (entry 4832).
+ * ToT BFD-as-raid: Twilight Lord Kelris (entry 4832).
  *
- * V1 (Heimdal-original): mind-games caster.
+ * V1 (ToT-original): mind-games caster.
  *   - Mind Blast (8092) on current victim every 6-8s -- the main
  *     damage threat; high single-target burst on the MT.
  *   - Polymorph (118) on a random raid member every ~30s. One

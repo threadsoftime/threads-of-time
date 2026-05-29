@@ -11,10 +11,10 @@ Why ``.additem`` and not real mob kills? ``.additem`` triggers
 ``modules/mod-warforged/src/WarforgedHookListener.cpp``). It's deterministic
 and avoids needing GM-level mob spawning + bot looting flow.
 
-Marked ``warforged`` + ``heimdal``; deselected by default per
+Marked ``warforged`` + ``live_server``; deselected by default per
 ``pyproject.toml`` until Task 24 deploys the module. Run with:
 
-    HARNESS_URL=http://192.168.1.3:8099 \\
+    HARNESS_URL=http://<harness-host>:8099 \\
     HARNESS_SMOKE_TOKEN=... \\
     pytest -m warforged tools/brain-sidecar/tests/integration/
 
@@ -63,7 +63,7 @@ def _pick_test_bot(harness: HarnessClient) -> int:
     return online[0]["guid"]
 
 
-@pytest.mark.heimdal
+@pytest.mark.live_server
 @pytest.mark.warforged
 def test_warforged_loot_rate(harness: HarnessClient) -> None:
     bot_guid = _pick_test_bot(harness)

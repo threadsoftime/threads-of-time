@@ -17,7 +17,7 @@ spell_id   class         tier  spec  piece  aura_type  name
 ### Usage
 
 ```bash
-# On Heimdal, where the live Spell.dbc lives in the bind-mounted volume:
+# On the server host, where the live Spell.dbc lives in the bind-mounted volume:
 sudo cp /var/lib/containers/storage/volumes/wow-client-data/_data/dbc/Spell.dbc /tmp/Spell.dbc
 sudo chmod a+r /tmp/Spell.dbc
 python3 spell_dbc_extract.py /tmp/Spell.dbc > tier_bonus_candidates.tsv
@@ -52,8 +52,8 @@ that already bind one of your picks. Avoid those (their existing
 SpellScript would conflict with ours):
 
 ```bash
-ssh heimdal "grep -rE '\\b(<comma-separated IDs>)\\b' \
-    /opt/containers/wow/source/src/server/scripts/Spells/"
+ssh <server-host> "grep -rE '\\b(<comma-separated IDs>)\\b' \
+    \$TOT_HOME/source/src/server/scripts/Spells/"
 ```
 
 Conflicted IDs from the 2026-05-13 pass (do not use as markers):

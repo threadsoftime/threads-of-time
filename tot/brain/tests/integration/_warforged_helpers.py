@@ -1,6 +1,6 @@
-"""Helpers for mod-warforged live-Heimdal integration tests.
+"""Helpers for mod-warforged live-server integration tests.
 
-These tests are marked ``@pytest.mark.heimdal`` and ``@pytest.mark.warforged``
+These tests are marked ``@pytest.mark.live_server`` and ``@pytest.mark.warforged``
 and are deselected by default (see ``pyproject.toml``). They are designed to
 run on the deploy host after Task 24 (M9 image bake) lands. Until then they
 exercise the test scaffolding only; the assertions speak to behavior of the
@@ -17,7 +17,7 @@ Two surfaces are wrapped here:
    ``modules/mod-warforged/data/csv/warforged_enchants.csv``.
 
 The tests skip cleanly when ``HARNESS_URL`` / ``HARNESS_SMOKE_TOKEN`` are not
-set so CI / `pytest -m 'not heimdal'` runs are unaffected.
+set so CI / `pytest -m 'not live_server'` runs are unaffected.
 """
 from __future__ import annotations
 
@@ -185,7 +185,7 @@ def harness() -> HarnessClient:
     if cfg is None:
         pytest.skip(
             "HARNESS_URL / HARNESS_SMOKE_TOKEN not set — Warforged live tests "
-            "require a deployed Heimdal worldserver (see Task 24)."
+            "require a deployed ToT worldserver (see Task 24)."
         )
     url, token = cfg
     h = HarnessClient(url, token)

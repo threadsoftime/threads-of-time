@@ -9,7 +9,7 @@
 #
 # Flags:
 #   --dry-run      Run steps 1-8 only; exit 0 with a summary.
-#   --skip-images  Skip step 5 (image build). Use when Heimdal is
+#   --skip-images  Skip step 5 (image build). Use when the build host is
 #                  unavailable (the -j4 worldserver build cannot run
 #                  locally). Implied by --dry-run on hosts without podman.
 #   --skip-tests   Skip step 3 (pytest suite). Use when brain_sidecar or
@@ -106,7 +106,7 @@ echo "  patches: ${PATCH_COUNT} files"
 # ---------------------------------------------------------------------------
 step "5/11 build + tag images"
 if [ "${SKIP_IMAGES}" = "1" ]; then
-  echo "  SKIPPED (--skip-images). Images must be built separately on Heimdal"
+  echo "  SKIPPED (--skip-images). Images must be built separately on the build host"
   echo "  via: PUSH=0 TAG=${V} bash tot/release/build-images.sh ${V}"
 else
   PUSH=0 bash "${REPO}/tot/release/build-images.sh" "${V}"

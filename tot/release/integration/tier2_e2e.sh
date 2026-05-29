@@ -6,11 +6,11 @@
 #
 # This test spins up a COMPLETELY ISOLATED stack in a temp directory with
 # offset ports (13724 / 18085 / 18099) and a 5-bot population.  It never
-# touches the live Heimdal stack.  Hard gate: must pass before cutting
+# touches the live production stack.  Hard gate: must pass before cutting
 # a release/1.0 tag.
 #
 # VESTIGIAL-BIND-MOUNT RISK (Task 1.6):
-#   The live Heimdal worldserver mounts source/modules at runtime.  The
+#   The live production worldserver mounts source/modules at runtime.  The
 #   generalized worldserver unit (Task 1.6) strips that bind-mount entirely;
 #   mod-playerbots runs only from what is baked into the image.  This e2e
 #   intentionally verifies that bots actually spawn after a clean

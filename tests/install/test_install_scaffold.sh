@@ -3,7 +3,7 @@
 #
 # Runs install-tot.sh steps 1-4 against a temp TOT_HOME with the container
 # engine and image pull stubbed to no-ops. Does NOT pull real images, does
-# NOT touch Heimdal.
+# NOT touch any live server.
 #
 # Asserts:
 #   - .env created + MYSQL_ROOT_PASSWORD generated (48 hex chars)

@@ -19,7 +19,7 @@ no real semantic signal — recall is driven by BM25 (FTS5 keyword overlap) +
 the entity hard-filter + time-decay + salience. The *real* numbers on the live
 nomic-embed-text model are expected to be higher; this gate verifies the
 combinatorial logic on the algorithm side. The §12.3 integration suite on
-Heimdal exercises real embeddings + real network latency.
+the live server exercises real embeddings + real network latency.
 
 Metric notes
 ------------

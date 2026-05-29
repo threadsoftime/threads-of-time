@@ -29,7 +29,7 @@ Warforged.LootSoundId = 3175
 Warforged.WarnMissingPatch = 0
 
 # Minimum character level for bonus socket procs. Sockets require gems, and
-# Jewelcrafting socket-eligible gems come from Outland (TBC). Heimdal's bracket
+# Jewelcrafting socket-eligible gems come from Outland (TBC). The ToT bracket
 # design locks players pre-Outland through L60, but JC training + AH-sourced
 # gems become realistic around L56 transition. Below this level the looter
 # can't fill the socket, so the proc is suppressed. Set to 0 to disable the

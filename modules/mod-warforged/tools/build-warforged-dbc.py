@@ -27,7 +27,7 @@ WotLK 3.3.5a SpellItemEnchantment.dbc schema (38 uint32 fields, 152 bytes/record
   37:   required_level       (0)
 
 Source struct (verified against AC):
-  /opt/containers/wow/source/src/server/shared/DataStores/DBCStructure.h
+  src/server/shared/DataStores/DBCStructure.h
   -> struct SpellItemEnchantmentEntry  (38 fields total counting commented-out
      amount2[3] and descriptionFlags that AC skips but DBC stores).
 
@@ -299,7 +299,7 @@ def main() -> int:
             f"ERROR: input DBC sha256 mismatch.\n"
             f"  expected: {EXPECTED_INPUT_SHA256}\n"
             f"  actual:   {actual_sha}\n"
-            f"This means the upstream DBC changed; re-pull from Heimdal and "
+            f"This means the upstream DBC changed; re-pull the source DBC and "
             f"update EXPECTED_INPUT_SHA256 deliberately.",
             file=sys.stderr,
         )

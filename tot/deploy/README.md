@@ -4,12 +4,12 @@ Reference deployment stack for operators running Threads of Time.
 
 ## Status (as of Plan 1)
 
-The `quadlet/` directory contains the current Heimdal-specific Quadlet units
-as committed. They reference Heimdal-specific paths, ports, hostnames, and
+The `quadlet/` directory contains the current build-box-specific Quadlet units
+as committed. They reference build-box-specific paths, ports, hostnames, and
 credentials.
 
 **Plan 5 generalizes these into operator-configurable stacks**: replacing
-Heimdal-isms with `.env`-driven variables, adding a Compose-based alternative
+build-box specifics with `.env`-driven variables, adding a Compose-based alternative
 for non-systemd operators, and producing the install script + first-boot
 bootstrap.
 

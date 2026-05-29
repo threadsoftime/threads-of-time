@@ -11,7 +11,7 @@
 # What this target covers: only the pure decision functions in
 # WarforgedRng.h (defined inline, no AC dependencies). Production
 # wrappers (RollWarforged / RollSocket) and the stochastic
-# distribution test are deferred to Heimdal-side validation at
+# distribution test are deferred to server-side validation at
 # Task 10+ — they need the real urand() and gConfig linkage.
 
 cmake_minimum_required(VERSION 3.16)

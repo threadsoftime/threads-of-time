@@ -1,5 +1,5 @@
 --
--- Phase 1.1 Step 4 (V1, Heimdal-original) — SmartAI for 4 BFD raid bosses
+-- Phase 1.1 Step 4 (V1, ToT-original) — SmartAI for 4 BFD raid bosses
 --
 -- V1 redesign: drop the SoD-port mechanics and ship original WotLK-style
 -- mechanics, one identifying twist per boss on top of the standard

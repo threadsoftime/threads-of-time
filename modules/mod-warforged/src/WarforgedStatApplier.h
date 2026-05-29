@@ -4,9 +4,9 @@
 #include <cstdint>
 
 // Forward-declare AC's EnchantmentSlot enum (definition lives in
-// src/server/game/Entities/Item/Item.h on Heimdal). Matching the
+// src/server/game/Entities/Item/Item.h in the AC tree). Matching the
 // underlying type and unscoped form means our constants below are
-// the *same type* as AC's enum on Heimdal builds — no narrowing
+// the *same type* as AC's enum on server-side builds — no narrowing
 // conversion at call sites.
 //
 // On the laptop doctest build (no AC headers), this forward decl
@@ -32,8 +32,8 @@ enum EnchantmentSlot : std::uint8_t;
 // 2. **No AC includes.** Like WarforgedRng.h and WarforgedEnchantPicker.h,
 //    this header is intentionally standalone. The slot constants and the
 //    Warforged-ID range below are duplicated from WarforgedConstants.h,
-//    and a static_assert in WarforgedStatApplier.cpp (built only on
-//    Heimdal, where Common.h / ItemTemplate.h / Item.h exist) verifies
+//    and a static_assert in WarforgedStatApplier.cpp (built only on the
+//    full worldserver build, where Common.h / ItemTemplate.h / Item.h exist) verifies
 //    they stay in sync. Same drift-guard pattern as Task 3's picker.
 //
 //    If you change BONUS_ENCHANTMENT_SLOT, PRISMATIC_ENCHANTMENT_SLOT,

@@ -1,4 +1,4 @@
-// HEIMDAL-ONLY — DO NOT add to modules/mod-warforged/tests/CMakeLists.txt.
+// SERVER-SIDE BUILD ONLY — DO NOT add to modules/mod-warforged/tests/CMakeLists.txt.
 //
 // This file exercises the *production* wrappers RollWarforged() and
 // RollSocket() against AC's real urand() and the real gConfig. It cannot
@@ -6,8 +6,8 @@
 // linkage) and is intentionally excluded from the standalone doctest
 // target.
 //
-// On Heimdal, build it via the AC module test scaffolding (Task 10) or
-// manually:
+// On the full worldserver build, build it via the AC module test scaffolding
+// (Task 10) or manually:
 //
 //   cd /azerothcore && g++ -std=c++17 \
 //     -I src/server/shared -I src/server/game/Util -I src/common \

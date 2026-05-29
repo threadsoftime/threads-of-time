@@ -1,5 +1,5 @@
 /*
- * Heimdal BFD-as-raid: stub for Baron Aquanis (positional, pools + Bubble Beam).
+ * ToT BFD-as-raid: stub for Baron Aquanis (positional, pools + Bubble Beam).
  * Mechanics ship in Phase 1.1 Step 4. This stub only registers
  * the script name "boss_baron_aquanis_raid" so creature_template.ScriptName can bind.
  */

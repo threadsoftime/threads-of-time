@@ -2,7 +2,7 @@
 
 **Document type:** Integration probe procedure (Tier-1 soft gate, read-only)  
 **Task:** 8.2 of `docs/superpowers/plans/2026-05-29-threads-of-time-1.0.0-operator-install.md`  
-**Safe to run against live Heimdal baseline:** yes — no mutation, no GM commands.
+**Safe to run against live ToT baseline:** yes — no mutation, no GM commands.
 
 ---
 
@@ -23,8 +23,8 @@ whose AI layer is alive.
 
 The plan's Task 8.2 description referenced `IsPlayerBot()` as the runtime check.  That
 method does not exist anywhere in this codebase.  A broad search across all of
-`/opt/containers/wow/source/modules/mod-playerbots/src/` and
-`/opt/containers/wow/source/src/` returns no results.  The equivalent check in this
+`$TOT_HOME/source/modules/mod-playerbots/src/` and
+`$TOT_HOME/source/src/` returns no results.  The equivalent check in this
 fork is `GET_PLAYERBOT_AI(player) != nullptr`, which calls
 `sPlayerbotsMgr.GetPlayerbotAI(player)` and returns non-null iff the player is
 registered in `PlayerbotsMgr._playerbotsAIMap`.
@@ -178,7 +178,7 @@ bots have not yet logged in (worldserver still spawning) or have crashed out.
 
 ## Probe procedure
 
-This is a Tier-1 soft gate — read-only, safe against the live Heimdal baseline.  The
+This is a Tier-1 soft gate — read-only, safe against the live ToT baseline.  The
 probe does not mutate worldserver state.
 
 ### Prerequisites
@@ -191,7 +191,7 @@ probe does not mutate worldserver state.
 ### Environment
 
 ```bash
-export HARNESS_URL=http://127.0.0.1:8099    # or http://192.168.1.3:8099 from laptop
+export HARNESS_URL=http://127.0.0.1:8099    # or http://<build-host>:8099 from laptop
 export HARNESS_BEARER=<token>               # from .env: HARNESS_BEARER_TOKEN
 export TOT_BOT_POPULATION=20               # match your .env
 ```
@@ -358,16 +358,16 @@ full candidate pool is online and AI-managed.
 
 ## Run status
 
-**Not yet run on Heimdal.** This document describes the probe procedure; execution
+**Not yet run on the live stack.** This document describes the probe procedure; execution
 against the live baseline is a documented step, deliberately deferred to avoid
 conflating doc verification with live-run scheduling.  The Tier-1 soft gate allows the
 release pipeline to proceed without blocking on the live run; the result is recorded
 here once executed.
 
-Expected Heimdal run command (from laptop):
+Expected run command (from laptop):
 
 ```bash
-HARNESS_URL=http://192.168.1.3:8099 \
+HARNESS_URL=http://<build-host>:8099 \
 HARNESS_BEARER=$(grep HARNESS_BEARER_TOKEN /path/to/.env | cut -d= -f2) \
 TOT_BOT_POPULATION=20 \
 python3 tot/release/integration/playerbots_runtime_probe.md  # run Step 2 snippet inline
@@ -377,7 +377,7 @@ Or via the existing Tier-1 suite (which already probes `obs.list_bot_population`
 non-empty result and entry shape):
 
 ```bash
-HARNESS_URL=http://192.168.1.3:8099 \
+HARNESS_URL=http://<build-host>:8099 \
 HARNESS_BEARER=<token> \
 python3 tot/release/integration/tier1_live_probe.py
 ```

@@ -2,7 +2,7 @@
 # tot/release/integration/tier1_live_probe.py
 #
 # Read-only probes against a LIVE ToT harness.
-# Safe to run against the live Heimdal baseline — no mutation, no GM commands,
+# Safe to run against the live ToT baseline — no mutation, no GM commands,
 # no bot state changes. Only POSTs to obs.* tools (observation layer).
 #
 # Usage:

@@ -1,9 +1,8 @@
-# Calibrated 2026-05-23 against the live AC world DB on heimdal.
-# Source: /var/mnt/nas/backups/wow/wow-20260523-040156.sql.gz (last nightly dump).
+# Calibrated 2026-05-23 against the live AC world DB on the server host.
+# Source: a nightly world-DB dump (wow-20260523-040156.sql.gz).
 # Query: mean(stat_value1..3) of item_template rows with class IN (2,4)
 #        (weapons + armor), Quality IN (2,3,4), grouped by ilvl band.
-# See Task 5 of docs/superpowers/plans/2026-05-23-mod-warforged-v1-implementation.md
-# for the parser script (calibrate.py at /home/brackin/warforged-cal/ on heimdal).
+# The parser script (calibrate.py) is run against that dump on the server host.
 #
 # Stat amounts target ~+10% of the mean for that band/quality, rounded to int,
 # clamped to min 1 (per the spec — bumps below +1 are too small to feel).

@@ -6,14 +6,14 @@
 // enforce the sync contract between the applier's internal slot constants
 // (WF_BONUS_SLOT, WF_SOCKET_SLOT, PRISMATIC_SOCKET_ENCHANT_ID, WF enchant
 // ID range, INVTYPE_WAIST_VALUE) and the canonical declarations in
-// WarforgedConstants.h / AC's ItemTemplate.h at compile time on Heimdal,
-// where all those headers are available.
+// WarforgedConstants.h / AC's ItemTemplate.h at compile time on the full
+// worldserver build, where all those headers are available.
 //
 // If any constant drifts, the static_assert below fails the worldserver
 // build immediately — before any in-game effect surfaces. The laptop
 // doctest target does NOT compile this .cpp (it would pull in Common.h
 // transitively via WarforgedConstants.h); the cross-check fires only on
-// Heimdal.
+// the full worldserver build.
 //
 // Same drift-guard pattern as WarforgedEnchantPicker.cpp.
 

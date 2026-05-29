@@ -1,5 +1,5 @@
-# Heimdal agentic-harness daemon config.
-# Deployed location on Heimdal: /opt/containers/wow/etc/harness/tokens.yaml
+# Threads of Time agentic-harness daemon config.
+# Deployed location on the server host: $TOT_HOME/etc/harness/tokens.yaml
 # (root-owned, mode 600).
 
 max_augmented_bots: 1

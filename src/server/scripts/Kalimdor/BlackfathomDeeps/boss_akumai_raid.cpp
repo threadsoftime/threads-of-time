@@ -1,7 +1,7 @@
 /*
- * Heimdal BFD-as-raid: Aku'mai (entry 4829, final boss).
+ * ToT BFD-as-raid: Aku'mai (entry 4829, final boss).
  *
- * V1 (Heimdal-original): Patchwerk-flavored DPS race.
+ * V1 (ToT-original): Patchwerk-flavored DPS race.
  *   - Hateful Strike (Mortal Strike R3 = 12294) on the highest-HP
  *     non-tank in melee, every ~5-7s. Drives healing focus + raid
  *     stack-and-pop play.

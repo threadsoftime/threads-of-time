@@ -4,7 +4,7 @@
 // the applier is intentionally standalone — only <cstdint>, no AC includes.
 // The applier's slot constants (WF_BONUS_SLOT, WF_SOCKET_SLOT, PRISMATIC_SOCKET_ENCHANT_ID)
 // are duplicated from WarforgedConstants.h with a static_assert sync guard in the
-// .cpp (Heimdal-only). If anyone adds `#include "WarforgedConstants.h"` or any
+// .cpp (server-side build only). If anyone adds `#include "WarforgedConstants.h"` or any
 // AC pull-in to WarforgedStatApplier.h, this test target will stop building on
 // the laptop. That's a signal to keep the dependency confined to the .cpp.
 //

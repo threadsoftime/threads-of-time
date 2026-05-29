@@ -5,13 +5,13 @@
 // translation unit exists solely to enforce the sync contract between
 // WarforgedEnchantPicker's internal ILVL_BAND_BOUNDS_PICKER_INTERNAL
 // and the canonical WarforgedConstants::ILVL_BAND_BOUNDS at compile
-// time on the Heimdal build, where both headers are available.
+// time on the full worldserver build, where both headers are available.
 //
 // If the two arrays drift, the static_assert below fails the worldserver
 // build immediately — before any in-game effect surfaces. The laptop
 // doctest target does NOT compile this .cpp (it would pull in Common.h
 // transitively via WarforgedConstants.h); the cross-check fires only on
-// Heimdal.
+// the full worldserver build.
 
 #include "WarforgedEnchantPicker.h"
 #include "WarforgedConstants.h"

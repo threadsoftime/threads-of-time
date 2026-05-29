@@ -13,7 +13,7 @@
 // agreed-on Port number) without updating this test.
 // What this test does NOT catch: drift between the real
 // HarnessBridgeConfig.h and the re-declaration below. If they diverge,
-// the integration test (run on Heimdal during AC build) is what
+// the integration test (run server-side during the AC build) is what
 // surfaces it. Don't trust this test alone to guard the real struct.
 
 namespace HarnessBridge {

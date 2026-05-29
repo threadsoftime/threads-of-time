@@ -47,7 +47,7 @@ from pathlib import Path
 # --- Paths -----------------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parent.parent  # modules/mod-warforged/
-REPO_ROOT = ROOT.parent.parent  # azerothcore-heimdal/
+REPO_ROOT = ROOT.parent.parent  # threads-of-time/
 STAGING = ROOT / "build" / "mpq-staging"
 TOT_ADDON_DIR = REPO_ROOT / "build" / "tot-addon" / "ThreadsOfTime"
 OUTPUT = ROOT / "client" / "patch-W.MPQ"

@@ -1,7 +1,7 @@
 /*
- * Heimdal BFD-as-raid: Gelihast (entry 6243).
+ * ToT BFD-as-raid: Gelihast (entry 6243).
  *
- * V1 (Heimdal-original): dispels-matter fight.
+ * V1 (ToT-original): dispels-matter fight.
  *   - Curse of Blackfathom (Curse of Agony R2 = 1014) on tank every
  *     ~18s. Decursable. Stacking shadow DoT that will overrun the
  *     tank if left up.

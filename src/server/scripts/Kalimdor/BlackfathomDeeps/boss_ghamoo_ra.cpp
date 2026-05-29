@@ -1,5 +1,5 @@
 /*
- * Heimdal BFD-as-raid: stub for Ghamoo-ra (Aqua Shell + tank-swap).
+ * ToT BFD-as-raid: stub for Ghamoo-ra (Aqua Shell + tank-swap).
  * Mechanics ship in Phase 1.1 Step 4. This stub only registers
  * the script name "boss_ghamoo_ra_raid" so creature_template.ScriptName can bind.
  */

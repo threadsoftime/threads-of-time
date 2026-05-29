@@ -10,14 +10,14 @@ containers because `strip_gear` overflowed into them via
 Skipped unless the harness daemon is reachable and a sacrificial bot
 GUID is provided via environment:
 
-    HEIMDAL_HARNESS_URL      e.g. http://192.168.1.3:8099   (default)
-    HEIMDAL_HARNESS_TOKEN    bearer token for the daemon    (required)
-    HEIMDAL_TEST_BOT_GUID    online bot guid to use         (required)
+    TOT_HARNESS_URL      e.g. http://<harness-host>:8099   (default: localhost)
+    TOT_HARNESS_TOKEN    bearer token for the daemon       (required)
+    TOT_TEST_BOT_GUID    online bot guid to use            (required)
 
 Run from the daemon directory:
 
-    HEIMDAL_HARNESS_TOKEN=$(security find-internet-password -s '...' -w) \\
-    HEIMDAL_TEST_BOT_GUID=1005 \\
+    TOT_HARNESS_TOKEN=<bearer-token> \\
+    TOT_TEST_BOT_GUID=1005 \\
     .venv/bin/pytest tests/integration/test_strip_equip_identity.py -v
 """
 
@@ -30,14 +30,14 @@ import httpx
 import pytest
 
 
-URL_ENV = "HEIMDAL_HARNESS_URL"
-TOKEN_ENV = "HEIMDAL_HARNESS_TOKEN"
-BOT_GUID_ENV = "HEIMDAL_TEST_BOT_GUID"
+URL_ENV = "TOT_HARNESS_URL"
+TOKEN_ENV = "TOT_HARNESS_TOKEN"
+BOT_GUID_ENV = "TOT_TEST_BOT_GUID"
 
 
 def _require_env() -> tuple[str, str, int]:
     """Return (base_url, token, bot_guid) or pytest.skip with a clear reason."""
-    base = os.environ.get(URL_ENV, "http://192.168.1.3:8099")
+    base = os.environ.get(URL_ENV, "http://127.0.0.1:8099")
     token = os.environ.get(TOKEN_ENV)
     guid = os.environ.get(BOT_GUID_ENV)
     if not token:

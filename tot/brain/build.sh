@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the brain-sidecar image on the laptop OR Heimdal.
+# Build the brain-sidecar image on the laptop OR the build host.
 set -euo pipefail
 
 TAG="${1:-v0.1.0-$(date +%Y-%m-%d-%H%M)}"
@@ -55,7 +55,7 @@ if [[ -n "${HARNESS_BEARER:-}" && -n "${MEMORY_BEARER:-}" ]]; then
   fi
 else
   echo "WARN: HARNESS_BEARER/MEMORY_BEARER not set; skipping contract gate" >&2
-  echo "WARN: this is OK for local Containerfile syntax checks but should NOT happen on Heimdal during a ship" >&2
+  echo "WARN: this is OK for local Containerfile syntax checks but should NOT happen on the build host during a ship" >&2
 fi
 
 podman build -t "${IMAGE}" -f Containerfile .

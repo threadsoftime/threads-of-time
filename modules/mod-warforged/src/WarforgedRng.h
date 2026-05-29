@@ -37,7 +37,7 @@ namespace ModWarforged::Rng
     // Production wrappers (defined in WarforgedRng.cpp). These read
     // gConfig + AC's urand() and dispatch to the pure functions above.
     // Not buildable on the laptop (require AC's Util.h + WarforgedConfig
-    // linkage). Built on Heimdal as part of the worldserver module bundle.
+    // linkage). Built as part of the Threads of Time worldserver module bundle.
     // ---------------------------------------------------------------------
 
     bool RollWarforged();

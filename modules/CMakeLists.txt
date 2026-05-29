@@ -83,7 +83,7 @@ foreach(SOURCE_MODULE ${MODULES_MODULE_LIST})
   endif()
 
   # Detect mod-playerbots and propagate -DMOD_PLAYERBOTS to the targets that
-  # need it. This mirrors the logic in Heimdal's AC fork:
+  # need it. This mirrors the logic in the ToT AC fork:
   #   - database (PRIVATE): DatabaseWorkerPool<PlayerbotsDatabaseConnection>
   #     and DBUpdater<PlayerbotsDatabaseConnection> explicit instantiations
   #   - game-interface (INTERFACE): MotionMaster::MovePointBackwards and other

@@ -1,6 +1,6 @@
 # mod-rotation-mode
 
-AzerothCore module for Heimdal implementing the **PE2 rotation-mode wrapper** over upstream mod-playerbots' `.playerbots bot self` toggle. Adds:
+AzerothCore module for Threads of Time implementing the **PE2 rotation-mode wrapper** over upstream mod-playerbots' `.playerbots bot self` toggle. Adds:
 
 - A `.heimbot` chat-command surface (mode toggle, per-character settings get/set, list, reset).
 - A per-character `heimbot_settings` KV store in `acore_characters`.

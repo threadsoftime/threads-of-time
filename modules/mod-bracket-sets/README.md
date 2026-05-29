@@ -1,8 +1,8 @@
 # mod-bracket-sets
 
-AzerothCore module for Heimdal that implements **bracket-locked tier set bonuses with spec-morph dispatch**.
+AzerothCore module for Threads of Time that implements **bracket-locked tier set bonuses with spec-morph dispatch**.
 
-Behavior in one sentence: when a player equips 2 or 4 pieces of a Heimdal bracket itemset (90101-90199), this module looks up the (itemset, threshold, class, spec) tuple in `bracket_set_bonus_map` and applies the matching aura — but only while the player's level is inside the bracket's window (e.g. 25-34 for Bracket 1).
+Behavior in one sentence: when a player equips 2 or 4 pieces of a ToT bracket itemset (90101-90199), this module looks up the (itemset, threshold, class, spec) tuple in `bracket_set_bonus_map` and applies the matching aura — but only while the player's level is inside the bracket's window (e.g. 25-34 for Bracket 1).
 
 ## Status
 

@@ -1,4 +1,4 @@
-"""Thin async wrappers around the heimdal-harness + heimdal-memory MCP clients.
+"""Thin async wrappers around the tot-harness + tot-memory MCP clients.
 
 Design note (v0.2.6): McpClient is now a reconnecting client — it opens a fresh
 MCP session per call() invocation rather than holding one long-lived session.

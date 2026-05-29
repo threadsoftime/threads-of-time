@@ -97,7 +97,7 @@ def build_mcp_server(
     )
 
     mcp = FastMCP(
-        name="heimdal-harness",
+        name="tot-harness",
         json_response=True,
         token_verifier=verifier,
         auth=AuthSettings(

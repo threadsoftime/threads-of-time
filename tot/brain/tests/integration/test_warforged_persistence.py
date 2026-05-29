@@ -97,7 +97,7 @@ def _read_enchant_slots_via_inventory(
 # -----------------------------------------------------------------------------
 
 
-@pytest.mark.heimdal
+@pytest.mark.live_server
 @pytest.mark.warforged
 def test_warforged_survives_trade(harness: HarnessClient) -> None:
     bot_a = _pick_test_bot(harness, class_id=1)
@@ -170,7 +170,7 @@ def test_warforged_survives_trade(harness: HarnessClient) -> None:
 # -----------------------------------------------------------------------------
 
 
-@pytest.mark.heimdal
+@pytest.mark.live_server
 @pytest.mark.warforged
 def test_warforged_persists_relog(harness: HarnessClient) -> None:
     bot_guid = _pick_test_bot(harness, class_id=1)

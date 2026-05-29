@@ -1,7 +1,7 @@
 [project]
 name = "harness-daemon"
 version = "0.1.0"
-description = "Out-of-process daemon for the Heimdal agentic harness (V1)"
+description = "Out-of-process daemon for the Threads of Time agentic harness (V1)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "AGPL-3.0"}

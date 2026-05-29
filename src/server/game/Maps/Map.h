@@ -296,7 +296,7 @@ public:
     [[nodiscard]] bool Instanceable() const { return i_mapEntry && i_mapEntry->Instanceable(); }
     [[nodiscard]] bool IsDungeon() const { return i_mapEntry && i_mapEntry->IsDungeon(); }
     [[nodiscard]] bool IsNonRaidDungeon() const { return i_mapEntry && i_mapEntry->IsNonRaidDungeon(); }
-    // Heimdal: BFD (map 48) is overridden to behave as a raid in Phase 1.1.
+    // ToT: BFD (map 48) is overridden to behave as a raid in Phase 1.1.
     // See patches/ac-bfd-raid/0001-bfd-raid-map-override.patch.
     [[nodiscard]] bool IsRaid() const { return (i_mapEntry && i_mapEntry->IsRaid()) || GetId() == 48; }
     [[nodiscard]] bool IsRaidOrHeroicDungeon() const { return IsRaid() || i_spawnMode > DUNGEON_DIFFICULTY_NORMAL; }

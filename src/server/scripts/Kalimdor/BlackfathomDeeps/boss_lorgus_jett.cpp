@@ -1,5 +1,5 @@
 /*
- * Heimdal BFD-as-raid: stub for Lorgus Jett (rotating corrupted totems).
+ * ToT BFD-as-raid: stub for Lorgus Jett (rotating corrupted totems).
  * Mechanics ship in Phase 1.1 Step 4. This stub only registers
  * the script name "boss_lorgus_jett_raid" so creature_template.ScriptName can bind.
  */

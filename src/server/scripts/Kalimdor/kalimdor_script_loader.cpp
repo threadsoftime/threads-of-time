@@ -17,7 +17,7 @@
 
 // This is where scripts' loading functions should be declared:
 void AddSC_instance_blackfathom_deeps();     //Blackfathom Depths
-// Heimdal BFD-as-raid stubs (Phase 1.1 Step 2)
+// ToT BFD-as-raid stubs (Phase 1.1 Step 2)
 void AddSC_boss_ghamoo_ra_raid();
 void AddSC_boss_lady_sarevess_raid();
 void AddSC_boss_baron_aquanis_raid();
@@ -108,7 +108,7 @@ void AddSC_winterspring();
 void AddKalimdorScripts()
 {
     AddSC_instance_blackfathom_deeps();     //Blackfathom Depths
-    // Heimdal BFD-as-raid stubs (Phase 1.1 Step 2)
+    // ToT BFD-as-raid stubs (Phase 1.1 Step 2)
     AddSC_boss_ghamoo_ra_raid();
     AddSC_boss_lady_sarevess_raid();
     AddSC_boss_baron_aquanis_raid();

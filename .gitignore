@@ -150,7 +150,7 @@ data/
 !/modules/mod-rotation-mode/
 !/modules/mod-warforged/
 
-# Internal development artifacts — kept locally, not published (Heimdal-specific build notes)
+# Internal development artifacts — kept locally, not published (maintainer build notes)
 /docs/superpowers/
 /FOUNDATION_STATE.md
 /MEMORY_SUBSYSTEM_STATE.md
