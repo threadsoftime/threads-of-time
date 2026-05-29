@@ -1,0 +1,28 @@
+name: ToT CI
+on:
+  push:
+    branches: [dev, 'release/**']
+  pull_request:
+    branches: [dev, 'release/**']
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: |
+          pip install -e tot/memory pytest
+          pip install -r tot/brain/requirements.txt || true
+      - name: Unit + parity + memory + firstboot
+        run: python -m pytest tot/ tests/ -q
+      - name: Client-patch compositor suite (53 tests, must stay green)
+        run: python -m pytest tot/client-patch -q
+      - name: shellcheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck install-tot.sh tot/release/*.sh tot/deploy/bin/* tot/deploy/firstboot/*.sh
+      - name: Quadlet Heimdal-literal gate
+        run: bash tot/deploy/validate-quadlets.sh
