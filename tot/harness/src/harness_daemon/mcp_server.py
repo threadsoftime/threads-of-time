@@ -69,7 +69,7 @@ def build_mcp_server(
     audit:          Optional[AuditLogger],
     ac_client:      Optional[ACClient]    = None,
     db_client:      Optional[DBClient]    = None,
-    resource_url:   str                   = "http://192.168.1.3:8099/mcp",
+    resource_url:   str                   = "http://127.0.0.1:8099/mcp",
     allowed_hosts:  Optional[list[str]]   = None,
 ) -> FastMCP:
     """Build a FastMCP server with every V1 tool registered.
@@ -84,7 +84,7 @@ def build_mcp_server(
     verifier = TokenStoreVerifier(token_store)
 
     # DNS-rebind protection: an explicit allowlist lets us serve on
-    # any LAN host (e.g. 192.168.1.3:8099) while still enforcing Host
+    # any external host (e.g. realm.example.com:8099) while still enforcing Host
     # header validation. Bearer auth is the primary gate; this is
     # defense-in-depth for the browser-attack vector that doesn't
     # apply to curl/Claude Code clients but is on by default.

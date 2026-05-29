@@ -4,8 +4,8 @@ Requires MEMORY_MCP_URL + MEMORY_BEARER env vars (set in build.sh gate).
 Deselected by default via pytest marker; enabled in the contract gate.
 
 The MEMORY_MCP_URL env var points to the MCP path (e.g.
-http://192.168.1.3:8090/mcp/mcp). The SSE endpoint lives at the base
-(http://192.168.1.3:8090/v1/events/stream), so strip the /mcp/mcp suffix.
+http://127.0.0.1:8090/mcp/mcp). The SSE endpoint lives at the base
+(http://127.0.0.1:8090/v1/events/stream), so strip the /mcp/mcp suffix.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ pytestmark = pytest.mark.contract
 
 def _memory_http_url() -> str:
     """Extract the HTTP base URL from MEMORY_MCP_URL."""
-    raw = os.environ.get("MEMORY_MCP_URL", "http://192.168.1.3:8090/mcp/mcp")
+    raw = os.environ.get("MEMORY_MCP_URL", "http://127.0.0.1:8090/mcp/mcp")
     return raw.removesuffix("/mcp/mcp")
 
 

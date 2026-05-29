@@ -6,11 +6,11 @@
 # Usage:
 #   MEM_BEARER=<bearer> ./probe_v36_personality_roundtrip.sh
 #
-# Run from anywhere with access to 192.168.1.3:8090.
+# Run from anywhere with access to 127.0.0.1:8090.
 set -euo pipefail
 
 : "${MEM_BEARER:?MEM_BEARER env var required}"
-MEM_URL="${MEM_URL:-http://192.168.1.3:8090}"
+MEM_URL="${MEM_URL:-http://127.0.0.1:8090}"
 BOT_ID="999999"
 
 PERSONA_JSON='{"name":"V36ProbeBot","race":"Human","class":"Mage","backstory":"Probe bot for V3.6 round-trip","talkativeness":0.5,"courage":0.5,"greed":0.5,"attitude_to_master":0.0,"party_invite_policy":"accept_from_known","pvp_appetite":0.4,"raid_appetite":0.7,"completionist_streak":0.6,"gold_motivation":0.5,"profession_appetite":0.3}'

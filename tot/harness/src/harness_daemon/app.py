@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -219,17 +220,18 @@ def build_app(cfg: DaemonConfig,
     audit = AuditLogger(cfg.audit_path)
 
     # MCP host allowlist: client Host headers must match one of these
-    # entries (with FastMCP's `*` wildcard for ports). The deployed
-    # daemon serves over a LAN IP that differs from its bind address
-    # (`cfg.listen_address` is e.g. `0.0.0.0:8099` but clients connect
-    # to `192.168.1.3:8099`), so we include the bind host AND any
-    # additional externally-reachable hostnames here.
+    # entries (with FastMCP's `*` wildcard for ports). The daemon may be
+    # reached on an external host/IP that differs from its bind address
+    # (`cfg.listen_address` is e.g. `0.0.0.0:8099` but clients may connect
+    # to `realm.example.com:8099`); operators add such hostnames via the
+    # HARNESS_EXTRA_ALLOWED_HOSTS env var (comma-separated, `*` = any port).
     mcp_allowed_hosts = [
         "127.0.0.1:*",
         "localhost:*",
-        "192.168.1.3:*",
         cfg.listen_address,
     ]
+    _extra_hosts = os.environ.get("HARNESS_EXTRA_ALLOWED_HOSTS", "")
+    mcp_allowed_hosts += [h.strip() for h in _extra_hosts.split(",") if h.strip()]
     mcp_server = build_mcp_server(
         token_store=token_store,
         registry=registry,
