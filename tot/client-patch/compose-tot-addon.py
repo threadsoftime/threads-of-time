@@ -31,20 +31,36 @@ After composing, pack the result with modules/mod-warforged/tools/pack-mpq.py.
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 import tomllib
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-MODULES = ROOT / "modules"
-OUTPUT = ROOT / "build" / "tot-addon" / "ThreadsOfTime"
+# SCRIPT_DIR = tot/client-patch/; parents go: [0]=client-patch, [1]=tot, [2]=repo-root
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT = SCRIPT_DIR.parents[1]           # threads-of-time/ (repo root)
+MODULES = ROOT / "modules"             # threads-of-time/modules/
+OUTPUT = SCRIPT_DIR / "build" / "tot-addon" / "ThreadsOfTime"
 
 
 def discover_contributions() -> list[dict]:
-    """Find every modules/<mod>/data/addon-contrib/manifest.toml + its files."""
+    """Find every modules/<mod>/data/addon-contrib/manifest.toml + its files,
+    plus the synthetic tot/client-patch/branding/addon-contrib/manifest.toml."""
+    manifest_paths = list(MODULES.glob("*/data/addon-contrib/manifest.toml"))
+
+    # Branding is a synthetic non-AC module: lives under tot/client-patch/branding/
+    # rather than modules/, so it is discovered separately.
+    branding = SCRIPT_DIR / "branding" / "addon-contrib" / "manifest.toml"
+    print(f"  branding manifest path: {branding}")
+    assert branding.exists(), (
+        f"branding manifest not found at {branding}; "
+        "create tot/client-patch/branding/addon-contrib/manifest.toml"
+    )
+    manifest_paths.append(branding)
+
     contribs = []
-    for manifest_path in MODULES.glob("*/data/addon-contrib/manifest.toml"):
+    for manifest_path in manifest_paths:
         with open(manifest_path, "rb") as f:
             m = tomllib.load(f)
         contrib_dir = manifest_path.parent
@@ -160,7 +176,6 @@ def compose() -> Path:
 
 
 if __name__ == "__main__":
-    import os
     try:
         compose()
     except SystemExit:

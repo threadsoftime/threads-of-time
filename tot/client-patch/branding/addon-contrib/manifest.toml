@@ -1,0 +1,5 @@
+# ToT login-screen branding. Composed through Stage A (compose-tot-addon.py).
+# priority 5 = core band, loads before feature mods.
+mod = "tot-branding"
+priority = 5
+files = ["ToTBranding.lua"]
