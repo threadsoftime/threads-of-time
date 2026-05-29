@@ -1,0 +1,8 @@
+# tot/deploy/firstboot/dbimport.conf.tmpl — rendered by firstboot.sh
+LoginDatabaseInfo     = "@DBHOST@;3306;@DBUSER@;@DBPASS@;tot_auth"
+WorldDatabaseInfo     = "@DBHOST@;3306;@DBUSER@;@DBPASS@;tot_world"
+CharacterDatabaseInfo = "@DBHOST@;3306;@DBUSER@;@DBPASS@;tot_characters"
+Updates.EnableDatabases = 7
+Updates.AutoSetup       = 1
+Updates.Redundancy      = 1
+Updates.AllowedModules  = "all"
