@@ -16,7 +16,7 @@ echo "== Stage B: pack MPQ ($VERSION) =="
 python3 "$CP/pack-mpq.py" --version "$VERSION" --out "$OUT"
 
 echo "== Determinism gate =="
-python3 "$CP/pack-mpq.py" --version "$VERSION" --check
+python3 "$CP/pack-mpq.py" --version "$VERSION" --out "$OUT" --check
 
 echo "== sha256 =="
 if command -v sha256sum >/dev/null; then sha256sum "$OUT"; else shasum -a 256 "$OUT"; fi
