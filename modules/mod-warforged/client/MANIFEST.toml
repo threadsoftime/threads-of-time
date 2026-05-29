@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# mod-warforged client DBC contribution.
+# The client ships ONLY the 21 ToT enchant rows (§10.3 — no stock rows). The
+# server-side full file is built separately by tools/build-warforged-dbc.py.
+[manifest]
+mod = "mod-warforged"
+
+[sources]
+enchants_csv = "data/csv/warforged_enchants.csv"
+
+[recipe]
+entry = "build_dbc"
+
+[id_ranges]
+"SpellItemEnchantment.dbc" = [{ min = 70001, max = 70063 }]
