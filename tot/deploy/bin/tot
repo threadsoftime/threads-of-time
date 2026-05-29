@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# tot — Threads of Time operator CLI. Installed onto PATH by install-tot.sh.
+# Dispatches to Quadlet (systemctl --user) or Compose based on $TOT_MODE.
+set -euo pipefail
+TOT_HOME="${TOT_HOME:-/opt/tot}"
+MODE_FILE="$TOT_HOME/.mode"
+MODE="$( [ -f "$MODE_FILE" ] && cat "$MODE_FILE" || echo compose )"
+
+compose() { ( cd "$TOT_HOME" && docker compose -f compose.yml "$@" 2>/dev/null \
+              || podman-compose -f compose.yml "$@" ); }
+units=(tot-database tot-firstboot tot-authserver tot-worldserver tot-harness tot-memory tot-brain)
+
+usage() { echo "usage: tot {up|down|restart <svc>|logs <svc>|run-console <cmd>|upgrade <ver>}"; exit 2; }
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  up)
+    if [ "$MODE" = quadlet ]; then systemctl --user daemon-reload; systemctl --user start tot-server-pod.service "${units[@]/%/.service}";
+    else compose up -d; fi ;;
+  down)
+    if [ "$MODE" = quadlet ]; then systemctl --user stop "${units[@]/%/.service}" tot-server-pod.service || true;
+    else compose down; fi ;;
+  restart)
+    svc="${1:?service name}"
+    if [ "$MODE" = quadlet ]; then systemctl --user restart "tot-${svc}.service"; else compose restart "$svc"; fi ;;
+  logs)
+    svc="${1:?service name}"; podman logs -f "tot-${svc}" ;;
+  run-console)
+    podman exec -i tot-worldserver /bin/sh -c "echo '$*' | ./worldserver" || \
+      podman attach --sig-proxy=false tot-worldserver ;;
+  upgrade)
+    ver="${1:?version}"
+    echo "==> snapshotting DBs"; "$TOT_HOME/bin/tot-backup.sh"
+    echo "==> pulling :$ver"; sed -i.bak "s/^TOT_VERSION=.*/TOT_VERSION=$ver/" "$TOT_HOME/.env"
+    if [ "$MODE" = compose ]; then compose pull; compose up -d;
+    else "$TOT_HOME/bin/render-quadlets.sh" "$ver"; systemctl --user daemon-reload; tot up; fi
+    echo "==> upgraded to $ver (forward-only; restore from backups/ to roll back)" ;;
+  *) usage ;;
+esac
