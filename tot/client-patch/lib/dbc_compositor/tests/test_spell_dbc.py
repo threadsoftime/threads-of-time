@@ -1,4 +1,4 @@
-# tools/dbc-patch-builder/tests/test_spell_dbc.py
+# SPDX-License-Identifier: GPL-2.0-or-later
 import struct
 from pathlib import Path
 from dbc_compositor.spell_dbc import (

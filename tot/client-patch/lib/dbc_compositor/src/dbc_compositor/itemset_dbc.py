@@ -1,4 +1,4 @@
-# tools/dbc-patch-builder/src/dbc_patch_builder/itemset_dbc.py
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Build ItemSet.dbc for the Bracket 1 patch.
 
 Row layout (3.3.5a, 53 fields, 212 bytes per row):

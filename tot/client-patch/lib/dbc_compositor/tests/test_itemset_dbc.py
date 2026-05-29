@@ -1,4 +1,4 @@
-# tools/dbc-patch-builder/tests/test_itemset_dbc.py
+# SPDX-License-Identifier: GPL-2.0-or-later
 import struct
 from dbc_compositor.itemset_dbc import ItemSetRow, build_itemset_dbc
 from dbc_compositor.dbc_io import HEADER_SIZE, WDBC_MAGIC

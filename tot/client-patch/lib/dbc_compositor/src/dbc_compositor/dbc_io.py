@@ -1,4 +1,4 @@
-# tools/dbc-patch-builder/src/dbc_patch_builder/dbc_io.py
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Shared low-level DBC IO: WDBC header + string-block builder."""
 from __future__ import annotations
 import struct

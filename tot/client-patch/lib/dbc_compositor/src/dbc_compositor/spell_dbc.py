@@ -1,4 +1,4 @@
-# tools/dbc-patch-builder/src/dbc_patch_builder/spell_dbc.py
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Build the Spell.dbc override block for the Bracket 1 patch.
 
 A patch MPQ's Spell.dbc only needs to contain the OVERRIDDEN rows (54). The

@@ -1,4 +1,4 @@
-# tools/dbc-patch-builder/src/dbc_patch_builder/mpq_pack.py
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Pack DBC files into a patch MPQ via StormLib (loaded as a shared library via ctypes).
 
 StormLib is the standard MPQ library by Ladislav Zezula. On macOS install

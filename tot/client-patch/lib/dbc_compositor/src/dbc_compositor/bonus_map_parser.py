@@ -1,4 +1,4 @@
-# tools/dbc-patch-builder/src/dbc_patch_builder/bonus_map_parser.py
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Parse the bracket_set_bonus_map seed SQL into structured rows."""
 from __future__ import annotations
 import re

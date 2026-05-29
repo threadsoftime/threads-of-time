@@ -1,4 +1,4 @@
-# tools/dbc-patch-builder/tests/test_bonus_map_parser.py
+# SPDX-License-Identifier: GPL-2.0-or-later
 from pathlib import Path
 from dbc_compositor.bonus_map_parser import parse_bonus_map_seed, BonusRow
 

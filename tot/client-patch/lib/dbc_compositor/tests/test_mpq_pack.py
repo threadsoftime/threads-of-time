@@ -1,4 +1,4 @@
-# tools/dbc-patch-builder/tests/test_mpq_pack.py
+# SPDX-License-Identifier: GPL-2.0-or-later
 import struct
 import tempfile
 from pathlib import Path
