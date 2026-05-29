@@ -15,7 +15,7 @@
 -- it idempotent. Operators can use this to "reset the reset clock"
 -- mid-cycle if something has gone wrong.
 --
--- Note: this lives under acore_characters, not acore_world. The
+-- Note: this lives under tot_characters, not tot_world. The
 -- instance_reset table is per-realm character state.
 --
 

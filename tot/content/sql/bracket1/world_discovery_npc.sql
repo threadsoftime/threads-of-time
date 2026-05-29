@@ -11,7 +11,7 @@
 -- -----------------------------------------------------------------------
 -- 1. Creature template
 -- -----------------------------------------------------------------------
-INSERT IGNORE INTO acore_world.creature_template
+INSERT IGNORE INTO tot_world.creature_template
     (entry, name, subname, gossip_menu_id,
      minlevel, maxlevel, faction,
      npcflag, speed_walk, speed_run,
@@ -47,7 +47,7 @@ VALUES
 -- -----------------------------------------------------------------------
 -- 2. Model assignment (modelid1 = 15351 via creature_template_model)
 -- -----------------------------------------------------------------------
-INSERT IGNORE INTO acore_world.creature_template_model
+INSERT IGNORE INTO tot_world.creature_template_model
     (CreatureID, Idx, CreatureDisplayID, DisplayScale, Probability)
 VALUES
     (90100, 0, 15351, 1.0, 1.0);
@@ -55,7 +55,7 @@ VALUES
 -- -----------------------------------------------------------------------
 -- 3. Spawns: 8 capitals (guid range 9010000-9010007, high custom range)
 -- -----------------------------------------------------------------------
-INSERT IGNORE INTO acore_world.creature
+INSERT IGNORE INTO tot_world.creature
     (guid, id1, id2, id3, map, zoneId, areaId, spawnMask, phaseMask,
      equipment_id, position_x, position_y, position_z, orientation,
      spawntimesecs, wander_distance, currentwaypoint, curhealth, curmana,

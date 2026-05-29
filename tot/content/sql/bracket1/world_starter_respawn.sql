@@ -9,16 +9,16 @@
 -- Approximate bounds sourced from WoW map geometry and verified against game_tele reference points.
 
 -- Backup the original spawntimesecs so revert can restore exactly.
-CREATE TABLE IF NOT EXISTS acore_world.creature_spawntime_backup_bracket1 (
+CREATE TABLE IF NOT EXISTS tot_world.creature_spawntime_backup_bracket1 (
     guid INT UNSIGNED NOT NULL PRIMARY KEY,
     spawntimesecs INT UNSIGNED NOT NULL
 ) ENGINE=InnoDB;
 
 -- Take backup of current values for affected rows (idempotent: only inserts unbacked-up rows).
-INSERT IGNORE INTO acore_world.creature_spawntime_backup_bracket1 (guid, spawntimesecs)
+INSERT IGNORE INTO tot_world.creature_spawntime_backup_bracket1 (guid, spawntimesecs)
 SELECT c.guid, c.spawntimesecs
-FROM acore_world.creature c
-JOIN acore_world.creature_template ct ON c.id1 = ct.entry
+FROM tot_world.creature c
+JOIN tot_world.creature_template ct ON c.id1 = ct.entry
 WHERE ct.minlevel <= 10
   AND ct.npcflag = 0
   AND ct.rank = 0
@@ -50,8 +50,8 @@ WHERE ct.minlevel <= 10
   );
 
 -- Apply the boost.
-UPDATE acore_world.creature c
-JOIN acore_world.creature_template ct ON c.id1 = ct.entry
+UPDATE tot_world.creature c
+JOIN tot_world.creature_template ct ON c.id1 = ct.entry
 SET c.spawntimesecs = 30
 WHERE ct.minlevel <= 10
   AND ct.npcflag = 0

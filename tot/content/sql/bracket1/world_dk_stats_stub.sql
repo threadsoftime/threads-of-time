@@ -10,8 +10,8 @@
 -- worldserver.conf so these stats are never used in practice — they exist
 -- purely to satisfy the boot-time validator.
 
-INSERT IGNORE INTO acore_world.player_class_stats
+INSERT IGNORE INTO tot_world.player_class_stats
     (Class, Level, BaseHP, BaseMana, Strength, Agility, Stamina, Intellect, Spirit)
 SELECT 6, Level, BaseHP, BaseMana, Strength, Agility, Stamina, Intellect, Spirit
-FROM acore_world.player_class_stats
+FROM tot_world.player_class_stats
 WHERE Class = 1 AND Level <= 54;
