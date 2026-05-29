@@ -50,11 +50,51 @@ sed -e "s|@DBHOST@|${DBHOST}|g" -e "s|@DBUSER@|${MYSQL_USER}|g" -e "s|@DBPASS@|$
     /tot/firstboot/dbimport.conf.tmpl > /azerothcore/env/dist/etc/dbimport.conf
 /azerothcore/env/dist/bin/dbimport || fail "dbimport (stock + module SQL)"
 
-# 4. ToT content SQL via explicit manifest
+# 4. ToT content SQL via explicit manifest (bash-native; no python3 in db-import image)
+# apply_content_sql.py is kept for CI manifest-completeness checks (python3 present there).
 log "4/8 applying ToT content SQL (apply-order.toml)"
-python3 /tot/firstboot/apply_content_sql.py \
-  --sql-root /tot/content-sql --host "$DBHOST" \
-  --user "${MYSQL_USER}" --password "${MYSQL_PASSWORD}" || fail "content SQL"
+# Parse apply-order.toml with awk: collect [[apply]] blocks, extract file + db
+# pairs, map db to database name, apply each file with mysql.
+# Fixed format: each [[apply]] block contains exactly one "file = ..." and one
+# "db = ..." line (order within the block is not assumed; both are buffered per
+# block before output).
+apply_toml="/tot/content-sql/apply-order.toml"
+if [ ! -f "$apply_toml" ]; then
+  fail "apply-order.toml not found at $apply_toml"
+fi
+awk '
+  /^\[\[apply\]\]/ {
+    # Flush previous block if we have both fields
+    if (file != "" && db != "") print file "|" db
+    file = ""; db = ""
+  }
+  /^file[[:space:]]*=/ {
+    # Strip: file = "path/to/file.sql" -> path/to/file.sql
+    sub(/^file[[:space:]]*=[[:space:]]*"/, ""); sub(/".*$/, ""); file = $0
+  }
+  /^db[[:space:]]*=/ {
+    # Strip: db = "world" -> world
+    sub(/^db[[:space:]]*=[[:space:]]*"/, ""); sub(/".*$/, ""); db = $0
+  }
+  END {
+    # Flush last block
+    if (file != "" && db != "") print file "|" db
+  }
+' "$apply_toml" | while IFS='|' read -r sql_file db_name; do
+  case "$db_name" in
+    world)      database="tot_world" ;;
+    characters) database="tot_characters" ;;
+    auth)       database="tot_auth" ;;
+    *) fail "apply-order.toml: unknown db value '$db_name' for file '$sql_file'" ;;
+  esac
+  full_path="/tot/content-sql/${sql_file}"
+  if [ ! -f "$full_path" ]; then
+    fail "content SQL file not found: $full_path"
+  fi
+  log "  applying ${sql_file} -> ${database}"
+  mysql -h "$DBHOST" -u"${MYSQL_USER}" -p"${MYSQL_PASSWORD}" "$database" < "$full_path" \
+    || fail "mysql failed on ${sql_file} -> ${database}"
+done || fail "content SQL"
 
 # 5. Seed realm row
 log "5/8 seeding realm row -> ${TOT_REALM_HOST}"

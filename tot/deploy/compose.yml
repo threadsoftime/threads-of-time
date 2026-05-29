@@ -49,6 +49,11 @@ services:
       AC_WORLD_DATABASE_INFO: "database;3306;${MYSQL_USER};${MYSQL_PASSWORD};tot_world"
       AC_CHARACTER_DATABASE_INFO: "database;3306;${MYSQL_USER};${MYSQL_PASSWORD};tot_characters"
       AC_LOGIN_DATABASE_INFO: "database;3306;${MYSQL_USER};${MYSQL_PASSWORD};tot_auth"
+      # Bind harness-bridge on all interfaces so the separate harness container can reach it.
+      # mod-harness-bridge listens on port 8091; default bind is 127.0.0.1 (loopback only).
+      AC_HARNESS_BRIDGE_BIND_ADDRESS: "0.0.0.0"
+      # DataDir must be set explicitly; stock worldserver.conf.dist defaults to ".".
+      AC_DATA_DIR: "/azerothcore/env/dist/data"
     ports: ["8085:8085", "7878:7878"]
     volumes: [tot-client-data:/azerothcore/env/dist/data:ro, ./etc:/azerothcore/env/dist/etc, ./logs:/azerothcore/env/dist/logs]
     stdin_open: true

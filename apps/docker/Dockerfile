@@ -187,6 +187,22 @@ COPY --chown=$DOCKER_USER:$DOCKER_USER \
      --from=build \
      /azerothcore/env/dist/bin/worldserver /azerothcore/env/dist/bin/worldserver
 
+# Bake module SQL directories so worldserver can self-seed its module DBs
+# at runtime without a source bind-mount (DEFECT 1 fix: SIGSEGV on clean install
+# because mod-playerbots reads its SQL dir from disk at boot regardless of
+# AC_UPDATES_ENABLE_DATABASES).
+# mod-playerbots: external dep synced into build tree by tot/release/build.sh.
+# mod-bracket-sets / mod-rotation-mode: ToT modules in this repo.
+COPY --chown=$DOCKER_USER:$DOCKER_USER \
+     --from=build \
+     /azerothcore/modules/mod-playerbots/data/sql /azerothcore/modules/mod-playerbots/data/sql
+COPY --chown=$DOCKER_USER:$DOCKER_USER \
+     --from=build \
+     /azerothcore/modules/mod-bracket-sets/data/sql /azerothcore/modules/mod-bracket-sets/data/sql
+COPY --chown=$DOCKER_USER:$DOCKER_USER \
+     --from=build \
+     /azerothcore/modules/mod-rotation-mode/data/sql /azerothcore/modules/mod-rotation-mode/data/sql
+
 VOLUME /azerothcore/env/dist/etc
 
 CMD ["worldserver"]
