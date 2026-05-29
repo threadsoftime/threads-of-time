@@ -1,0 +1,30 @@
+[Unit]
+Description=Threads of Time decision brain
+After=tot-worldserver.service tot-harness.service tot-memory.service
+Wants=tot-harness.service tot-memory.service
+
+[Container]
+Image=@GHCR_NS@/brain:@TOT_VERSION@
+ContainerName=tot-brain
+Pod=tot-server.pod
+Volume=@TOT_HOME@/data/brain:/var/lib/brain:Z
+Volume=@TOT_HOME@/logs/brain:/var/log/brain:Z
+EnvironmentFile=@TOT_HOME@/.env
+Environment=BRAIN_BIND_HOST=127.0.0.1
+Environment=BRAIN_BIND_PORT=8091
+Environment=BRAIN_STATE_DB=/var/lib/brain/state.sqlite
+Environment=BRAIN_DECISIONS_LOG=/var/log/brain/decisions.jsonl
+Environment=HARNESS_MCP_URL=http://127.0.0.1:8099/mcp/mcp
+Environment=MEMORY_MCP_URL=http://127.0.0.1:8090/mcp/mcp
+Environment=LLM_BASE_URL=${BRAIN_LLM_URL}
+Environment=LLM_MODEL=${BRAIN_LLM_MODEL}
+Environment=LLM_API_KEY=${BRAIN_LLM_API_KEY}
+PodmanArgs=--memory=${TOT_BRAIN_MEM_LIMIT}
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target default.target
