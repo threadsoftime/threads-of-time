@@ -78,7 +78,8 @@ def _load_descriptions(tsv_path: Path) -> Dict[int, tuple[str, str]]:
             if row[0].startswith("#"):
                 continue
             if row[0] == "spell_id":  # header
-                assert row == ["spell_id", "flavor", "mechanic"], f"unexpected header {row}"
+                if row != ["spell_id", "flavor", "mechanic"]:
+                    raise ValueError(f"unexpected descriptions TSV header: {row}")
                 continue
             spell_id = int(row[0])
             out[spell_id] = (row[1], row[2])
@@ -103,16 +104,20 @@ def build(sources: Dict[str, Path]) -> Dict[str, bytes]:
     override blocks the compositor packs into the unified patch MPQ.
     """
     bonus_rows = parse_bonus_map_seed(sources["bonus_map"])
-    assert len(bonus_rows) == 54, f"expected 54 bonus rows, got {len(bonus_rows)}"
+    if len(bonus_rows) != 54:
+        raise ValueError(f"expected 54 bonus rows, got {len(bonus_rows)}")
 
     itemset_map = _parse_itemset_map_seed(sources["itemset_map"])
-    assert len(itemset_map) == 27, f"expected 27 itemset rows, got {len(itemset_map)}"
+    if len(itemset_map) != 27:
+        raise ValueError(f"expected 27 itemset rows, got {len(itemset_map)}")
 
     descriptions = _load_descriptions(sources["descriptions"])
-    assert len(descriptions) == 54, f"expected 54 description rows, got {len(descriptions)}"
+    if len(descriptions) != 54:
+        raise ValueError(f"expected 54 description rows, got {len(descriptions)}")
 
     baseline = load_baseline(sources["spell_baseline"])
-    assert len(baseline) == 54, f"expected 54 baseline rows, got {len(baseline)}"
+    if len(baseline) != 54:
+        raise ValueError(f"expected 54 baseline rows, got {len(baseline)}")
 
     # Compose ItemSet.dbc — 28 rows (1 fallback + 27 class+spec)
     itemset_rows = [fallback_row()] + compose_27_class_spec_rows(
