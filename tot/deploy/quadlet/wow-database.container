@@ -1,14 +1,15 @@
 [Unit]
-Description=WoW Database (MySQL 8.4)
-Requires=wow-server-pod.service
-After=wow-server-pod.service
+Description=Threads of Time database (MySQL 8.x)
+Requires=tot-server-pod.service
+After=tot-server-pod.service
 
 [Container]
-ContainerName=wow-database
+ContainerName=tot-database
 Image=docker.io/library/mysql:8.4
-Pod=wow-server.pod
-Volume=wow-database.volume:/var/lib/mysql:Z
-EnvironmentFile=/opt/containers/wow/.env
+Pod=tot-server.pod
+Volume=tot-database.volume:/var/lib/mysql:Z
+EnvironmentFile=@TOT_HOME@/.env
+Environment=MYSQL_DATABASE=tot_world
 HealthCmd=mysqladmin ping -h 127.0.0.1 -uroot -p${MYSQL_ROOT_PASSWORD}
 HealthInterval=10s
 HealthTimeout=5s
