@@ -260,8 +260,12 @@ pub fn set_holiday_event_time(
 
     let start: i64 = if !single_date {
         // C++ lines 1965-1973: FindStartTimeForStage path.
-        // C++ line 1969: if (start) event.Start = start
-        // If result == 0, leave start as 0 (no qualifying date found).
+        // C++ line 1969: `if (start) event.Start = start` — C++ only overwrites Start when
+        // FindStartTimeForStage returns non-zero.  When it returns 0 (all populated holiday
+        // dates are fully in the past relative to curTime), C++ keeps the existing event.Start,
+        // which is the `game_event.start_time` column value loaded in LoadGameEvents (line 357).
+        // We return 0 here as a sentinel; resolve_holiday_event detects it and falls back to
+        // row.start_time, mirroring the C++ "keep existing" behaviour.
         find_start_time_for_stage(
             &holiday.date,
             stage_offset,
@@ -495,7 +499,11 @@ pub fn resolve_holiday_event(
     match set_holiday_event_time(row.holiday_stage, holiday, resolve_ref, tz_offset_secs) {
         Some((start, length_min, occurence_min)) => ResolvedEvent {
             entry: row.entry,
-            start,
+            // C++ `if (start) event.Start = start` in SetHolidayEventTime line 1969: when
+            // FindStartTimeForStage returns 0 (all holiday dates are in the past), C++ keeps
+            // the existing event.Start (= game_event.start_time from LoadGameEvents line 357).
+            // A genuine resolved start is ~1.7e9 (a ~2026 unixtime), so 0 is a safe sentinel.
+            start: if start != 0 { start } else { row.start_time },
             end: row.end_time, // End comes from game_event.end_time, NOT holiday math
             occurence: if occurence_min == 0 {
                 // filter_type==1 or filter_type==2 and !looping: keep row value
@@ -1060,6 +1068,60 @@ mod tests {
         assert_eq!(
             start, expected_start,
             "singleDate: should pick last_year=2025 when within window"
+        );
+    }
+
+    // ── Regression: !single_date, FindStartTimeForStage returns 0 → keep row.start_time ──
+
+    #[test]
+    fn non_single_date_all_past_retains_row_start_time() {
+        // Regression for C++ `if (start) event.Start = start` (GameEventMgr.cpp line 1969).
+        //
+        // Setup: holiday with single_date=false (year_offset != 31), filter=-1 (yearly).
+        // All populated Date[] entries resolve to instants fully in the past relative to
+        // resolve_ref, so find_start_time_for_stage returns 0.
+        //
+        // The resolved event's start must equal row.start_time, NOT 0.
+        //
+        // Build a packed date with year_offset=20 (year 2020) — well in the past.
+        // resolve_ref = 2026-05-30 (far past 2020).
+        let year_offset: u32 = 20; // year 2020 — NOT the singleDate sentinel (31)
+        let mon0: u32 = 0;         // January
+        let day0: u32 = 0;         // 1st (0-indexed)
+        let weekday: u32 = 0;
+        let packed_past = (year_offset << 24) | (mon0 << 20) | (day0 << 14) | (weekday << 11);
+        // year_offset=20 → bits[24-28] = 20 ≠ 31 → single_date = false.
+
+        // Duration[0]=168h (7 days), filter=-1 (yearly).
+        let holiday = make_holiday(vec![packed_past, 0], vec![168], -1, false);
+
+        // resolve_ref = 2026-05-30 (way after 2020-01-01 + 7 days)
+        let ref_civil = CivilDate { year: 2026, mon0: 4, mday: 30, hour: 0, min: 0, wday: 0 };
+        let resolve_ref = civil_to_unix(&ref_civil, 0);
+
+        // row.start_time is set to a well-known sentinel value that is NOT 0.
+        let sentinel_start: i64 = 1_700_000_000; // 2023-11-14 — arbitrary known unixtime
+
+        let row = GameEventInput {
+            entry: 99,
+            start_time: sentinel_start,
+            end_time: 9_999_999_999,
+            occurence: 525_600, // YEAR/MINUTE
+            length: 168 * 60,   // 168h in minutes
+            holiday: 99,
+            holiday_stage: 1,
+            state: GameEventState::Normal,
+            next_start: 0,
+        };
+
+        let resolved = resolve_holiday_event(&row, &holiday, resolve_ref, 0);
+
+        // C++ `if (start) event.Start = start`: since FindStartTimeForStage returned 0
+        // (no qualifying date), the C++ code keeps game_event.start_time.
+        // We must NOT propagate 0 — the resolved start must equal row.start_time.
+        assert_eq!(
+            resolved.start, sentinel_start,
+            "!single_date + all-past dates: resolved.start must equal row.start_time ({sentinel_start}), not 0"
         );
     }
 }
