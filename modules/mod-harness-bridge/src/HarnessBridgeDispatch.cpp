@@ -144,6 +144,7 @@ namespace HarnessBridge
 #include "Adapters/MemoryListAdapter.h"
 #include "Adapters/MemoryUpdateAdapter.h"
 #include "Adapters/MemoryDeleteAdapter.h"
+#include "Adapters/ObsGameEventsAdapter.h"
 
 #include <unordered_map>
 #include <functional>
@@ -161,8 +162,10 @@ namespace HarnessBridge
         // via HARNESS_MEMORY_URL (default http://localhost:8090).
         // Plan-3 subset-gating (Tasks 4-5): +2 world-snapshot tools:
         // obs.list_players, obs.list_bot_population.
-        // Total C++ adapters: 40. Daemon-direct obs.query_db brings the
-        // total exposed surface to 41 tools across HTTP /v1/* and MCP.
+        // GES Inc-1 (Task 9): +1 obs.game_events (resolved schedule +
+        // active set + sHolidaysStore dump — read-only).
+        // Total C++ adapters: 41. Daemon-direct obs.query_db brings the
+        // total exposed surface to 42 tools across HTTP /v1/* and MCP.
         static std::unordered_map<std::string, AdapterFn> const table = {
             {"obs.ping",                  &Adapters::ObsPing},
             {"obs.get_state",             &Adapters::ObsGetState},
@@ -177,6 +180,7 @@ namespace HarnessBridge
             {"obs.get_group",             &Adapters::ObsGetGroup},
             {"obs.list_bot_population",   &Adapters::ObsListBotPopulation},
             {"obs.list_players",          &Adapters::ObsListPlayers},
+            {"obs.game_events",           &Adapters::ObsGameEvents},
             {"gm.additem",                &Adapters::GmAdditem},
             {"gm.equip_all",              &Adapters::GmEquipAll},
             {"gm.teleport",               &Adapters::GmTeleport},
