@@ -175,6 +175,11 @@ namespace lfg
 
     uint8 LFGQueue::FindGroups()
     {
+        // THROWAWAY SOAK INSTRUMENTATION (Stage-4, Inc-1) — revert after Deploy-C soak.
+        // Fires at LOG_ERROR so it's visible in worldserver logs even without debug verbosity.
+        // Expected count during soak: ZERO. Any fires indicate native matching is still
+        // processing entries — investigate before Inc-3 deletion.
+        LOG_ERROR("lfg.deadcheck", "LFGQueue::FindGroups fired — native matching entry (queue size: {})", newToQueueStore.size());
         LOG_DEBUG("lfg", "FIND GROUPS!");
         uint8 newGroupsProcessed = 0;
         if (!newToQueueStore.empty())
