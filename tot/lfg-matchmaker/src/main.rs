@@ -1,3 +1,4 @@
+mod config;
 mod types;
 
 use axum::{routing::get, Router};
