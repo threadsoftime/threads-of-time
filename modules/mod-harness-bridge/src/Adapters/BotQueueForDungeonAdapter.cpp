@@ -1,11 +1,10 @@
 #include "Adapters/BotQueueForDungeonAdapter.h"
 
 #include "LFGMgr.h"
+#include "LfgIntentStore.h"
 #include "ObjectAccessor.h"
-#include "Opcodes.h"
 #include "Player.h"
 #include "Script/Playerbots.h"
-#include "WorldPacket.h"
 
 // LFG role bitmask constants — must match BotSetRoleAdapter.cpp defines.
 // Numeric values confirmed via probe P5 after Stage 1 deploy.
@@ -79,24 +78,26 @@ namespace HarnessBridge::Adapters
             ? HARNESS_LFG_RANDOM_DUNGEON
             : static_cast<uint32>(dungeon_id_arg);
 
-        // Mirror LfgActions.cpp:157-168.
-        std::list<uint32> list = {dungeonId};
-        WorldPacket* data = new WorldPacket(CMSG_LFG_JOIN);
-        *data << (uint32)roleMask;
-        *data << (bool)false << (bool)false;
-        *data << (uint8)(list.size());
-        for (uint32 d : list)
-            *data << (uint32)d;
-        *data << (uint8)3 << (uint8)0 << (uint8)0 << (uint8)0;
-        *data << std::string("0");   // gear score placeholder
-        p->GetSession()->QueuePacket(data);
+        // Reroute (LFG Inc 1, Stage 4): record the bot's LFG intent for the Rust
+        // slice to drain via obs.lfg_pending, instead of constructing CMSG_LFG_JOIN
+        // into native LFGMgr. LfgVetoScript does NOT veto bots, so the native path
+        // would still reach LFGQueue matching — recording the intent keeps native
+        // matching at zero callers. Mirrors the LfgActions.cpp force-queue reroute.
+        HarnessBridge::RecordLfgIntent({
+            bot_low,
+            static_cast<uint8_t>(p->GetTeamId()),
+            static_cast<uint32_t>(roleMask),
+            std::vector<uint32_t>{dungeonId},
+            /*comment=*/ "",
+            /*is_bot=*/true
+        });
 
         res.outcome = DispatchResult::Outcome::Ok;
         res.result_json = {
             {"queued",     true},
+            {"via",        "slice_intent"},
             {"dungeon_id", static_cast<int>(dungeonId)},
             {"roles_mask", static_cast<int>(roleMask)},
-            {"lfg_state",  "queued"},
         };
         return res;
     }
