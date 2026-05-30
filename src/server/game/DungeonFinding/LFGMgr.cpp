@@ -1905,11 +1905,6 @@ namespace lfg
 
     uint32 LFGMgr::AddProposal(LfgProposal& proposal)
     {
-        // THROWAWAY SOAK INSTRUMENTATION (Stage-4, Inc-1) — revert after Deploy-C soak.
-        // Fires at LOG_ERROR so it's visible in worldserver logs even without debug verbosity.
-        // Expected count during soak: ZERO. Any fires indicate native matching produced a
-        // proposal — investigate before Inc-3 deletion.
-        LOG_ERROR("lfg.deadcheck", "LFGMgr::AddProposal fired — native matching produced proposal id={}", m_lfgProposalId + 1);
         proposal.id = ++m_lfgProposalId;
         ProposalsStore[m_lfgProposalId] = proposal;
         return m_lfgProposalId;
