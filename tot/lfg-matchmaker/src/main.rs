@@ -1,3 +1,5 @@
+mod types;
+
 use axum::{routing::get, Router};
 
 #[tokio::main]
