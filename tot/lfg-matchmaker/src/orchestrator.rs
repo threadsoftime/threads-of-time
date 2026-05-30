@@ -37,13 +37,14 @@ pub async fn fulfill(h: &Harness, p: &MatchProposal, dungeon: &Dungeon) -> FormR
     }
 
     let mut placed = 0usize;
-    let mut note = String::from("formed+placed");
+    let mut errors: Vec<String> = Vec::new();
     for m in &members {
         match h.enter_instance_direct(*m, dungeon.map_id, dungeon.x, dungeon.y, dungeon.z, dungeon.o).await {
             Ok(_) => placed += 1,
-            Err(e) => note = format!("place {m} failed: {e}"),
+            Err(e) => errors.push(format!("place {m}: {e}")),
         }
     }
+    let note = if errors.is_empty() { "formed+placed".to_string() } else { errors.join("; ") };
 
     FormResult { dungeon_id: p.dungeon_id, leader, members, formed: true, placed, note }
 }

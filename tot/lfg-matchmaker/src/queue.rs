@@ -37,6 +37,7 @@ impl Queue {
         self.inner.lock().unwrap().len()
     }
 
+    #[allow(dead_code)] // conventional collection-wrapper method; kept for completeness
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

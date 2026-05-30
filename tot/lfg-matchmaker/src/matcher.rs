@@ -1,19 +1,26 @@
 use crate::types::{MatchProposal, QueueEntry, Role};
 use std::collections::HashMap;
 
+#[derive(Default)]
+struct RoleBuckets {
+    tanks: Vec<u64>,
+    healers: Vec<u64>,
+    dps: Vec<u64>,
+}
+
 /// Greedy, deterministic role-balanced matcher.
 /// Forms as many 1-tank / 1-healer / 3-dps groups per `dungeon_id` as the
 /// queue allows. Pure — no I/O, no clock, no randomness. Output is sorted by
 /// dungeon id then by member guids for reproducibility.
 pub fn find_matches(queue: &[QueueEntry]) -> Vec<MatchProposal> {
     // bucket guids by dungeon, then by role
-    let mut by_dungeon: HashMap<u32, (Vec<u64>, Vec<u64>, Vec<u64>)> = HashMap::new();
+    let mut by_dungeon: HashMap<u32, RoleBuckets> = HashMap::new();
     for e in queue {
         let b = by_dungeon.entry(e.dungeon_id).or_default();
         match e.role {
-            Role::Tank => b.0.push(e.guid),
-            Role::Healer => b.1.push(e.guid),
-            Role::Dps => b.2.push(e.guid),
+            Role::Tank => b.tanks.push(e.guid),
+            Role::Healer => b.healers.push(e.guid),
+            Role::Dps => b.dps.push(e.guid),
         }
     }
 
@@ -22,7 +29,7 @@ pub fn find_matches(queue: &[QueueEntry]) -> Vec<MatchProposal> {
 
     let mut out = Vec::new();
     for d in dungeons {
-        let (mut tanks, mut healers, mut dps) = by_dungeon.remove(&d).unwrap();
+        let RoleBuckets { mut tanks, mut healers, mut dps } = by_dungeon.remove(&d).expect("key collected from same map");
         tanks.sort_unstable();
         healers.sort_unstable();
         dps.sort_unstable();
