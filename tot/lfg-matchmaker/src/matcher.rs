@@ -1,4 +1,4 @@
-use crate::types::{MatchProposal, QueueEntry, Role};
+use crate::types::{Faction, MatchProposal, QueueEntry, Role};
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -8,15 +8,25 @@ struct RoleBuckets {
     dps: Vec<u64>,
 }
 
+/// Faction as a sort-stable primitive so bucket keys order deterministically.
+fn faction_ord(f: Faction) -> u8 {
+    match f {
+        Faction::Alliance => 0,
+        Faction::Horde => 1,
+    }
+}
+
 /// Greedy, deterministic role-balanced matcher.
-/// Forms as many 1-tank / 1-healer / 3-dps groups per `dungeon_id` as the
-/// queue allows. Pure — no I/O, no clock, no randomness. Output is sorted by
-/// dungeon id then by member guids for reproducibility.
+/// Forms as many 1-tank / 1-healer / 3-dps groups per `(dungeon_id, faction)`
+/// as the queue allows — a group is always same-dungeon AND same-faction, so
+/// the data plane never sees a cross-faction invite. Pure — no I/O, no clock,
+/// no randomness. Output is sorted by (dungeon id, faction) then by member
+/// guids for reproducibility.
 pub fn find_matches(queue: &[QueueEntry]) -> Vec<MatchProposal> {
-    // bucket guids by dungeon, then by role
-    let mut by_dungeon: HashMap<u32, RoleBuckets> = HashMap::new();
+    // bucket guids by (dungeon, faction), then by role
+    let mut by_bucket: HashMap<(u32, Faction), RoleBuckets> = HashMap::new();
     for e in queue {
-        let b = by_dungeon.entry(e.dungeon_id).or_default();
+        let b = by_bucket.entry((e.dungeon_id, e.faction)).or_default();
         match e.role {
             Role::Tank => b.tanks.push(e.guid),
             Role::Healer => b.healers.push(e.guid),
@@ -24,12 +34,15 @@ pub fn find_matches(queue: &[QueueEntry]) -> Vec<MatchProposal> {
         }
     }
 
-    let mut dungeons: Vec<u32> = by_dungeon.keys().copied().collect();
-    dungeons.sort_unstable();
+    // Sort keys on primitives only: (dungeon_id, faction-as-u8).
+    let mut keys: Vec<(u32, Faction)> = by_bucket.keys().copied().collect();
+    keys.sort_unstable_by_key(|(d, f)| (*d, faction_ord(*f)));
 
     let mut out = Vec::new();
-    for d in dungeons {
-        let RoleBuckets { mut tanks, mut healers, mut dps } = by_dungeon.remove(&d).expect("key collected from same map");
+    for key in keys {
+        let RoleBuckets { mut tanks, mut healers, mut dps } =
+            by_bucket.remove(&key).expect("key collected from same map");
+        let (d, _faction) = key;
         tanks.sort_unstable();
         healers.sort_unstable();
         dps.sort_unstable();
@@ -54,8 +67,14 @@ pub fn find_matches(queue: &[QueueEntry]) -> Vec<MatchProposal> {
 mod tests {
     use super::*;
 
+    // Default to Alliance: single-faction queues exercise role/dungeon balancing.
     fn q(guid: u64, role: Role, dungeon_id: u32) -> QueueEntry {
-        QueueEntry { guid, role, dungeon_id }
+        QueueEntry { guid, role, dungeon_id, faction: Faction::Alliance }
+    }
+
+    // Faction-aware variant for the cross-faction bucketing tests.
+    fn qf(guid: u64, role: Role, dungeon_id: u32, faction: Faction) -> QueueEntry {
+        QueueEntry { guid, role, dungeon_id, faction }
     }
 
     #[test]
@@ -156,5 +175,56 @@ mod tests {
         let b = find_matches(&queue);
         assert_eq!(a, b);
         assert_eq!(a[0].dps, vec![3, 4, 5]); // sorted
+    }
+
+    // Finding 1 (a): a full Alliance 5-man plus a lone Horde dps in the SAME dungeon
+    // must yield exactly one Alliance group; the Horde dps is left unmatched (the
+    // matcher must never propose a cross-faction group — the data plane rejects it).
+    #[test]
+    fn mixed_faction_same_dungeon_forms_only_same_faction_group() {
+        let queue = vec![
+            qf(1, Role::Tank, 36, Faction::Alliance),
+            qf(2, Role::Healer, 36, Faction::Alliance),
+            qf(3, Role::Dps, 36, Faction::Alliance),
+            qf(4, Role::Dps, 36, Faction::Alliance),
+            qf(5, Role::Dps, 36, Faction::Alliance),
+            qf(6, Role::Dps, 36, Faction::Horde), // lone Horde dps — cannot complete a group
+        ];
+        let m = find_matches(&queue);
+        assert_eq!(m.len(), 1, "exactly one same-faction group");
+        assert_eq!(m[0].tank, 1);
+        assert_eq!(m[0].healer, 2);
+        assert_eq!(m[0].dps, vec![3, 4, 5]);
+        let matched: std::collections::HashSet<u64> = m[0].members().into_iter().collect();
+        assert!(!matched.contains(&6), "Horde dps must never join an Alliance group");
+    }
+
+    // Finding 1 (b): a full Alliance group AND a full Horde group queued for the same
+    // dungeon must yield two groups — each homogeneous, never mixed.
+    #[test]
+    fn full_alliance_and_full_horde_same_dungeon_form_two_unmixed_groups() {
+        let queue = vec![
+            // Alliance 5-man
+            qf(1, Role::Tank, 36, Faction::Alliance),
+            qf(2, Role::Healer, 36, Faction::Alliance),
+            qf(3, Role::Dps, 36, Faction::Alliance),
+            qf(4, Role::Dps, 36, Faction::Alliance),
+            qf(5, Role::Dps, 36, Faction::Alliance),
+            // Horde 5-man
+            qf(101, Role::Tank, 36, Faction::Horde),
+            qf(102, Role::Healer, 36, Faction::Horde),
+            qf(103, Role::Dps, 36, Faction::Horde),
+            qf(104, Role::Dps, 36, Faction::Horde),
+            qf(105, Role::Dps, 36, Faction::Horde),
+        ];
+        let m = find_matches(&queue);
+        assert_eq!(m.len(), 2, "two groups, one per faction");
+        // Deterministic order: Alliance (faction_ord 0) before Horde (1).
+        let alliance: std::collections::HashSet<u64> = m[0].members().into_iter().collect();
+        let horde: std::collections::HashSet<u64> = m[1].members().into_iter().collect();
+        assert_eq!(alliance, [1, 2, 3, 4, 5].into_iter().collect());
+        assert_eq!(horde, [101, 102, 103, 104, 105].into_iter().collect());
+        // No group mixes the two guid bands.
+        assert!(alliance.is_disjoint(&horde));
     }
 }

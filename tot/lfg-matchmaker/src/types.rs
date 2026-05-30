@@ -19,11 +19,29 @@ impl Role {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Faction {
+    Alliance,
+    Horde,
+}
+
+impl Faction {
+    pub fn parse(s: &str) -> Option<Faction> {
+        match s.to_ascii_lowercase().as_str() {
+            "alliance" | "a" => Some(Faction::Alliance),
+            "horde" | "h" => Some(Faction::Horde),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueEntry {
     pub guid: u64,
     pub role: Role,
     pub dungeon_id: u32,
+    pub faction: Faction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -58,6 +76,15 @@ mod tests {
         assert_eq!(Role::parse("dps"), Some(Role::Dps));
         assert_eq!(Role::parse("damage"), Some(Role::Dps));
         assert_eq!(Role::parse("bogus"), None);
+    }
+
+    #[test]
+    fn faction_parse_accepts_aliases() {
+        assert_eq!(Faction::parse("alliance"), Some(Faction::Alliance));
+        assert_eq!(Faction::parse("A"), Some(Faction::Alliance));
+        assert_eq!(Faction::parse("HORDE"), Some(Faction::Horde));
+        assert_eq!(Faction::parse("h"), Some(Faction::Horde));
+        assert_eq!(Faction::parse("neutral"), None);
     }
 
     #[test]

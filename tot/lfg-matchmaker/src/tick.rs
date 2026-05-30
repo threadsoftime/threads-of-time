@@ -40,7 +40,7 @@ pub async fn run(state: Arc<AppState>, harness: Harness, cfg: Config) {
 mod tests {
     use super::*;
     use crate::config::Dungeon;
-    use crate::types::{QueueEntry, Role};
+    use crate::types::{Faction, QueueEntry, Role};
     use axum::{extract::Path, routing::post, Json, Router};
     use std::time::Duration as StdDuration;
 
@@ -85,7 +85,7 @@ mod tests {
             (6, Role::Healer), // extra healer — no tank/3-dps to pair → stranded
             (7, Role::Dps),    // extra dps — stranded
         ] {
-            state.queue.upsert(QueueEntry { guid: g, role: r, dungeon_id: 36 });
+            state.queue.upsert(QueueEntry { guid: g, role: r, dungeon_id: 36, faction: Faction::Alliance });
         }
         assert_eq!(state.queue.len(), 7);
 

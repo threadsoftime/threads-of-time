@@ -13,27 +13,37 @@ pub struct FormResult {
 }
 
 /// Form the group (leader invites each other member, each accepts), then
-/// direct-teleport every member into the dungeon instance. Bails out on the
-/// first form failure (the data-plane adapters' live guards are the
-/// reconciliation point — see plan's reconciliation note).
+/// direct-teleport every member into the dungeon instance. On ANY invite or
+/// accept failure, roll back the partially formed group: every member that has
+/// already joined (the leader plus each accepted member) is sent
+/// `bot.leave_group`, so the orchestrator never leaves an orphan group behind
+/// (live-proof Finding 2). Rollback is best-effort — errors from the teardown
+/// calls are folded into the note, not surfaced as a failure.
 pub async fn fulfill(h: &Harness, p: &MatchProposal, dungeon: &Dungeon) -> FormResult {
     let leader = p.leader();
     let members = p.members();
     let others: Vec<u64> = members.iter().copied().filter(|g| *g != leader).collect();
 
+    // Members currently in the group. The leader is "in" from the first invite
+    // it sends (the group is created leader-first); each `m` joins on accept.
+    let mut joined: Vec<u64> = vec![leader];
+
     for m in &others {
         if let Err(e) = h.invite_to_group(leader, *m).await {
+            let rb = rollback(h, &joined).await;
             return FormResult {
                 dungeon_id: p.dungeon_id, leader, members, formed: false, placed: 0,
-                note: format!("invite {leader}->{m} failed: {e}"),
+                note: format!("invite {leader}->{m} failed: {e}; rolled back {joined:?}{rb}"),
             };
         }
         if let Err(e) = h.accept_invite(*m).await {
+            let rb = rollback(h, &joined).await;
             return FormResult {
                 dungeon_id: p.dungeon_id, leader, members, formed: false, placed: 0,
-                note: format!("accept {m} failed: {e}"),
+                note: format!("accept {m} failed: {e}; rolled back {joined:?}{rb}"),
             };
         }
+        joined.push(*m);
     }
 
     let mut placed = 0usize;
@@ -47,6 +57,25 @@ pub async fn fulfill(h: &Harness, p: &MatchProposal, dungeon: &Dungeon) -> FormR
     let note = if errors.is_empty() { "formed+placed".to_string() } else { errors.join("; ") };
 
     FormResult { dungeon_id: p.dungeon_id, leader, members, formed: true, placed, note }
+}
+
+/// Best-effort teardown of a partially formed group: send `bot.leave_group` to
+/// every joined member (leader included). Errors are swallowed (folded into the
+/// returned suffix) — the data plane is the source of truth, and a failed
+/// leave just means the bot was already ungrouped. Returns a note suffix that
+/// is empty on full success or `" (rollback errors: ...)"` otherwise.
+async fn rollback(h: &Harness, joined: &[u64]) -> String {
+    let mut errs: Vec<String> = Vec::new();
+    for g in joined {
+        if let Err(e) = h.leave_group(*g).await {
+            errs.push(format!("leave {g}: {e}"));
+        }
+    }
+    if errs.is_empty() {
+        String::new()
+    } else {
+        format!(" (rollback errors: {})", errs.join("; "))
+    }
 }
 
 #[cfg(test)]
@@ -129,9 +158,10 @@ mod tests {
 
     // T2(a): the 2nd invite fails (leader -> dps 3). The mock matches the failure
     // against the invite's target_guid (3). The group never forms, nothing is placed,
-    // and the note names the failing bot.
+    // and the partially formed group (leader 1 + already-joined member 2) is torn down
+    // via bot.leave_group (Finding 2 — no orphan group left behind).
     #[tokio::test]
-    async fn fulfill_bails_on_invite_failure() {
+    async fn fulfill_bails_on_invite_failure_and_rolls_back() {
         let (base, calls) = spawn_recording_mock_with_fail(Some(("bot.invite_to_group".into(), 3))).await;
         let h = Harness::new(base, "tok".into());
 
@@ -139,11 +169,19 @@ mod tests {
         assert!(!res.formed, "group must not form on a failed invite");
         assert_eq!(res.placed, 0, "no placement when form fails");
         assert!(res.note.contains('3'), "note must name the failing bot: {}", res.note);
+        assert!(res.note.contains("rolled back"), "note must record the rollback: {}", res.note);
 
-        // Bail at the 2nd invite: invite(2)+accept(2)+invite(3 fails) = 3 calls; no placement.
+        // Bail at the 2nd invite: invite(2)+accept(2)+invite(3 fails) = 3 calls, then
+        // roll back the joined members (leader 1 + member 2) = 2 leave_group calls.
         let seq = calls.lock().unwrap().clone();
-        assert_eq!(seq.len(), 3, "must bail at the failed 2nd invite: {seq:?}");
-        assert!(seq.iter().all(|c| !c.starts_with("bot.enter_instance:")));
+        assert_eq!(seq.len(), 5, "3 form calls + 2 rollback leave_group calls: {seq:?}");
+        // No placement happened.
+        assert!(seq.iter().all(|c| !c.starts_with("bot.enter_instance:")), "no placement: {seq:?}");
+        // Rollback tore down the leader and the one already-joined member.
+        assert!(seq.contains(&"bot.leave_group:1".to_string()), "leader must be disbanded: {seq:?}");
+        assert!(seq.contains(&"bot.leave_group:2".to_string()), "joined member must leave: {seq:?}");
+        // The member that never joined (3) is NOT torn down.
+        assert!(!seq.contains(&"bot.leave_group:3".to_string()), "un-joined bot must not be torn down: {seq:?}");
     }
 
     // T2(b): all joins succeed but one enter_instance fails. The group DID form, so

@@ -85,6 +85,14 @@ impl Harness {
         self.call("bot.accept_invite", json!({ "bot_guid": bot })).await
     }
 
+    /// Remove `bot` from its group. The data-plane adapter routes a
+    /// CMSG_GROUP_DISBAND, which the server handles as leave-or-disband (the
+    /// leader leaving tears down the whole group). Used to roll back a partially
+    /// formed group on a mid-formation failure.
+    pub async fn leave_group(&self, bot: u64) -> Result<Value, HarnessError> {
+        self.call("bot.leave_group", json!({ "bot_guid": bot })).await
+    }
+
     pub async fn enter_instance_direct(&self, bot: u64, dungeon: &Dungeon) -> Result<Value, HarnessError> {
         self.call(
             "bot.enter_instance",

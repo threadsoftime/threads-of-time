@@ -55,10 +55,10 @@ impl Queue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Role;
+    use crate::types::{Faction, Role};
 
     fn e(guid: u64, role: Role) -> QueueEntry {
-        QueueEntry { guid, role, dungeon_id: 36 }
+        QueueEntry { guid, role, dungeon_id: 36, faction: Faction::Alliance }
     }
 
     #[test]
