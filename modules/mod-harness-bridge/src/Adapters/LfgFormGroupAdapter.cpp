@@ -26,8 +26,11 @@
 //      instance-bind reconciliation and homebind-eject safety)
 //
 // Notes on LFGMgr private members:
-//   - SetState: private, skipped. TeleportPlayer only needs group->isLFGGroup()
-//     + GetDungeon(gguid), both set by ConvertToLFG() and public SetDungeon().
+//   - SetState: private; exposed via new public InitGroupForDungeon(gguid) shim
+//     added to LFGMgr.h/.cpp in Inc-1.  Sets group + all tracked player guids
+//     to LFG_STATE_DUNGEON, matching MakeNewGroup lines 1804+2006.  Required to
+//     prevent Group::RemoveMember from triggering premature disband when the
+//     group shrinks to 1 member (see Group.cpp LFG_STATE_NONE guard).
 //   - _SaveToDB: private, skipped. Group is ephemeral until next crash recovery;
 //     acceptable for Inc-1 live-proof scope (Stage-1 task).
 //   - SendLfgUpdatePlayer/Party on sLFGMgr: private, but WorldSession exposes
@@ -236,6 +239,17 @@ namespace HarnessBridge::Adapters
         grp->SetDungeonDifficulty(Difficulty(dungeon->difficulty));
         ObjectGuid gguid = grp->GetGUID();
         sLFGMgr->SetDungeon(gguid, dungeon->Entry());   // Entry() = id + (type<<24)
+
+        // ── Set LFG state to DUNGEON ──────────────────────────────────────
+        // MakeNewGroup calls SetState(gguid, LFG_STATE_DUNGEON) + per-player
+        // SetState at lines 1804 and 2006 of LFGMgr.cpp.  Without this, the
+        // group's LFGGroupData state stays LFG_STATE_NONE, which causes
+        // Group::RemoveMember to disband the group prematurely when it reaches
+        // 1 member (Group.cpp: isLFGGroup() && state == LFG_STATE_NONE guard).
+        // InitGroupForDungeon is the minimal public shim that wraps both SetState
+        // calls; it reads the populated PlayersStore (filled by OnAddMember hooks
+        // during grp->Create / grp->AddMember above).
+        sLFGMgr->InitGroupForDungeon(gguid);
 
         // ── Send GROUP_FOUND + REMOVED_FROM_QUEUE ─────────────────────────
         // Mirror LFGMgr::UpdateProposal lines 1963-1985.
