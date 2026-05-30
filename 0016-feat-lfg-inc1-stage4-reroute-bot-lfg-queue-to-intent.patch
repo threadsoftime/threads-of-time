@@ -1,21 +1,25 @@
-From: Thomas Brackin <tebrackin@gmail.com>
-Date: Fri, 30 May 2026
-Subject: [PATCH 16/16] feat(lfg-inc1/stage4): reroute bot LFG force-queue to intent store
+Subject: [LFG Inc 1 / Stage 4] reroute bot LFG force-queue to the intent store
 
-Replace CMSG_LFG_JOIN WorldPacket submission in LfgJoinAction::JoinLFG()
-with a call to HarnessBridge::RecordLfgIntent().  The dungeon selection and
-role computation logic are preserved exactly; only the sink changes.
+mod-playerbots is an EXTERNAL build-time dependency, NOT vendored in this repo.
+This patch is the canonical record of the Stage-4 reroute applied to the
+mod-playerbots source tree the build compiles from (on Heimdal:
+/opt/containers/wow/source/modules/mod-playerbots/).
 
-After this patch native LFGMgr::JoinLfg / LFGQueue::FindGroups process an
-always-empty queue (real players are already vetoed by LfgVetoScript from
-Stage 3).  This is the precondition for Inc-3 deletion of native matching.
+Apply from the mod-playerbots repo root:
+    git apply -p1 0016-feat-lfg-inc1-stage4-reroute-bot-lfg-queue-to-intent.patch
+(or `patch -p1 < ...`). Regenerated 2026-05-30 from the live Heimdal edit
+(diff of LfgActions.cpp.bak-stage4-reroute vs LfgActions.cpp).
 
-Note: mod-playerbots is an external build-time dependency, not vendored in
-this repo.  Apply this patch to the mod-playerbots source tree used by your
-build (on Heimdal: /opt/containers/wow/source/modules/mod-playerbots/).
+What it does: in LfgJoinAction::JoinLFG(), replace the CMSG_LFG_JOIN WorldPacket
+submission (native LFGMgr force-queue) with HarnessBridge::RecordLfgIntent(
+is_bot=true) so the Rust LFG slice owns bot matchmaking. The dungeon selection +
+role computation above the change are preserved exactly; only the SINK changes.
+After this (plus the Stage-3 real-player veto + the bot.queue_for_dungeon reroute
+in mod-harness-bridge) native LFGMgr::JoinLfg / LFGQueue matching process an
+always-empty queue — the precondition for Inc-3 deletion.
 
---- a/modules/mod-playerbots/src/Ai/Base/Actions/LfgActions.cpp
-+++ b/modules/mod-playerbots/src/Ai/Base/Actions/LfgActions.cpp
+--- a/src/Ai/Base/Actions/LfgActions.cpp
++++ b/src/Ai/Base/Actions/LfgActions.cpp
 @@ -13,6 +13,7 @@
  #include "World.h"
  #include "WorldPacket.h"
@@ -46,7 +50,7 @@ build (on Heimdal: /opt/containers/wow/source/modules/mod-playerbots/).
 +    // Stage-4 strangler-fig reroute: enqueue bot's LFG intent into the
 +    // intent store (world-thread-only, no mutex) so the Rust LFG slice owns
 +    // matchmaking.  The dungeon selection and role computation above are kept
-+    // intact -- only the SINK changes (intent store instead of native LFGMgr).
++    // intact — only the SINK changes (intent store instead of native LFGMgr).
 +    // The native CMSG_LFG_JOIN path below is intentionally replaced; native
 +    // LFGMgr matching processes an always-empty queue from this point forward.
 +    {
