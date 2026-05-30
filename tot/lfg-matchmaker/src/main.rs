@@ -2,6 +2,7 @@ mod api;
 mod config;
 mod harness;
 mod matcher;
+mod orchestrator;
 mod queue;
 mod types;
 
