@@ -1,5 +1,6 @@
 mod api;
 mod config;
+mod harness;
 mod matcher;
 mod queue;
 mod types;
