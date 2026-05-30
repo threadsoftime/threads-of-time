@@ -1,6 +1,49 @@
 use crate::types::{Faction, MatchProposal, QueueEntry, Role};
 use std::collections::HashMap;
 
+/// Build a `MatchProposal` for a real-player intent, filling the remaining 4
+/// slots with same-faction bots from `filler_bots`. The real player takes their
+/// declared role; the first bot is assigned the complementary tank/healer role
+/// and the rest take DPS (a simplified assignment for Inc-1 — role assignment
+/// from `obs.lfg_pending` roles bitmask is a Stage-3 refinement).
+///
+/// Layout:
+/// - real player role == Tank   → real=tank, filler[0]=healer, filler[1..4]=dps
+/// - real player role == Healer → real=healer, filler[0]=tank, filler[1..4]=dps
+/// - real player role == Dps    → filler[0]=tank, filler[1]=healer, real+filler[2..4]=dps
+///   (real player is last in dps to put them adjacent in the member list)
+///
+/// Requires exactly 4 filler bots; returns None if `filler_bots.len() != 4`.
+pub fn build_real_player_proposal(
+    real_player: &QueueEntry,
+    filler_bots: &[u64],
+    dungeon_id: u32,
+) -> Option<MatchProposal> {
+    if filler_bots.len() != 4 {
+        return None;
+    }
+    let rp = real_player.guid;
+    let (tank, healer, dps) = match real_player.role {
+        Role::Tank => (rp, filler_bots[0], vec![filler_bots[1], filler_bots[2], filler_bots[3]]),
+        Role::Healer => {
+            (filler_bots[0], rp, vec![filler_bots[1], filler_bots[2], filler_bots[3]])
+        }
+        Role::Dps => (
+            filler_bots[0],
+            filler_bots[1],
+            vec![filler_bots[2], filler_bots[3], rp],
+        ),
+    };
+    Some(MatchProposal {
+        dungeon_id,
+        tank,
+        healer,
+        dps,
+        has_real_player: true,
+        real_player_guid: Some(rp),
+    })
+}
+
 #[derive(Default)]
 struct RoleBuckets {
     tanks: Vec<u64>,
@@ -54,6 +97,8 @@ pub fn find_matches(queue: &[QueueEntry]) -> Vec<MatchProposal> {
                 tank: tanks[ti],
                 healer: healers[hi],
                 dps: vec![dps[di], dps[di + 1], dps[di + 2]],
+                has_real_player: false,
+                real_player_guid: None,
             });
             ti += 1;
             hi += 1;
@@ -69,12 +114,12 @@ mod tests {
 
     // Default to Alliance: single-faction queues exercise role/dungeon balancing.
     fn q(guid: u64, role: Role, dungeon_id: u32) -> QueueEntry {
-        QueueEntry { guid, role, dungeon_id, faction: Faction::Alliance }
+        QueueEntry { guid, role, dungeon_id, faction: Faction::Alliance, is_real_player: false }
     }
 
     // Faction-aware variant for the cross-faction bucketing tests.
     fn qf(guid: u64, role: Role, dungeon_id: u32, faction: Faction) -> QueueEntry {
-        QueueEntry { guid, role, dungeon_id, faction }
+        QueueEntry { guid, role, dungeon_id, faction, is_real_player: false }
     }
 
     #[test]
@@ -197,6 +242,61 @@ mod tests {
         assert_eq!(m[0].dps, vec![3, 4, 5]);
         let matched: std::collections::HashSet<u64> = m[0].members().into_iter().collect();
         assert!(!matched.contains(&6), "Horde dps must never join an Alliance group");
+    }
+
+    // build_real_player_proposal tests
+    fn rp(guid: u64, role: Role) -> QueueEntry {
+        QueueEntry {
+            guid,
+            role,
+            dungeon_id: 4,
+            faction: Faction::Alliance,
+            is_real_player: true,
+        }
+    }
+
+    #[test]
+    fn real_player_tank_fills_healer_and_dps() {
+        let fillers = [20u64, 30, 40, 50];
+        let p = build_real_player_proposal(&rp(10, Role::Tank), &fillers, 4).unwrap();
+        assert_eq!(p.tank, 10, "real player is tank");
+        assert_eq!(p.healer, 20, "first filler is healer");
+        assert_eq!(p.dps, vec![30, 40, 50]);
+        assert!(p.has_real_player);
+        assert_eq!(p.real_player_guid, Some(10));
+        assert_eq!(p.dungeon_id, 4);
+    }
+
+    #[test]
+    fn real_player_healer_fills_tank_and_dps() {
+        let fillers = [20u64, 30, 40, 50];
+        let p = build_real_player_proposal(&rp(10, Role::Healer), &fillers, 4).unwrap();
+        assert_eq!(p.tank, 20, "first filler is tank");
+        assert_eq!(p.healer, 10, "real player is healer");
+        assert_eq!(p.dps, vec![30, 40, 50]);
+        assert!(p.has_real_player);
+    }
+
+    #[test]
+    fn real_player_dps_fills_tank_healer_and_two_dps() {
+        let fillers = [20u64, 30, 40, 50];
+        let p = build_real_player_proposal(&rp(10, Role::Dps), &fillers, 4).unwrap();
+        assert_eq!(p.tank, 20);
+        assert_eq!(p.healer, 30);
+        // real player last in dps list
+        assert_eq!(p.dps, vec![40, 50, 10]);
+        assert!(p.has_real_player);
+        assert_eq!(p.real_player_guid, Some(10));
+    }
+
+    #[test]
+    fn real_player_proposal_wrong_filler_count_is_none() {
+        // 3 fillers instead of 4 → None
+        let p = build_real_player_proposal(&rp(1, Role::Tank), &[2, 3, 4], 4);
+        assert!(p.is_none());
+        // 5 fillers → None
+        let p = build_real_player_proposal(&rp(1, Role::Tank), &[2, 3, 4, 5, 6], 4);
+        assert!(p.is_none());
     }
 
     // Finding 1 (b): a full Alliance group AND a full Horde group queued for the same

@@ -4,6 +4,7 @@ mod harness;
 mod matcher;
 mod orchestrator;
 mod queue;
+mod roster;
 mod tick;
 mod types;
 
