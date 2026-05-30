@@ -1,4 +1,5 @@
 mod config;
+mod queue;
 mod types;
 
 use axum::{routing::get, Router};
