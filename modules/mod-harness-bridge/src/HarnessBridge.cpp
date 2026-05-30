@@ -114,4 +114,7 @@ void AddHarnessBridgeScripts()
 {
     new HarnessBridgeWorldScript();
     new HarnessBridgeUnitScript();
+    // Stage 3 Inc-1: veto hook intercepts real-player LFG joins and records
+    // intent into LfgIntentStore for the Rust matchmaker slice to drain.
+    AddLfgVetoScript();
 }

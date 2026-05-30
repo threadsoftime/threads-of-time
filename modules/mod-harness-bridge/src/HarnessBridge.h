@@ -8,4 +8,8 @@
 
 void AddHarnessBridgeScripts();
 
+// Stage 3 (Inc-1): LfgVetoScript — forward declared here so HarnessBridge.cpp
+// can call it from AddHarnessBridgeScripts() without including the full TU.
+void AddLfgVetoScript();
+
 #endif // MOD_HARNESS_BRIDGE_H
