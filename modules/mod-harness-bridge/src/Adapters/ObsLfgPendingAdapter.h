@@ -15,7 +15,6 @@
 #pragma once
 
 #include "HarnessBridgeDispatch.h"
-#include <nlohmann/json.hpp>
 
 namespace HarnessBridge::Adapters
 {
