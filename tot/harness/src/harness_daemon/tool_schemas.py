@@ -401,6 +401,12 @@ class MemoryDeleteArgs(BaseModel):
     episode_id: int = Field(..., description="Primary-key ID of the episode to hard-delete")
 
 
+# --- obs.lfg_pending (Stage 3 pull-based intent seam) ---
+
+class ObsLfgPendingArgs(BaseModel):
+    max: int = Field(64, description="Max pending LFG intents to drain in this call.")
+
+
 # --- lfg.* (LFG force-form primitives — Inc 1) ---
 
 class LfgFormGroupMember(BaseModel):
@@ -462,4 +468,6 @@ TOOL_SCHEMAS: dict[str, tuple[type[BaseModel], str]] = {
     "memory.delete":           (MemoryDeleteArgs,           "Hard-delete an episode (cascades to entities + embeddings)."),
     # LFG force-form primitives (Inc 1)
     "lfg.form_group":          (LfgFormGroupArgs,           "Force-create a server-side LFG group and teleport all members into the dungeon."),
+    # Stage 3: pull-based intent seam — drain real-player + bot LFG join intents
+    "obs.lfg_pending":         (ObsLfgPendingArgs,          "Drain pending real-player + bot LFG join intents recorded by the veto hook / bot-queue."),
 }

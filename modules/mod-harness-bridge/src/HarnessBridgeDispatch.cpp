@@ -145,6 +145,7 @@ namespace HarnessBridge
 #include "Adapters/MemoryUpdateAdapter.h"
 #include "Adapters/MemoryDeleteAdapter.h"
 #include "Adapters/LfgFormGroupAdapter.h"
+#include "Adapters/ObsLfgPendingAdapter.h"
 
 #include <unordered_map>
 #include <functional>
@@ -162,9 +163,10 @@ namespace HarnessBridge
         // via HARNESS_MEMORY_URL (default http://localhost:8090).
         // Plan-3 subset-gating (Tasks 4-5): +2 world-snapshot tools:
         // obs.list_players, obs.list_bot_population.
-        // LFG strangler-fig Inc-1: +1 lfg.form_group.
-        // Total C++ adapters: 41. Daemon-direct obs.query_db brings the
-        // total exposed surface to 42 tools across HTTP /v1/* and MCP.
+        // LFG strangler-fig Inc-1 Stage 1: +1 lfg.form_group.
+        // LFG strangler-fig Inc-1 Stage 3: +1 obs.lfg_pending.
+        // Total C++ adapters: 42. Daemon-direct obs.query_db brings the
+        // total exposed surface to 43 tools across HTTP /v1/* and MCP.
         static std::unordered_map<std::string, AdapterFn> const table = {
             {"obs.ping",                  &Adapters::ObsPing},
             {"obs.get_state",             &Adapters::ObsGetState},
@@ -207,6 +209,7 @@ namespace HarnessBridge
             {"memory.update",         &Adapters::MemoryUpdate},
             {"memory.delete",         &Adapters::MemoryDelete},
             {"lfg.form_group",        &Adapters::LfgFormGroup},
+            {"obs.lfg_pending",       &Adapters::ObsLfgPending},
         };
         return table;
     }

@@ -120,4 +120,6 @@ def build_v1_registry() -> Registry:
         ToolEntry("memory.delete",             "memory.delete",             "bot_guid",    True),
         # LFG force-form primitives (Inc 1)
         ToolEntry("lfg.form_group",            "lfg.form_group",            None,          True),
+        # Stage 3: pull-based intent drain — no subject_guid (world-level drain)
+        ToolEntry("obs.lfg_pending",           "obs.lfg_pending",           None,          True),
     ])
