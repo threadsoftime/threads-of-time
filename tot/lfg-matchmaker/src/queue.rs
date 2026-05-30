@@ -58,7 +58,7 @@ mod tests {
     use crate::types::{Faction, Role};
 
     fn e(guid: u64, role: Role) -> QueueEntry {
-        QueueEntry { guid, role, dungeon_id: 36, faction: Faction::Alliance }
+        QueueEntry { guid, role, dungeon_id: 4, faction: Faction::Alliance, is_real_player: false }
     }
 
     #[test]
