@@ -401,6 +401,19 @@ class MemoryDeleteArgs(BaseModel):
     episode_id: int = Field(..., description="Primary-key ID of the episode to hard-delete")
 
 
+# --- lfg.* (LFG force-form primitives — Inc 1) ---
+
+class LfgFormGroupMember(BaseModel):
+    guid:  int = Field(..., description="Player low GUID to force-add to the group.")
+    roles: int = Field(..., description="LFG role bitmask (TANK=2, HEALER=4, DAMAGE=8).")
+
+
+class LfgFormGroupArgs(BaseModel):
+    leader_guid: int                    = Field(..., description="Low GUID of the group leader; must also appear in members.")
+    members:     list[LfgFormGroupMember] = Field(..., description="All members incl. leader, 1-5 entries.")
+    dungeon_id:  int                    = Field(..., description="LFGDungeons.dbc id of the target dungeon (RFC = 36).")
+
+
 # --- registry: name -> (schema_class, one-line description) ---
 
 TOOL_SCHEMAS: dict[str, tuple[type[BaseModel], str]] = {
@@ -447,4 +460,6 @@ TOOL_SCHEMAS: dict[str, tuple[type[BaseModel], str]] = {
     "memory.list":             (MemoryListArgs,             "Paginated episode listing with optional type/entity/time filters."),
     "memory.update":           (MemoryUpdateArgs,           "Patch content, salience, or metadata on an existing episode."),
     "memory.delete":           (MemoryDeleteArgs,           "Hard-delete an episode (cascades to entities + embeddings)."),
+    # LFG force-form primitives (Inc 1)
+    "lfg.form_group":          (LfgFormGroupArgs,           "Force-create a server-side LFG group and teleport all members into the dungeon."),
 }

@@ -118,4 +118,6 @@ def build_v1_registry() -> Registry:
         ToolEntry("memory.list",               "memory.list",               "bot_guid",    True),
         ToolEntry("memory.update",             "memory.update",             "bot_guid",    True),
         ToolEntry("memory.delete",             "memory.delete",             "bot_guid",    True),
+        # LFG force-form primitives (Inc 1)
+        ToolEntry("lfg.form_group",            "lfg.form_group",            None,          True),
     ])
