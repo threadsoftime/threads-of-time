@@ -125,6 +125,14 @@ pub fn normalize_date(d: &mut CivilDate) {
 ///   bits 11-13: weekday (0=Sunday … 6=Saturday)
 ///   bits  6-10: hour
 ///   bits  0-5:  minute
+///
+/// Port divergence from C++ `HolidayDateCalculator::PackDate` (HolidayDateCalculator.cpp:592):
+/// The C++ returns only `(yearOffset<<24)|(month<<20)|(day<<14)|(weekday<<11)` — it omits
+/// hour/min.  This Rust port additionally packs `(hour<<6)|min` to match the canonical
+/// `ByteBuffer::AppendPackedTime` layout that the C++ comment itself references.
+/// This is benign for the slice: holiday dates are computed with hour=min=0, so this function
+/// produces bit-identical output to C++ for all values this slice actually packs.
+/// `unpack_date` must still read hour/min because client-DBC packed dates can carry them.
 pub fn pack_date(d: &CivilDate) -> u32 {
     let year_offset: u32 = if d.year < 2000 {
         0
@@ -210,5 +218,36 @@ mod tests {
         // 2026-12-25 (Friday=5): yearOffset=26, month=11, day=24, wday=5
         let d = normalized(2026, 12, 25);
         assert_eq!(pack_date(&d), (26u32 << 24) | (11 << 20) | (24 << 14) | (5 << 11));
+    }
+
+    #[test]
+    fn pack_includes_hour_and_minute() {
+        // Verify that hour and minute are packed in the low bits (diverges from C++ PackDate).
+        let mut d = CivilDate {
+            year: 2026,
+            mon0: 11,
+            mday: 25,
+            hour: 13,
+            min: 45,
+            ..Default::default()
+        };
+        normalize_date(&mut d);
+        let p = pack_date(&d);
+        assert_eq!((p >> 6) & 0x1F, 13, "hour bits mismatch");
+        assert_eq!(p & 0x3F, 45, "minute bits mismatch");
+        let u = unpack_date(p);
+        assert_eq!((u.hour, u.min), (13, 45));
+    }
+
+    /// Helper: extract (year, 1-indexed month, day) from a `CivilDate`.
+    fn ymd(d: CivilDate) -> (i32, i32, i32) {
+        (d.year, d.mon0 + 1, d.mday)
+    }
+
+    #[test]
+    fn normalize_underflow_and_year_boundary() {
+        assert_eq!(ymd(normalized(2025, 1, 0)), (2024, 12, 31)); // day underflow borrows into prev year
+        assert_eq!(ymd(normalized(2025, 13, 1)), (2026, 1, 1));  // month overflow rolls into next year
+        assert_eq!(ymd(normalized(2024, 3, 0)), (2024, 2, 29));  // leap-year Feb borrow
     }
 }
