@@ -19,6 +19,12 @@ pub struct QueueReq {
     pub role: String,
     pub dungeon_id: u32,
     pub faction: String,
+    /// Optional. When true, the slice will use the lfg.form_group + enter_instance
+    /// placement path for this entry (F-S1). Defaults false (bot-only invite/accept path).
+    /// Included so the Stage-2 live proof can inject a real-player-tagged intent via
+    /// POST /queue WITHOUT waiting for the Stage-3 obs.lfg_pending hook.
+    #[serde(default)]
+    pub real_player: bool,
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -39,7 +45,13 @@ async fn enqueue(
     let role = Role::parse(&req.role).ok_or((StatusCode::BAD_REQUEST, format!("bad role: {}", req.role)))?;
     let faction =
         Faction::parse(&req.faction).ok_or((StatusCode::BAD_REQUEST, format!("bad faction: {}", req.faction)))?;
-    s.queue.upsert(QueueEntry { guid: req.guid, role, dungeon_id: req.dungeon_id, faction });
+    s.queue.upsert(QueueEntry {
+        guid: req.guid,
+        role,
+        dungeon_id: req.dungeon_id,
+        faction,
+        is_real_player: req.real_player,
+    });
     Ok(Json(serde_json::json!({ "queued": true, "guid": req.guid, "depth": s.queue.len() })))
 }
 
@@ -109,10 +121,40 @@ mod tests {
         let base = spawn(test_state()).await;
         let r = reqwest::Client::new()
             .post(format!("{base}/queue"))
-            .json(&serde_json::json!({"guid": 1, "role": "tank", "dungeon_id": 36, "faction": "neutral"}))
+            .json(&serde_json::json!({"guid": 1, "role": "tank", "dungeon_id": 4, "faction": "neutral"}))
             .send()
             .await
             .unwrap();
         assert_eq!(r.status(), reqwest::StatusCode::BAD_REQUEST);
+    }
+
+    // real_player field is optional (defaults false); when set true it is stored.
+    #[tokio::test]
+    async fn real_player_flag_accepted_and_defaults_false() {
+        let state = test_state();
+        let base = spawn(state.clone()).await;
+        let client = reqwest::Client::new();
+
+        // Without the flag → is_real_player defaults false.
+        client
+            .post(format!("{base}/queue"))
+            .json(&serde_json::json!({"guid": 1, "role": "tank", "dungeon_id": 4, "faction": "alliance"}))
+            .send()
+            .await
+            .unwrap();
+        let snap = state.queue.snapshot();
+        assert!(!snap[0].is_real_player, "missing field should default to false");
+
+        state.queue.remove(1);
+
+        // With real_player=true → is_real_player stored as true.
+        client
+            .post(format!("{base}/queue"))
+            .json(&serde_json::json!({"guid": 2, "role": "tank", "dungeon_id": 4, "faction": "alliance", "real_player": true}))
+            .send()
+            .await
+            .unwrap();
+        let snap = state.queue.snapshot();
+        assert!(snap[0].is_real_player, "real_player=true must be stored");
     }
 }
