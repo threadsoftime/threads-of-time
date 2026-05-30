@@ -120,6 +120,30 @@ mod tests {
     }
 
     #[test]
+    fn leftovers_form_one_group_and_strand_extra_dps() {
+        // 1 tank, 1 healer, 4 dps → exactly 1 group; 1 dps left unmatched.
+        let queue = vec![
+            q(1, Role::Tank, 36),
+            q(2, Role::Healer, 36),
+            q(3, Role::Dps, 36),
+            q(4, Role::Dps, 36),
+            q(5, Role::Dps, 36),
+            q(6, Role::Dps, 36),
+        ];
+        let m = find_matches(&queue);
+        assert_eq!(m.len(), 1);
+        // The group consumes the 3 lowest dps (sorted, deterministic); 6 is stranded.
+        assert_eq!(m[0].dps, vec![3, 4, 5]);
+        let matched: std::collections::HashSet<u64> = m[0].members().into_iter().collect();
+        assert!(!matched.contains(&6), "6th dps must be left unmatched");
+    }
+
+    #[test]
+    fn empty_input_yields_nothing() {
+        assert!(find_matches(&[]).is_empty());
+    }
+
+    #[test]
     fn output_is_deterministic() {
         let queue = vec![
             q(5, Role::Dps, 36),

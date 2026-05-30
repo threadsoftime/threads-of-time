@@ -1,3 +1,4 @@
+use crate::config::Dungeon;
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -42,27 +43,34 @@ impl Harness {
     }
 
     /// POST /v1/tools/<tool> with `args`; unwrap `{"ok":true,"result":...}`.
+    ///
+    /// The harness surfaces adapter rejections as NON-2xx (400 bad-args /
+    /// 409 validator-rejected / 422 executor-failed) with body
+    /// `{"ok":false,"error":"<code>","detail":"<human message>"}`. We must NOT
+    /// short-circuit on status (e.g. `error_for_status`) — that would collapse
+    /// every typed tool failure into `HarnessError::Http` and discard `detail`.
+    /// Instead we always read the JSON envelope and map `ok:false`/non-2xx to a
+    /// `HarnessError::Tool` that preserves the human-readable detail.
     pub async fn call(&self, tool: &str, args: Value) -> Result<Value, HarnessError> {
         let url = format!("{}/v1/tools/{}", self.base_url.trim_end_matches('/'), tool);
-        let body: Value = self
+        let resp = self
             .client
             .post(&url)
             .bearer_auth(&self.bearer)
             .json(&args)
             .send()
-            .await?
-            .error_for_status()?
-            .json()
             .await?;
+        let status = resp.status();
+        let body: Value = resp.json().await?;
 
         let ok = body.get("ok").and_then(Value::as_bool).unwrap_or(false);
-        if !ok {
-            let message = body
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_string();
-            return Err(HarnessError::Tool { tool: tool.to_string(), message });
+        if !ok || !status.is_success() {
+            let code = body.get("error").and_then(Value::as_str).unwrap_or("unknown");
+            let detail = body.get("detail").and_then(Value::as_str).unwrap_or("");
+            return Err(HarnessError::Tool {
+                tool: tool.to_string(),
+                message: if detail.is_empty() { code.to_string() } else { format!("{code}: {detail}") },
+            });
         }
         body.get("result")
             .cloned()
@@ -77,18 +85,18 @@ impl Harness {
         self.call("bot.accept_invite", json!({ "bot_guid": bot })).await
     }
 
-    pub async fn enter_instance_direct(
-        &self,
-        bot: u64,
-        map_id: u32,
-        x: f64,
-        y: f64,
-        z: f64,
-        o: f64,
-    ) -> Result<Value, HarnessError> {
+    pub async fn enter_instance_direct(&self, bot: u64, dungeon: &Dungeon) -> Result<Value, HarnessError> {
         self.call(
             "bot.enter_instance",
-            json!({ "bot_guid": bot, "mode": "direct", "map_id": map_id, "x": x, "y": y, "z": z, "orientation": o }),
+            json!({
+                "bot_guid": bot,
+                "mode": "direct",
+                "map_id": dungeon.map_id,
+                "x": dungeon.x,
+                "y": dungeon.y,
+                "z": dungeon.z,
+                "orientation": dungeon.o,
+            }),
         )
         .await
     }
@@ -102,16 +110,32 @@ impl Harness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{extract::Path, routing::post, Json, Router};
+    use axum::{extract::Path, http::StatusCode, routing::post, Json, Router};
 
-    // Mock harness: always wraps the echoed tool name in {ok:true, result:{...}},
-    // except for a tool literally named "bot.fail" which returns {ok:false}.
+    // Mock harness:
+    //   - "bot.fail422" → HTTP 422 with {ok:false,error,detail} (real-wire shape:
+    //     adapter rejections come back as NON-2xx + typed envelope).
+    //   - "bot.fail"    → HTTP 200 with {ok:false,error} (legacy 200-body case).
+    //   - anything else → HTTP 200 {ok:true, result:{tool, args}} (echo).
     async fn spawn_mock() -> String {
-        async fn handler(Path(name): Path<String>, Json(args): Json<serde_json::Value>) -> Json<serde_json::Value> {
-            if name == "bot.fail" {
-                return Json(serde_json::json!({ "ok": false, "error": "boom" }));
+        async fn handler(
+            Path(name): Path<String>,
+            Json(args): Json<serde_json::Value>,
+        ) -> (StatusCode, Json<serde_json::Value>) {
+            if name == "bot.fail422" {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({
+                        "ok": false,
+                        "error": "executor_failed",
+                        "detail": "target is already in a group",
+                    })),
+                );
             }
-            Json(serde_json::json!({ "ok": true, "result": { "tool": name, "args": args } }))
+            if name == "bot.fail" {
+                return (StatusCode::OK, Json(serde_json::json!({ "ok": false, "error": "boom" })));
+            }
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true, "result": { "tool": name, "args": args } })))
         }
         let app = Router::new().route("/v1/tools/:name", post(handler));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -130,8 +154,25 @@ mod tests {
         assert_eq!(res["args"]["target_guid"], 2);
     }
 
+    // T1 (C1): a 422 typed tool-failure MUST surface as HarnessError::Tool with
+    // the human-readable `detail` preserved — not collapsed into HarnessError::Http.
     #[tokio::test]
-    async fn surfaces_tool_failure() {
+    async fn surfaces_typed_tool_failure_on_422() {
+        let base = spawn_mock().await;
+        let h = Harness::new(base, "tok".into());
+        let err = h.call("bot.fail422", serde_json::json!({})).await.unwrap_err();
+        match err {
+            HarnessError::Tool { tool, message } => {
+                assert_eq!(tool, "bot.fail422");
+                assert!(message.contains("already in a group"), "message lost detail: {message}");
+            }
+            other => panic!("expected Tool error, got {other:?}"),
+        }
+    }
+
+    // Legacy shape: HTTP 200 with {ok:false} must also surface as a Tool error.
+    #[tokio::test]
+    async fn surfaces_tool_failure_on_200_ok_false() {
         let base = spawn_mock().await;
         let h = Harness::new(base, "tok".into());
         let err = h.call("bot.fail", serde_json::json!({})).await.unwrap_err();
@@ -141,6 +182,18 @@ mod tests {
                 assert_eq!(message, "boom");
             }
             other => panic!("expected Tool error, got {other:?}"),
+        }
+    }
+
+    // T3: a transport-level failure (closed/unused port) surfaces as HarnessError::Http,
+    // NOT a Tool error. Fast — no sleep, the connect refusal is immediate.
+    #[tokio::test]
+    async fn connection_error_surfaces_as_http() {
+        let h = Harness::new("http://127.0.0.1:1".into(), "tok".into());
+        let err = h.call("bot.invite_to_group", serde_json::json!({})).await.unwrap_err();
+        match err {
+            HarnessError::Http(_) => {}
+            other => panic!("expected Http error, got {other:?}"),
         }
     }
 }

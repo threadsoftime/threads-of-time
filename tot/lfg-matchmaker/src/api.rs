@@ -21,6 +21,9 @@ pub struct QueueReq {
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
+    // NOTE: path-param syntax here is axum 0.7 (`:guid`). When this crate moves to
+    // axum 0.8 the captures must become `{guid}` / `{name}` — the old `:`/`*` syntax
+    // is rejected at 0.8. Cargo.toml pins axum 0.7; verify before bumping.
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/queue", post(enqueue).get(list))

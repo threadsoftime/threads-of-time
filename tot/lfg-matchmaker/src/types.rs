@@ -11,9 +11,9 @@ pub enum Role {
 impl Role {
     pub fn parse(s: &str) -> Option<Role> {
         match s.to_ascii_lowercase().as_str() {
-            "tank" => Some(Role::Tank),
-            "healer" | "heal" => Some(Role::Healer),
-            "dps" | "damage" => Some(Role::Dps),
+            "tank" => Some(Self::Tank),
+            "healer" | "heal" => Some(Self::Healer),
+            "dps" | "damage" => Some(Self::Dps),
             _ => None,
         }
     }
@@ -41,7 +41,7 @@ impl MatchProposal {
         v.extend(&self.dps);
         v
     }
-    pub fn leader(&self) -> u64 {
+    pub const fn leader(&self) -> u64 {
         self.tank
     }
 }
