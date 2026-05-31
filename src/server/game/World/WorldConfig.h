@@ -497,11 +497,6 @@ enum ServerConfigs
     CONFIG_VALIDATE_SKILL_LEARNED_BY_SPELLS,
     CONFIG_ACHIEVEMENT_REALM_FIRST_KILL_WINDOW,
 
-    // GES Inc-2: when true, the Rust game-event-scheduler slice drives world-event
-    // transitions; GameEventMgr::Update() per-tick decision loop is neutered.
-    // Default false — zero behavior change.  Reloadable via `.reload config`.
-    CONFIG_GAMEEVENT_SLICE_DRIVEN,
-
     MAX_NUM_SERVER_CONFIGS
 };
 

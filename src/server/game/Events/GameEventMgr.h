@@ -107,13 +107,9 @@ public:
     typedef std::vector<GameEventData> GameEventDataMap;
     [[nodiscard]] ActiveEvents const& GetActiveEventList() const { return _activeEvents; }
     [[nodiscard]] GameEventDataMap const& GetEventMap() const { return _gameEvent; }
-    [[nodiscard]] bool CheckOneGameEvent(uint16 entry) const;
-    [[nodiscard]] uint32 NextCheck(uint16 entry) const;
     void LoadFromDB();
-    void LoadHolidayDates();
-    uint32 Update();
     bool IsActiveEvent(uint16 eventId) { return (_activeEvents.find(eventId) != _activeEvents.end()); }
-    uint32 StartSystem();
+    void StartSystem();
     void Initialize();
     void StartInternalEvent(uint16 event_id);
     bool StartEvent(uint16 event_id, bool overwrite = false);
@@ -160,7 +156,7 @@ private:
     bool HasGameObjectQuestActiveEventExcept(uint32 quest_id, uint16 eventId);
     bool HasCreatureActiveEventExcept(ObjectGuid::LowType creature_guid, uint16 eventId);
     bool HasGameObjectActiveEventExcept(ObjectGuid::LowType go_guid, uint16 eventId);
-    void SetHolidayEventTime(GameEventData& event);
+    void SpawnNegativeEventObjects();
 
     typedef std::list<ObjectGuid::LowType> GuidLowList;
     typedef std::list<uint32> IdList;
