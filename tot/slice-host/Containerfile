@@ -55,10 +55,16 @@ RUN mkdir -p game-event-scheduler/src slice-host/src \
     && cargo build --release -p slice-host \
     && rm -rf game-event-scheduler/src slice-host/src
 
-# Now copy the real sources and rebuild.  Only the workspace crates are
-# recompiled; all external deps are already built in the cache.
+# Now copy the real sources and rebuild.  Touch all .rs files AFTER copying
+# to ensure Cargo fingerprint detects them as newer than the cached stub
+# objects, forcing a full recompile of the workspace crates.
+# Without the touch, Cargo reuses the stub binary (0.08s "Finished"), because
+# the COPY'd files have OCI-layer timestamps that may pre-date the cached .d
+# fingerprints from the stub build.
 COPY game-event-scheduler/src ./game-event-scheduler/src/
 COPY slice-host/src             ./slice-host/src/
+
+RUN find /build/game-event-scheduler/src /build/slice-host/src -name "*.rs" -exec touch {} \+
 
 RUN cargo build --release -p slice-host
 
