@@ -79,13 +79,31 @@ pub const MAX_HOLIDAY_DURATIONS: usize = 10;
 /// Row from the `game_event` DB table, as sourced by `obs.game_events`.
 ///
 /// Task 11 will deserialise a live harness dump into this struct.
+///
+/// ## Null timestamps
+///
+/// Both `start_time` and `end_time` are nullable in the DB (holiday rows and some
+/// periodic rows such as 97/98 have `end_time: null`).  They are carried as
+/// `Option<i64>` to preserve the null/non-null distinction for callers.
+///
+/// **Null semantics (matching C++ `LoadGameEvents` / `GameEventMgr.cpp`):**
+/// - `start_time = None` → effective start = 0  (C++ `Get<uint64>()` on null → 0;
+///   no null-guard in `LoadGameEvents` line 357).  Holiday events have their Start
+///   overwritten by `SetHolidayEventTime` anyway.
+/// - `end_time = None` → effective end = `resolve_reference_unixtime + 63_072_000`
+///   (C++ `LoadGameEvents` lines 359-360: `if (end_time IS NULL) endtime = curTime + 63072000`
+///   where `63072000 = 730 * 86400` = exactly 2 years).
+///
+/// The caller (shadow.rs `compute_report`) applies these rules via
+/// `effective_start` / `effective_end` before passing concrete values to the
+/// resolvers.
 #[derive(Debug, Clone)]
 pub struct GameEventInput {
     pub entry: u16,
-    /// `game_event.start_time` as Unix timestamp (seconds).
-    pub start_time: i64,
-    /// `game_event.end_time` as Unix timestamp (seconds).
-    pub end_time: i64,
+    /// `game_event.start_time` as Unix timestamp (seconds), or `None` if NULL in DB.
+    pub start_time: Option<i64>,
+    /// `game_event.end_time` as Unix timestamp (seconds), or `None` if NULL in DB.
+    pub end_time: Option<i64>,
     /// `game_event.occurence` in minutes.
     pub occurence: i64,
     /// `game_event.length` in minutes.
@@ -433,15 +451,43 @@ pub fn apply_start_time_override(
 
 // ── Public entry points ────────────────────────────────────────────────────────
 
+/// Compute the effective start time from a possibly-null DB value.
+///
+/// C++ `LoadGameEvents` line 357: `event.Start = fields[1].Get<uint64>()`.
+/// `Get<uint64>()` on a NULL field returns 0 — no null-guard.  Holiday events
+/// have Start overwritten by `SetHolidayEventTime` anyway; for periodic events
+/// with null start, 0 persists.
+///
+/// `63_072_000 = 730 * 86_400` (exactly 2 years, matching C++ lines 359-360).
+pub fn effective_start(raw: Option<i64>) -> i64 {
+    raw.unwrap_or(0)
+}
+
+/// Compute the effective end time from a possibly-null DB value.
+///
+/// C++ `LoadGameEvents` lines 359-360:
+/// ```cpp
+/// if (end_time IS NULL)
+///     endtime = GameTime::GetGameTime().count() + 63072000;  // +2 years
+/// ```
+/// `63_072_000 = 730 * 86_400` (exactly 2 years — do not approximate).
+pub fn effective_end(raw: Option<i64>, resolve_ref: i64) -> i64 {
+    match raw {
+        Some(t) => t,
+        None => resolve_ref + 63_072_000,
+    }
+}
+
 /// Resolve a periodic (non-holiday) game event from its DB row.
 ///
-/// All fields are copied directly from `row`; no holiday math is performed.
+/// Takes pre-materialized `start` and `end` (callers apply `effective_start` /
+/// `effective_end` before calling this function).  No holiday math is performed.
 /// This covers `holiday == 0` events.
-pub fn resolve_periodic_event(row: &GameEventInput) -> ResolvedEvent {
+pub fn resolve_periodic_event(row: &GameEventInput, start: i64, end: i64) -> ResolvedEvent {
     ResolvedEvent {
         entry: row.entry,
-        start: row.start_time,
-        end: row.end_time,
+        start,
+        end,
         occurence: row.occurence,
         length: row.length,
         state: row.state,
@@ -453,7 +499,7 @@ pub fn resolve_periodic_event(row: &GameEventInput) -> ResolvedEvent {
 /// Resolve a holiday-backed game event.
 ///
 /// - `Start`, `Length`, `Occurence`: from `set_holiday_event_time`.
-/// - `End`: from `row.end_time` (NOT from holiday math — see module doc).
+/// - `End`: from the pre-materialized `end` argument (callers apply `effective_end`).
 /// - `state`, `next_start`: from `row`.
 ///
 /// If `set_holiday_event_time` returns `None` (invalid holiday or stage==0),
@@ -461,19 +507,21 @@ pub fn resolve_periodic_event(row: &GameEventInput) -> ResolvedEvent {
 /// "return early" behaviour that leaves the event data unmodified).
 pub fn resolve_holiday_event(
     row: &GameEventInput,
+    start: i64,
+    end: i64,
     holiday: &HolidaysEntry,
     resolve_ref: i64,
     tz_offset_secs: i32,
 ) -> ResolvedEvent {
     match set_holiday_event_time(row.holiday_stage, holiday, resolve_ref, tz_offset_secs) {
-        Some((start, length_min, occurence_min)) => ResolvedEvent {
+        Some((holiday_start, length_min, occurence_min)) => ResolvedEvent {
             entry: row.entry,
             // C++ `if (start) event.Start = start` in SetHolidayEventTime line 1969: when
             // FindStartTimeForStage returns 0 (all holiday dates are in the past), C++ keeps
             // the existing event.Start (= game_event.start_time from LoadGameEvents line 357).
             // A genuine resolved start is ~1.7e9 (a ~2026 unixtime), so 0 is a safe sentinel.
-            start: if start != 0 { start } else { row.start_time },
-            end: row.end_time, // End comes from game_event.end_time, NOT holiday math
+            start: if holiday_start != 0 { holiday_start } else { start },
+            end, // End comes from game_event.end_time (effective_end applied by caller), NOT holiday math
             occurence: if occurence_min == 0 {
                 // filter_type==1 or filter_type==2 and !looping: keep row value
                 row.occurence
@@ -489,8 +537,8 @@ pub fn resolve_holiday_event(
             // Holiday stage == 0 or invalid holiday — return row values unchanged.
             ResolvedEvent {
                 entry: row.entry,
-                start: row.start_time,
-                end: row.end_time,
+                start,
+                end,
                 occurence: row.occurence,
                 length: row.length,
                 state: row.state,
@@ -513,11 +561,12 @@ mod tests {
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     /// Build a minimal `GameEventInput` with Normal state for testing.
+    /// `start` and `end` are `Some(i64)` — use `None` to test null-timestamp paths.
     fn make_row(entry: u16, start: i64, end: i64, occ: i64, len: i64) -> GameEventInput {
         GameEventInput {
             entry,
-            start_time: start,
-            end_time: end,
+            start_time: Some(start),
+            end_time: Some(end),
             occurence: occ,
             length: len,
             holiday: 0,
@@ -591,12 +640,51 @@ mod tests {
         }
     }
 
+    // ── effective_start / effective_end ──────────────────────────────────────
+
+    #[test]
+    fn effective_start_some_passes_through() {
+        assert_eq!(effective_start(Some(1_000_000)), 1_000_000);
+    }
+
+    #[test]
+    fn effective_start_none_is_zero() {
+        assert_eq!(effective_start(None), 0);
+    }
+
+    #[test]
+    fn effective_end_some_passes_through() {
+        assert_eq!(effective_end(Some(9_999_999), 1_780_000_000), 9_999_999);
+    }
+
+    #[test]
+    fn effective_end_none_is_resolve_ref_plus_63072000() {
+        // 63_072_000 = 730 * 86_400 (exactly 2 years — C++ LoadGameEvents lines 359-360)
+        let resolve_ref = 1_780_000_000i64;
+        let expected = resolve_ref + 63_072_000;
+        assert_eq!(effective_end(None, resolve_ref), expected);
+        // Verify the constant is exactly 730 * 86_400
+        assert_eq!(63_072_000i64, 730 * 86_400, "63_072_000 must equal 730*86400 exactly");
+    }
+
+    #[test]
+    fn effective_end_none_two_separate_resolve_refs() {
+        // The default depends on resolve_ref — verify two different refs give two different ends
+        let r1 = 1_780_000_000i64;
+        let r2 = 1_790_000_000i64;
+        assert_eq!(effective_end(None, r1), r1 + 63_072_000);
+        assert_eq!(effective_end(None, r2), r2 + 63_072_000);
+        assert_ne!(effective_end(None, r1), effective_end(None, r2));
+    }
+
     // ── resolve_periodic_event ────────────────────────────────────────────────
 
     #[test]
     fn periodic_event_round_trips_row_columns() {
         let row = make_row(7, 1_000_000, 2_000_000, 10080, 60);
-        let resolved = resolve_periodic_event(&row);
+        let s = effective_start(row.start_time);
+        let e = effective_end(row.end_time, 1_780_000_000);
+        let resolved = resolve_periodic_event(&row, s, e);
         assert_eq!(resolved.entry, 7);
         assert_eq!(resolved.start, 1_000_000);
         assert_eq!(resolved.end, 2_000_000);
@@ -604,6 +692,24 @@ mod tests {
         assert_eq!(resolved.length, 60);
         assert_eq!(resolved.state, GameEventState::Normal);
         assert_eq!(resolved.next_start, 0);
+    }
+
+    #[test]
+    fn periodic_event_null_end_time_gets_default() {
+        // A row with end_time=None should resolve to resolve_ref + 63_072_000
+        let mut row = make_row(97, 0, 0, 525_600, 20_160);
+        row.start_time = None;
+        row.end_time = None;
+        let resolve_ref = 1_780_244_906i64;
+        let s = effective_start(row.start_time);
+        let e = effective_end(row.end_time, resolve_ref);
+        let resolved = resolve_periodic_event(&row, s, e);
+        assert_eq!(resolved.start, 0, "null start → effective start = 0");
+        assert_eq!(
+            resolved.end,
+            resolve_ref + 63_072_000,
+            "null end → resolve_ref + 63_072_000"
+        );
     }
 
     // ── set_holiday_event_time: CalendarFilterType = -1 (Yearly) ─────────────
@@ -865,8 +971,8 @@ mod tests {
 
         let row = GameEventInput {
             entry: 5,
-            start_time: 0,
-            end_time: 9_999_999, // this should survive into resolved.end
+            start_time: Some(0),
+            end_time: Some(9_999_999), // this should survive into resolved.end
             occurence: 10080,
             length: 0,
             holiday: 42,
@@ -877,10 +983,47 @@ mod tests {
         let ref_civil = CivilDate { year: 2025, mon0: 9, mday: 1, hour: 0, min: 0, wday: 0 };
         let resolve_ref = civil_to_unix(&ref_civil, 0);
 
-        let resolved = resolve_holiday_event(&row, &holiday, resolve_ref, 0);
+        let s = effective_start(row.start_time);
+        let e = effective_end(row.end_time, resolve_ref);
+        let resolved = resolve_holiday_event(&row, s, e, &holiday, resolve_ref, 0);
         assert_eq!(resolved.end, 9_999_999, "End must come from row.end_time, not holiday math");
         assert_eq!(resolved.occurence, WEEK / MINUTE, "Weekly: occurence = WEEK/MINUTE");
         assert_eq!(resolved.length, 72 * HOUR / MINUTE);
+    }
+
+    #[test]
+    fn holiday_event_null_end_time_gets_resolve_ref_plus_two_years() {
+        // A holiday row with end_time=None → effective end = resolve_ref + 63_072_000
+        let mut d = CivilDate { year: 2025, mon0: 9, mday: 18, hour: 0, min: 0, wday: 0 };
+        normalize_date(&mut d);
+        let packed = pack_date(&d);
+        let holiday = make_holiday(vec![packed], vec![72], 0, false);
+
+        let row = GameEventInput {
+            entry: 1,
+            start_time: None,  // null start
+            end_time: None,    // null end — should get resolve_ref + 63_072_000
+            occurence: 10080,
+            length: 0,
+            holiday: 341,
+            holiday_stage: 1,
+            state: GameEventState::Normal,
+            next_start: 0,
+        };
+        let ref_civil = CivilDate { year: 2026, mon0: 4, mday: 31, hour: 0, min: 0, wday: 0 };
+        let resolve_ref = civil_to_unix(&ref_civil, 0);
+
+        let s = effective_start(row.start_time);
+        let e = effective_end(row.end_time, resolve_ref);
+
+        assert_eq!(e, resolve_ref + 63_072_000, "null end_time → resolve_ref + 63_072_000");
+
+        let resolved = resolve_holiday_event(&row, s, e, &holiday, resolve_ref, 0);
+        assert_eq!(
+            resolved.end,
+            resolve_ref + 63_072_000,
+            "resolved end must be resolve_ref + 63_072_000 for null end_time"
+        );
     }
 
     // ── forward-date probes: is_active window ─────────────────────────────────
@@ -1078,8 +1221,8 @@ mod tests {
 
         let row = GameEventInput {
             entry: 99,
-            start_time: sentinel_start,
-            end_time: 9_999_999_999,
+            start_time: Some(sentinel_start),
+            end_time: Some(9_999_999_999),
             occurence: 525_600, // YEAR/MINUTE
             length: 168 * 60,   // 168h in minutes
             holiday: 99,
@@ -1088,7 +1231,9 @@ mod tests {
             next_start: 0,
         };
 
-        let resolved = resolve_holiday_event(&row, &holiday, resolve_ref, 0);
+        let s = effective_start(row.start_time);
+        let e = effective_end(row.end_time, resolve_ref);
+        let resolved = resolve_holiday_event(&row, s, e, &holiday, resolve_ref, 0);
 
         // C++ `if (start) event.Start = start`: since FindStartTimeForStage returned 0
         // (no qualifying date), the C++ code keeps game_event.start_time.

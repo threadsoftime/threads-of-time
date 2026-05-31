@@ -198,6 +198,7 @@ mod tests {
             date_math: make_check_result(4, 4),
             resolution: make_check_result(8, 8),
             active_set: make_check_result(active_checked, active_matched),
+            active_set_exclusions: vec![],
             mismatches,
         }
     }

@@ -346,12 +346,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_game_events_null_start_time_becomes_zero() {
+    async fn query_game_events_null_start_time_preserved_as_none() {
         let base_url = spawn_mock().await;
         let h = Harness::new(base_url, "test-token");
         let inputs = h.query_game_events().await.unwrap();
-        // The SQL row has start_time: null → GameEventInput.start_time = 0
-        assert_eq!(inputs[0].start_time, 0, "null start_time should map to 0");
+        // The SQL row has start_time: null → GameEventInput.start_time = None
+        // (callers apply effective_start to convert None → 0)
+        assert_eq!(inputs[0].start_time, None, "null start_time must be preserved as None");
     }
 
     #[tokio::test]
@@ -361,8 +362,9 @@ mod tests {
         let inputs = h.query_game_events().await.unwrap();
         let inp = &inputs[0];
         assert_eq!(inp.entry, 1);
-        // The mock row has end_time: null (holiday row) → maps to 0
-        assert_eq!(inp.end_time, 0);
+        // The mock row has end_time: null (holiday row) → preserved as None
+        // (callers apply effective_end to convert None → resolve_ref + 63_072_000)
+        assert_eq!(inp.end_time, None);
         assert_eq!(inp.occurence, 525600);
         assert_eq!(inp.length, 20160);
         assert_eq!(inp.holiday, 341);
@@ -370,15 +372,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_game_events_both_times_null_map_to_zero() {
+    async fn query_game_events_both_times_null_preserved_as_none() {
         // The real live holiday rows (e.g. eventEntry:1) have BOTH
         // start_time: null AND end_time: null. The mock QUERY_DB_RESULT uses
-        // this shape — confirm both map to 0 in GameEventInput.
+        // this shape — confirm both are preserved as None in GameEventInput.
         let base_url = spawn_mock().await;
         let h = Harness::new(base_url, "test-token");
         let inputs = h.query_game_events().await.unwrap();
-        assert_eq!(inputs[0].start_time, 0, "null start_time should map to 0");
-        assert_eq!(inputs[0].end_time, 0, "null end_time should map to 0");
+        assert_eq!(inputs[0].start_time, None, "null start_time must be preserved as None");
+        assert_eq!(inputs[0].end_time, None, "null end_time must be preserved as None");
     }
 
     // ── HarnessError::Tool (422 ok:false) ─────────────────────────────────────

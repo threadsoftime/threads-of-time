@@ -61,8 +61,8 @@ use serde::Serialize;
 use crate::events::{GroundTruth, GroundTruthEvent};
 use crate::holiday::{get_packed_holiday_date, HolidayCalculationType, HolidayRule};
 use crate::resolve::{
-    generate_dynamic_dates, resolve_holiday_event, resolve_periodic_event, GameEventInput,
-    HolidaysEntry, MAX_HOLIDAY_DATES,
+    effective_end, effective_start, generate_dynamic_dates, resolve_holiday_event,
+    resolve_periodic_event, GameEventInput, HolidaysEntry, MAX_HOLIDAY_DATES,
 };
 use crate::schedule::is_active;
 
@@ -90,6 +90,30 @@ impl CheckResult {
     pub fn mismatches(&self) -> usize {
         self.checked - self.matched
     }
+}
+
+/// Why a particular event was excluded from the active-set check.
+///
+/// Excluded events are counted separately; they do NOT contribute to
+/// `active_set.checked` or `active_set.matched`.  Their C++ `is_active`
+/// value is accepted as authoritative (not predicted via date math).
+#[derive(Debug, Clone, Serialize)]
+pub enum ExclusionReason {
+    /// `state != Normal` (states 1-5: WorldInactive/Conditions/Nextphase/Finished/Internal).
+    /// These are condition-driven, timer-driven, or sticky via GM command — NOT calendar
+    /// date math.  C++ `is_active` is sticky; Rust date math cannot predict it.
+    NonNormalState,
+    /// NORMAL state + no holiday + raw_start == raw_end AND raw_end < resolve_reference.
+    /// These are GM-started events where `StartEvent(overwrite=true)` rebases `Start → boot`.
+    /// The raw SQL start/end are far in the past and equal — not date-predictable.
+    ManualStart,
+}
+
+/// A single event excluded from the active-set date-math check.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExcludedEvent {
+    pub entry: u16,
+    pub reason: ExclusionReason,
 }
 
 /// Which of the three checks produced a mismatch.
@@ -127,7 +151,18 @@ pub struct ShadowReport {
     /// CHECK 2 — resolution results.
     pub resolution: CheckResult,
     /// CHECK 3 — active-set results (primary Inc-1 exit gate).
+    ///
+    /// **Scope:** Only events where `state == Normal` AND the event is
+    /// date-scheduled (not a GM-started / manual-start event) contribute to
+    /// `checked` and `matched`.  See `active_set_exclusions` for the rest.
     pub active_set: CheckResult,
+    /// Events excluded from the active-set check, with reasons.
+    ///
+    /// These events are NOT counted in `active_set.checked`.  C++ `is_active`
+    /// is accepted as authoritative for them; no date-math prediction is made.
+    /// Reporting them prevents silently hiding events that could reveal bugs in
+    /// the date-math path if they ever transition to Normal/date-scheduled state.
+    pub active_set_exclusions: Vec<ExcludedEvent>,
     /// All individual mismatches across all three checks.
     pub mismatches: Vec<Mismatch>,
 }
@@ -153,6 +188,50 @@ fn rule_for(holiday_id: u32, rules: &[HolidayRule]) -> Option<&HolidayRule> {
 fn gen_year_from_unix(unix: i64, tz_offset_secs: i32) -> i32 {
     use crate::packed::unix_to_civil;
     unix_to_civil(unix, tz_offset_secs).year
+}
+
+/// Determine whether an event should be excluded from the active-set date-math check.
+///
+/// Returns `Some(reason)` if excluded, `None` if in-scope.
+///
+/// ## Exclusion rules:
+///
+/// **(a) Non-Normal state (`state != Normal`):**
+/// States 1-5 (WorldInactive, WorldConditions, WorldNextphase, WorldFinished, Internal)
+/// are NOT calendar-driven.  Internal is sticky via `StartInternalEvent`; world-phase
+/// states are condition/timer-driven.  C++ `is_active` is authoritative for these.
+///
+/// **(b) Manual-start events:**
+/// `state == Normal` + `holiday == 0` + `raw_start == raw_end && raw_end < resolve_ref`.
+/// These are events started by GM command (`StartEvent overwrite=true` rebases
+/// `Start → boot`).  The raw SQL start/end are equal and far in the past — the
+/// date math cannot predict whether they are currently running.
+/// Live example: event 60 (raw start == end == 946735200, far past).
+///
+/// ## Why scoping does NOT hide date-math bugs
+///
+/// Non-Normal events are not calendar-driven — their `is_active` is set by C++
+/// world-phase logic or GM commands, not by `CheckOneGameEvent` date math.
+/// If our date math had a bug affecting Normal events, it would still be caught
+/// because Normal in-scope events ARE checked.  Excluding state!=0 events only
+/// removes events whose `is_active` state is NOT produced by the date math we
+/// are testing.
+fn active_set_exclusion_reason(
+    row: &GameEventInput,
+    row_start: i64,
+    row_end: i64,
+    resolve_ref: i64,
+) -> Option<ExclusionReason> {
+    use crate::schedule::GameEventState;
+    // (a) Non-Normal state
+    if row.state != GameEventState::Normal {
+        return Some(ExclusionReason::NonNormalState);
+    }
+    // (b) Manual-start: NORMAL + no holiday + raw_start == raw_end AND raw_end < resolve_ref
+    if row.holiday == 0 && row_start == row_end && row_end < resolve_ref {
+        return Some(ExclusionReason::ManualStart);
+    }
+    None
 }
 
 // ── CHECK 1: DateMath ─────────────────────────────────────────────────────────
@@ -277,6 +356,7 @@ pub fn compute_report(
     let mut date_math = CheckResult::new();
     let mut resolution = CheckResult::new();
     let mut active_set = CheckResult::new();
+    let mut active_set_exclusions: Vec<ExcludedEvent> = Vec::new();
     let mut mismatches: Vec<Mismatch> = Vec::new();
 
     let gen_year = gen_year_from_unix(gt.server_gametime, gt.server_tz_offset_secs);
@@ -308,6 +388,13 @@ pub fn compute_report(
 
     // ── CHECK 2 + CHECK 3: Resolution + ActiveSet ──────────────────────────────
     for row in raw_events {
+        // --- Apply C++ null-timestamp semantics (FIX 1) ---
+        // C++ LoadGameEvents lines 359-360: if end_time IS NULL, endtime = curTime + 63_072_000
+        //   (63_072_000 = 730 * 86_400 = exactly 2 years).
+        // C++ line 357: Get<uint64>() on null start → 0 (no null-guard).
+        let row_start = effective_start(row.start_time);
+        let row_end = effective_end(row.end_time, gt.resolve_reference_unixtime);
+
         // --- Rust resolution (CHECK 2 input) ---
         // For holiday events: use HolidaysEntry from gt.holidays as an INPUT.
         // The HolidaysEntry carries DBC data (date[], duration[], filter type, looping, region)
@@ -317,16 +404,18 @@ pub fn compute_report(
             if let Some(hentry) = holidays_entry_for(row.holiday, &gt.holidays) {
                 resolve_holiday_event(
                     row,
+                    row_start,
+                    row_end,
                     hentry,
                     gt.resolve_reference_unixtime,
                     gt.server_tz_offset_secs,
                 )
             } else {
                 // Holiday referenced by event but not in the dump — fallback to periodic.
-                resolve_periodic_event(row)
+                resolve_periodic_event(row, row_start, row_end)
             }
         } else {
-            resolve_periodic_event(row)
+            resolve_periodic_event(row, row_start, row_end)
         };
 
         let key = format!("event:{}", row.entry);
@@ -398,37 +487,47 @@ pub fn compute_report(
             }
 
             // --- CHECK 3: ActiveSet ---
-            // RUST computes is_active from the Rust-resolved event and server_gametime.
-            // We do NOT read cpp_ev.is_active as a compute input — only as a target.
-            let rust_active = is_active(&rust_resolved, gt.server_gametime, |_| None);
-            let cpp_active_from_field = cpp_ev.is_active;
-            let cpp_active_from_list = gt.active_event_list.contains(&row.entry);
+            // Scope: only check events where state==Normal AND not a GM-started event.
+            // Excluded events are logged to active_set_exclusions but NOT counted in
+            // active_set.checked — their C++ is_active is accepted as authoritative.
+            match active_set_exclusion_reason(row, row_start, row_end, gt.resolve_reference_unixtime) {
+                Some(reason) => {
+                    active_set_exclusions.push(ExcludedEvent { entry: row.entry, reason });
+                }
+                None => {
+                    // In-scope: RUST computes is_active from the Rust-resolved event and server_gametime.
+                    // We do NOT read cpp_ev.is_active as a compute input — only as a target.
+                    let rust_active = is_active(&rust_resolved, gt.server_gametime, |_| None);
+                    let cpp_active_from_field = cpp_ev.is_active;
+                    let cpp_active_from_list = gt.active_event_list.contains(&row.entry);
 
-            // Primary comparison: Rust vs the C++ is_active field.
-            let active_match_field = rust_active == cpp_active_from_field;
-            active_set.record(active_match_field);
-            if !active_match_field {
-                mismatches.push(Mismatch {
-                    kind: CheckKind::ActiveSet,
-                    key: key.clone(),
-                    field: "is_active(vs_field)".into(),
-                    rust: rust_active.to_string(),
-                    cpp: cpp_active_from_field.to_string(),
-                });
-            }
+                    // Primary comparison: Rust vs the C++ is_active field.
+                    let active_match_field = rust_active == cpp_active_from_field;
+                    active_set.record(active_match_field);
+                    if !active_match_field {
+                        mismatches.push(Mismatch {
+                            kind: CheckKind::ActiveSet,
+                            key: key.clone(),
+                            field: "is_active(vs_field)".into(),
+                            rust: rust_active.to_string(),
+                            cpp: cpp_active_from_field.to_string(),
+                        });
+                    }
 
-            // Secondary comparison: Rust vs membership in the active_event_list.
-            // This is an independent cross-check (same event, different C++ source).
-            let active_match_list = rust_active == cpp_active_from_list;
-            active_set.record(active_match_list);
-            if !active_match_list {
-                mismatches.push(Mismatch {
-                    kind: CheckKind::ActiveSet,
-                    key: key.clone(),
-                    field: "is_active(vs_list)".into(),
-                    rust: rust_active.to_string(),
-                    cpp: cpp_active_from_list.to_string(),
-                });
+                    // Secondary comparison: Rust vs membership in the active_event_list.
+                    // This is an independent cross-check (same event, different C++ source).
+                    let active_match_list = rust_active == cpp_active_from_list;
+                    active_set.record(active_match_list);
+                    if !active_match_list {
+                        mismatches.push(Mismatch {
+                            kind: CheckKind::ActiveSet,
+                            key: key.clone(),
+                            field: "is_active(vs_list)".into(),
+                            rust: rust_active.to_string(),
+                            cpp: cpp_active_from_list.to_string(),
+                        });
+                    }
+                }
             }
         }
         // If no matching gt event for this raw row, skip CHECK 2+3 for it
@@ -441,6 +540,7 @@ pub fn compute_report(
         date_math,
         resolution,
         active_set,
+        active_set_exclusions,
         mismatches,
     }
 }
@@ -508,12 +608,12 @@ mod tests {
         }
     }
 
-    /// Build a periodic `GameEventInput`.
+    /// Build a periodic `GameEventInput` with concrete (non-null) timestamps.
     fn make_raw_periodic(entry: u16, start: i64, end: i64, occ: i64, len: i64) -> GameEventInput {
         GameEventInput {
             entry,
-            start_time: start,
-            end_time: end,
+            start_time: Some(start),
+            end_time: Some(end),
             occurence: occ,
             length: len,
             holiday: 0,
@@ -523,7 +623,7 @@ mod tests {
         }
     }
 
-    /// Build a holiday `GameEventInput`.
+    /// Build a holiday `GameEventInput` with concrete (non-null) timestamps.
     fn make_raw_holiday(
         entry: u16,
         start: i64,
@@ -535,8 +635,8 @@ mod tests {
     ) -> GameEventInput {
         GameEventInput {
             entry,
-            start_time: start,
-            end_time: end,
+            start_time: Some(start),
+            end_time: Some(end),
             occurence: occ,
             length: len,
             holiday,
@@ -670,8 +770,12 @@ mod tests {
         //   At ref=Jun 2 2026: 2025 Jul 4 + 18h window is past (2026-06-02 > 2025-07-04+18h).
         //   2026 Jul 4: cur_time(Jun2) < Jul4 + 18h → YES. Start = 2026 Jul 4.
         let raw_input_16 = make_raw_holiday(16, 0, end_16, occ_16, len_16, 62, 1);
+        let s16 = effective_start(raw_input_16.start_time);
+        let e16 = effective_end(raw_input_16.end_time, RESOLVE_REF);
         let rust_resolved_16 = resolve_holiday_event(
             &raw_input_16,
+            s16,
+            e16,
             &holidays_entry_62,
             RESOLVE_REF,
             0,
@@ -951,5 +1055,274 @@ mod tests {
         assert_eq!(cr.checked, 3);
         assert_eq!(cr.matched, 2);
         assert_eq!(cr.mismatches(), 1);
+    }
+
+    // ── FIX 2 tests: active-set scoping ──────────────────────────────────────
+    //
+    // These tests verify that:
+    //  (a) Internal (state=5) events are EXCLUDED from the active-set check,
+    //      regardless of C++ is_active.
+    //  (b) Manual-start events (state=Normal, holiday=0, raw_start==raw_end<resolve_ref)
+    //      are EXCLUDED from the active-set check.
+    //  (c) The excluded events do NOT inflate active_set.checked.
+    //  (d) All-in-scope-consistent fixtures still yield active_set.matched==active_set.checked.
+    //  (e) active_set_exclusions list is populated with the right entries and reasons.
+
+    /// Build a `GroundTruthEvent` with a non-Normal state.
+    fn make_gt_non_normal_event(
+        entry: u16,
+        start: i64,
+        end: i64,
+        state: GameEventState,
+        is_active: bool,
+    ) -> crate::events::GroundTruthEvent {
+        use crate::events::GroundTruthEvent;
+        GroundTruthEvent {
+            entry,
+            start,
+            end,
+            occurence: 525_600,
+            length: 20_160,
+            holiday: 0,
+            holiday_stage: 0,
+            is_active,
+            next_start: 0,
+            state,
+        }
+    }
+
+    /// Build a `GameEventInput` with a given state (for non-Normal states in raw rows).
+    fn make_raw_with_state(
+        entry: u16,
+        start: Option<i64>,
+        end: Option<i64>,
+        state: GameEventState,
+    ) -> GameEventInput {
+        GameEventInput {
+            entry,
+            start_time: start,
+            end_time: end,
+            occurence: 525_600,
+            length: 20_160,
+            holiday: 0,
+            holiday_stage: 0,
+            state,
+            next_start: 0,
+        }
+    }
+
+    // ── (a) Internal event → EXCLUDED, not a mismatch ─────────────────────────
+
+    #[test]
+    fn internal_event_is_excluded_not_mismatch() {
+        // Event 50: state=Internal (5), C++ reports is_active=true.
+        // Rust date math would compute is_active=false (start=0, end=resolve_ref-1 → outdated).
+        // Without scoping → this would be a mismatch.
+        // With scoping → it should be EXCLUDED; active_set.checked does NOT include it.
+        let start_50: i64 = 946_735_200; // far past (2000-01-01 approx)
+        let end_50: i64 = 946_735_200 + 86_400; // one day later, still in the past vs RESOLVE_REF
+
+        let gt = GroundTruth {
+            events: vec![
+                make_gt_non_normal_event(50, start_50, end_50, GameEventState::Internal, true),
+            ],
+            active_event_list: vec![50],
+            holidays: vec![],
+            server_gametime: SERVER_GAMETIME,
+            resolve_reference_unixtime: RESOLVE_REF,
+            server_tz_offset_secs: 0,
+        };
+
+        let raw_events = vec![
+            make_raw_with_state(50, Some(start_50), Some(end_50), GameEventState::Internal),
+        ];
+
+        let rules = holiday_rules();
+        let report = compute_report(&gt, &raw_events, rules);
+
+        // active_set.checked must be 0 (excluded, not checked)
+        assert_eq!(
+            report.active_set.checked, 0,
+            "Internal event must NOT contribute to active_set.checked"
+        );
+
+        // active_set.mismatches() must be 0
+        assert_eq!(
+            report.active_set.mismatches(), 0,
+            "Internal event (excluded) must not produce any mismatch"
+        );
+
+        // The exclusion list must contain event 50 with NonNormalState reason
+        assert_eq!(report.active_set_exclusions.len(), 1, "one exclusion expected");
+        assert_eq!(report.active_set_exclusions[0].entry, 50);
+        assert!(
+            matches!(report.active_set_exclusions[0].reason, ExclusionReason::NonNormalState),
+            "reason must be NonNormalState for Internal state"
+        );
+    }
+
+    // ── (b) Manual-start event → EXCLUDED, not a mismatch ─────────────────────
+
+    #[test]
+    fn manual_start_event_is_excluded_not_mismatch() {
+        // Event 60: state=Normal, holiday=0, raw_start == raw_end == 946735200 (far past < resolve_ref).
+        // C++ reports is_active=true (GM started it). Rust date math: start < server_gametime? No —
+        // start < end? end == start → no time range, would be inactive. But the key point: excluded.
+        let gm_ts: i64 = 946_735_200; // Jan 1 2000 — far before RESOLVE_REF (~2026)
+
+        let gt = GroundTruth {
+            events: vec![
+                make_gt_event(60, gm_ts, gm_ts, 525_600, 20_160, true), // C++ says active
+            ],
+            active_event_list: vec![60],
+            holidays: vec![],
+            server_gametime: SERVER_GAMETIME,
+            resolve_reference_unixtime: RESOLVE_REF,
+            server_tz_offset_secs: 0,
+        };
+
+        // raw row: start_time == end_time == gm_ts (far past, both equal)
+        let raw_events = vec![
+            make_raw_periodic(60, gm_ts, gm_ts, 525_600, 20_160),
+        ];
+
+        let rules = holiday_rules();
+        let report = compute_report(&gt, &raw_events, rules);
+
+        // active_set.checked must be 0 (excluded)
+        assert_eq!(
+            report.active_set.checked, 0,
+            "manual-start event must NOT contribute to active_set.checked"
+        );
+
+        assert_eq!(
+            report.active_set.mismatches(), 0,
+            "manual-start event (excluded) must not produce any mismatch"
+        );
+
+        // The exclusion list must contain event 60 with ManualStart reason
+        assert_eq!(report.active_set_exclusions.len(), 1, "one exclusion expected");
+        assert_eq!(report.active_set_exclusions[0].entry, 60);
+        assert!(
+            matches!(report.active_set_exclusions[0].reason, ExclusionReason::ManualStart),
+            "reason must be ManualStart for event with raw_start == raw_end < resolve_ref"
+        );
+    }
+
+    // ── (c) Mixed fixture: excluded + in-scope events; excluded not counted ─────
+
+    #[test]
+    fn excluded_events_not_counted_in_active_set_checked() {
+        // Fixture: event 10 (in-scope, active), event 50 (Internal, excluded).
+        // active_set.checked should count only event 10 (×2 for vs_field + vs_list = 2).
+        let (mut gt, mut raw_events) = build_consistent_gt_and_raw(None);
+
+        // Add event 50 (Internal, C++-active) to gt.events and raw_events
+        let start_50: i64 = SERVER_GAMETIME - 3600;
+        let end_50: i64 = SERVER_GAMETIME + 86400;
+        gt.events.push(make_gt_non_normal_event(50, start_50, end_50, GameEventState::Internal, true));
+        gt.active_event_list.push(50);
+        raw_events.push(make_raw_with_state(50, Some(start_50), Some(end_50), GameEventState::Internal));
+
+        let rules = holiday_rules();
+        let report = compute_report(&gt, &raw_events, rules);
+
+        // active_set_exclusions must contain event 50
+        let excluded_50 = report.active_set_exclusions.iter().find(|e| e.entry == 50);
+        assert!(excluded_50.is_some(), "event 50 must be in active_set_exclusions");
+
+        // active_set.mismatches() must be 0 (all in-scope events are consistent)
+        assert_eq!(
+            report.active_set.mismatches(), 0,
+            "no in-scope mismatches when only excluded events would have caused mismatch"
+        );
+
+        // active_set.checked must NOT count event 50
+        // The in-scope events are 10, 11, 16 → 3 events × 2 checks (vs_field + vs_list) = 6
+        assert_eq!(
+            report.active_set.checked, 6,
+            "active_set.checked must be 6 (3 in-scope events × 2 comparisons each)"
+        );
+    }
+
+    // ── (d) All-in-scope-consistent: matched == checked; exclusions separate ────
+
+    #[test]
+    fn all_in_scope_consistent_matched_equals_checked() {
+        // The standard consistent fixture has no excluded events — all are Normal
+        // with non-equal start/end relative to RESOLVE_REF.
+        let (gt, raw_events) = build_consistent_gt_and_raw(None);
+        let rules = holiday_rules();
+        let report = compute_report(&gt, &raw_events, rules);
+
+        assert_eq!(
+            report.active_set.matched, report.active_set.checked,
+            "all-consistent: matched must equal checked when no mismatches"
+        );
+        assert_eq!(
+            report.active_set_exclusions.len(), 0,
+            "all-consistent standard fixture has no excluded events"
+        );
+    }
+
+    // ── (e) WorldInactive (state=1) → excluded as NonNormalState ─────────────
+
+    #[test]
+    fn world_inactive_state_excluded_as_non_normal() {
+        let start_70: i64 = SERVER_GAMETIME - 3600;
+        let end_70: i64 = SERVER_GAMETIME + 86400;
+        let gt = GroundTruth {
+            events: vec![
+                make_gt_non_normal_event(70, start_70, end_70, GameEventState::WorldInactive, false),
+            ],
+            active_event_list: vec![],
+            holidays: vec![],
+            server_gametime: SERVER_GAMETIME,
+            resolve_reference_unixtime: RESOLVE_REF,
+            server_tz_offset_secs: 0,
+        };
+        let raw_events = vec![
+            make_raw_with_state(70, Some(start_70), Some(end_70), GameEventState::WorldInactive),
+        ];
+        let rules = holiday_rules();
+        let report = compute_report(&gt, &raw_events, rules);
+
+        assert_eq!(report.active_set.checked, 0, "WorldInactive event must not contribute to checked");
+        assert_eq!(report.active_set_exclusions.len(), 1);
+        assert!(
+            matches!(report.active_set_exclusions[0].reason, ExclusionReason::NonNormalState),
+            "WorldInactive must be excluded as NonNormalState"
+        );
+    }
+
+    // ── (f) normal event with start != end → not excluded (in-scope) ─────────
+
+    #[test]
+    fn normal_event_with_distinct_start_end_is_in_scope() {
+        // A Normal event where start != end is NOT excluded (even if start < resolve_ref).
+        // This verifies the manual-start exclusion does not false-positive.
+        let (gt, raw_events) = build_consistent_gt_and_raw(None);
+        let rules = holiday_rules();
+        let report = compute_report(&gt, &raw_events, rules);
+
+        // No exclusions expected for the standard fixture
+        let excluded_10 = report.active_set_exclusions.iter().find(|e| e.entry == 10);
+        assert!(excluded_10.is_none(), "event 10 (Normal, start != end) must NOT be excluded");
+        let excluded_11 = report.active_set_exclusions.iter().find(|e| e.entry == 11);
+        assert!(excluded_11.is_none(), "event 11 (Normal, start != end) must NOT be excluded");
+    }
+
+    // ── (g) ShadowReport serialization includes active_set_exclusions ────────
+
+    #[test]
+    fn shadow_report_serialization_includes_exclusions_field() {
+        let (gt, raw_events) = build_consistent_gt_and_raw(None);
+        let rules = holiday_rules();
+        let report = compute_report(&gt, &raw_events, rules);
+        let json = serde_json::to_string(&report).expect("must serialize");
+        assert!(
+            json.contains("active_set_exclusions"),
+            "serialized JSON must contain active_set_exclusions field"
+        );
     }
 }

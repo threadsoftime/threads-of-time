@@ -147,14 +147,18 @@ pub struct SqlGameEventRow {
 }
 
 impl From<SqlGameEventRow> for GameEventInput {
-    /// Map a SQL row to a [`GameEventInput`], treating null timestamps as 0
-    /// and defaulting `state` to `Normal` / `next_start` to 0 (this fork lacks
+    /// Map a SQL row to a [`GameEventInput`], preserving null timestamps as
+    /// `None` so that callers can apply the C++ null-semantics rules:
+    /// - `start_time = None` → effective start = 0  (no null-guard in C++ LoadGameEvents)
+    /// - `end_time = None`   → effective end = resolve_ref + 63_072_000  (C++ lines 359-360)
+    ///
+    /// `state` defaults to `Normal` / `next_start` to 0 (this fork lacks
     /// those columns in `game_event`).
     fn from(row: SqlGameEventRow) -> GameEventInput {
         GameEventInput {
             entry: row.event_entry,
-            start_time: row.start_time.unwrap_or(0),
-            end_time: row.end_time.unwrap_or(0),
+            start_time: row.start_time,
+            end_time: row.end_time,
             occurence: row.occurence,
             length: row.length,
             holiday: row.holiday,
@@ -396,11 +400,14 @@ mod tests {
     // ── SqlGameEventRow → GameEventInput mapping ──────────────────────────────
 
     #[test]
-    fn sql_row_to_game_event_input_null_start_becomes_zero() {
+    fn sql_row_to_game_event_input_null_start_preserved_as_none() {
         let resp: SqlGameEventResponse = serde_json::from_str(SQL_ROWS_JSON).unwrap();
         let row = resp.result.rows[0].clone();
         let input: GameEventInput = row.into();
-        assert_eq!(input.start_time, 0, "null start_time → 0 in GameEventInput");
+        assert_eq!(
+            input.start_time, None,
+            "null start_time must be preserved as None in GameEventInput (caller applies effective_start)"
+        );
     }
 
     #[test]
@@ -409,8 +416,8 @@ mod tests {
         let row = resp.result.rows[1].clone();
         let input: GameEventInput = row.into();
         assert_eq!(input.entry, 16);
-        assert_eq!(input.start_time, 1779033600);
-        assert_eq!(input.end_time, 1843316906);
+        assert_eq!(input.start_time, Some(1779033600));
+        assert_eq!(input.end_time, Some(1843316906));
         assert_eq!(input.occurence, 10080);
         assert_eq!(input.length, 4320);
         assert_eq!(input.holiday, 62);
@@ -438,9 +445,12 @@ mod tests {
     // ── Both start_time and end_time null (holiday rows from live data) ────────
 
     #[test]
-    fn sql_row_both_times_null_maps_to_zero_zero() {
+    fn sql_row_both_times_null_preserved_as_none() {
         // The real live first row (eventEntry:1 Midsummer Fire Festival) has BOTH
         // start_time: null AND end_time: null (confirmed from live Heimdal 2026-05-31).
+        // Both must be preserved as None so that callers can apply C++ null semantics:
+        //   start=None → effective_start(None) = 0
+        //   end=None   → effective_end(None, resolve_ref) = resolve_ref + 63_072_000
         let json = r#"{
           "ok": true,
           "result": {
@@ -457,8 +467,9 @@ mod tests {
         assert!(row.start_time.is_none(), "start_time should be None");
         assert!(row.end_time.is_none(), "end_time should be None");
         let input: GameEventInput = row.into();
-        assert_eq!(input.start_time, 0, "null start_time → 0");
-        assert_eq!(input.end_time, 0, "null end_time → 0");
+        // GameEventInput now preserves None so callers can apply the C++ null-semantics rules.
+        assert_eq!(input.start_time, None, "null start_time → None in GameEventInput");
+        assert_eq!(input.end_time, None, "null end_time → None in GameEventInput");
     }
 
     // ── GroundTruthEvent → ResolvedEvent mapping ──────────────────────────────
