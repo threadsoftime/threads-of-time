@@ -480,16 +480,19 @@ mod tests {
         );
     }
 
-    // ── holiday_id field in HolidaysEntry (present in payload but not in struct) ──
+    // ── holiday_id field in HolidaysEntry is deserialized ────────────────────────
 
     // The obs.game_events payload includes "holiday_id" in each holidays entry.
-    // HolidaysEntry does not have a holiday_id field (it's not used by the resolver).
-    // Verify that serde ignores it (default: deny_unknown_fields is NOT set).
+    // HolidaysEntry now carries the holiday_id field (needed by shadow diff CHECK 1
+    // to map holidays to HolidayRules).
     #[test]
-    fn holidays_entry_ignores_holiday_id_field() {
-        // This is already proven by the main deserialization tests (the fixture has
-        // "holiday_id":62 and deserialization succeeds). This test makes it explicit.
+    fn holidays_entry_deserializes_holiday_id() {
         let resp: GameEventsResponse = serde_json::from_str(GAME_EVENTS_JSON).unwrap();
-        assert_eq!(resp.result.holidays.len(), 1, "should deserialize despite extra holiday_id field");
+        assert_eq!(resp.result.holidays.len(), 1, "should deserialize one holiday entry");
+        assert_eq!(
+            resp.result.holidays[0].holiday_id,
+            62,
+            "holiday_id should be deserialized from payload"
+        );
     }
 }

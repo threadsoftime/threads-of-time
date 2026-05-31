@@ -113,6 +113,8 @@ fn deserialize_int_as_bool<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::E
 /// Synthetic representation of a `HolidaysEntry` DBC record.
 ///
 /// Field semantics:
+/// - `holiday_id`: numeric WoW `HolidayIds` value (from `SharedDefines.h`). Present in the
+///   harness payload; needed by shadow diff CHECK 1 to map to a `HolidayRule`.
 /// - `date[i]`: packed WoW date (`uint32`, same layout as `HolidaysEntry::Date[]`).
 /// - `duration[i]`: stage duration in **hours** (matches `HolidaysEntry::Duration[]`).
 /// - `calendar_filter_type`: −1=Yearly, 0=Weekly, 1=Defined-dates, 2=Looping.
@@ -122,13 +124,13 @@ fn deserialize_int_as_bool<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::E
 /// Lengths must be ≤ `MAX_HOLIDAY_DATES` / `MAX_HOLIDAY_DURATIONS` respectively.
 ///
 /// The harness payload sends `looping` as an integer (0 or 1); the custom
-/// `deserialize_with` maps it to `bool`.  `holiday_id` in the payload maps to
-/// the `region` field contextually — the harness key is `holiday_id` for the
-/// identifier but we rename it here.  The `date` and `duration` fields are fixed-
+/// `deserialize_with` maps it to `bool`.  The `date` and `duration` fields are fixed-
 /// length arrays in the C++ DBC but arrive as JSON arrays; serde collects them
 /// directly.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HolidaysEntry {
+    /// WoW holiday ID. Used by shadow diff CHECK 1 to look up the matching `HolidayRule`.
+    pub holiday_id: u32,
     pub date: Vec<u32>,
     /// Stage durations in **hours**.
     pub duration: Vec<u32>,
@@ -526,6 +528,7 @@ mod tests {
     }
 
     /// Build a `HolidaysEntry` with the given filter / looping / dates / durations.
+    /// `holiday_id = 0` is a sentinel for tests that don't exercise the id.
     fn make_holiday(
         dates: Vec<u32>,
         durations: Vec<u32>,
@@ -533,6 +536,7 @@ mod tests {
         looping: bool,
     ) -> HolidaysEntry {
         HolidaysEntry {
+            holiday_id: 0,
             date: dates,
             duration: durations,
             calendar_filter_type: filter,
@@ -717,6 +721,7 @@ mod tests {
         // Hallow's End = holiday_id 324, FixedDate Oct 18.
         // generate for gen_year=2026: dateId 0=2025, 1=2026, 2=2027, 3=2028
         let mut entry = HolidaysEntry {
+            holiday_id: 324,
             date: vec![],
             duration: vec![336], // 14 days
             calendar_filter_type: -1,
@@ -746,6 +751,7 @@ mod tests {
     #[test]
     fn generate_dynamic_dates_darkmoon_fills_dates_and_duration() {
         let mut entry = HolidaysEntry {
+            holiday_id: 374,
             date: vec![],
             duration: vec![0], // unset → should be set to 168
             calendar_filter_type: 1,
@@ -775,6 +781,7 @@ mod tests {
     #[test]
     fn generate_dynamic_dates_unknown_id_is_noop() {
         let mut entry = HolidaysEntry {
+            holiday_id: 99999,
             date: vec![],
             duration: vec![],
             calendar_filter_type: -1,
