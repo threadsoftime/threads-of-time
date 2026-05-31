@@ -46,6 +46,10 @@
 //! gm command").
 
 /// Mirrors the C++ `GameEventState` enum (GameEventMgr.h lines 31-36).
+///
+/// Deserialization: the harness payload sends state as an integer 0..5.
+/// `TryFrom<u8>` maps the integer to the enum; `events.rs` uses it when
+/// deserializing `GroundTruthEvent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameEventState {
     /// GAMEEVENT_NORMAL (0) — standard recurring game events.
@@ -60,6 +64,21 @@ pub enum GameEventState {
     Internal,
     /// GAMEEVENT_WORLD_INACTIVE (1) — not yet started; needs prereq check.
     WorldInactive,
+}
+
+impl TryFrom<u8> for GameEventState {
+    type Error = u8;
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        match v {
+            0 => Ok(GameEventState::Normal),
+            1 => Ok(GameEventState::WorldInactive),
+            2 => Ok(GameEventState::WorldConditions),
+            3 => Ok(GameEventState::WorldNextphase),
+            4 => Ok(GameEventState::WorldFinished),
+            5 => Ok(GameEventState::Internal),
+            other => Err(other),
+        }
+    }
 }
 
 /// A fully-resolved game event record, combining `game_event` DB columns with

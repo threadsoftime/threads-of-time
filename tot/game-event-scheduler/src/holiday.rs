@@ -4,16 +4,14 @@
 //! **Scope (Tasks 3+4):** Easter Sunday, Nth-weekday, Weekday-on-or-after; astronomical
 //! calculators (Lunar New Year, Autumn Equinox, Winter Solstice); Darkmoon Faire helpers;
 //! unified `calculate_holiday_date` dispatch over all 8 `HolidayCalculationType` variants;
-//! `get_packed_holiday_date`, `get_darkmoon_faire_dates`, `civil_to_unix`,
-//! `find_start_time_for_stage`.
+//! `get_packed_holiday_date`, `get_darkmoon_faire_dates`, `find_start_time_for_stage`.
 //!
 //! All pure arithmetic on `CivilDate` via `normalize_date`. No libc / no system calls.
 //!
-//! **DST caveat:** `civil_to_unix` assumes a fixed UTC offset (no DST).
-//! If Task 7 discovers that the server TZ observes DST, Task 6 must handle it by
-//! querying the actual UTC offset for the given instant rather than using a fixed offset.
+//! `civil_to_unix` and `unix_to_civil` were moved to `packed.rs` (P.S. nit, Task 11) —
+//! they are calendar primitives that belong next to `CivilDate`.
 
-use crate::packed::{normalize_date, CivilDate};
+use crate::packed::{civil_to_unix, normalize_date, CivilDate};
 
 // ── Enums & struct ────────────────────────────────────────────────────────────
 
@@ -653,35 +651,10 @@ pub fn get_darkmoon_faire_dates(
     dates
 }
 
-// ── Civil-to-unix + FindStartTimeForStage ─────────────────────────────────────
-
-/// Convert a `CivilDate` to a Unix timestamp (seconds since 1970-01-01T00:00:00Z),
-/// using a fixed timezone offset (no DST adjustment).
-///
-/// This is the `mktime`-replacement used by `find_start_time_for_stage`.
-///
-/// The calculation:
-///   1. Count days from 1970-01-01 to the date via the Julian Day method.
-///   2. Multiply by 86400, add h*3600 + m*60 + s.
-///   3. Subtract `tz_offset_secs` (positive = east of UTC, e.g. UTC+8 → 28800).
-///
-/// **DST caveat:** assumes a fixed offset. If the server TZ observes DST,
-/// Task 6 must supply the correct offset for the given instant; leave a
-/// `// TODO(Task 6): DST` comment at the call site if needed.
-///
-/// C++ note: `FindStartTimeForStage` uses `tm_year = ((date>>24)&0x1F) + 100`
-/// which maps to year = 2000 + offset (since tm_year is years since 1900 and
-/// the packed year-offset is from 2000, so offset+100 ≡ offset+2000−1900).
-pub fn civil_to_unix(date: &CivilDate, tz_offset_secs: i32) -> i64 {
-    // Julian Day for 1970-01-01 midnight is 2440587.5.
-    // date_to_julian_day(y, m, d) with integer d returns the JD at midnight (JD + 0.5 fractional).
-    let jd = date_to_julian_day(date.year, date.mon0 + 1, date.mday as f64);
-    let days_since_epoch = (jd - 2_440_587.5).floor() as i64;
-    let secs = days_since_epoch * 86400
-        + date.hour as i64 * 3600
-        + date.min as i64 * 60;
-    secs - tz_offset_secs as i64
-}
+// ── FindStartTimeForStage ─────────────────────────────────────────────────────
+//
+// `civil_to_unix` and `unix_to_civil` were moved to `packed.rs` (P.S. nit, Task 11).
+// They are calendar primitives that belong next to `CivilDate`.
 
 /// Find the start time of a stage within a sequence of packed holiday dates.
 ///

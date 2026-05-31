@@ -46,18 +46,20 @@
 //! `resolve_holiday_event` takes the full `GameEventInput` row and uses
 //! `row.end_time` for `End`.
 //!
-//! # DST caveat
+//! # DST caveat (Task 7 confirmed UTC — no DST)
 //!
 //! `set_holiday_event_time` and `unix_to_civil` both use a fixed `tz_offset_secs`.
-//! If the server TZ observes DST (Task 7 will confirm; UTC → no DST expected),
-//! this fixed-offset approach needs revisiting.  Leave `// TODO(Task 7): DST` at
-//! affected call sites.
+//! Task 7 confirmed `server_tz_offset_secs = 0` (UTC) — no DST adjustment required.
+//! The `// TODO(Task 7 confirmed UTC): DST` markers are kept as documentation breadcrumbs
+//! for any future server that does observe DST.
+
+use serde::{Deserialize, Deserializer};
 
 use crate::holiday::{
-    civil_to_unix, find_start_time_for_stage, get_darkmoon_faire_dates, get_packed_holiday_date,
+    find_start_time_for_stage, get_darkmoon_faire_dates, get_packed_holiday_date,
     holiday_rules, HolidayCalculationType,
 };
-use crate::packed::{normalize_date, CivilDate};
+use crate::packed::{civil_to_unix, unix_to_civil, CivilDate};
 use crate::schedule::{GameEventState, ResolvedEvent};
 
 // ── C++ time constants (Common.h) ─────────────────────────────────────────────
@@ -98,6 +100,16 @@ pub struct GameEventInput {
     pub next_start: i64,
 }
 
+/// Deserialize helper: map an integer 0/1 to bool.
+///
+/// The `obs.game_events` harness payload sends `"looping": 0` or `"looping": 1`
+/// (matching the DBC integer field) rather than a JSON bool.  This function lets
+/// serde map it to Rust's `bool`.
+fn deserialize_int_as_bool<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let v = u8::deserialize(d)?;
+    Ok(v != 0)
+}
+
 /// Synthetic representation of a `HolidaysEntry` DBC record.
 ///
 /// Field semantics:
@@ -107,75 +119,27 @@ pub struct GameEventInput {
 /// - `looping`: mirrors `HolidaysEntry::Looping` (0/1 in DBC, bool here).
 /// - `region`: `HolidaysEntry::Region`.
 ///
-/// Lengths must be ≤ `MAX_HOLIDAY_DATES` / `MAX_HOLIDAY_DURATIONS` respectively
-/// (Task 11 will enforce this when deserialising the live harness dump).
-#[derive(Debug, Clone)]
+/// Lengths must be ≤ `MAX_HOLIDAY_DATES` / `MAX_HOLIDAY_DURATIONS` respectively.
+///
+/// The harness payload sends `looping` as an integer (0 or 1); the custom
+/// `deserialize_with` maps it to `bool`.  `holiday_id` in the payload maps to
+/// the `region` field contextually — the harness key is `holiday_id` for the
+/// identifier but we rename it here.  The `date` and `duration` fields are fixed-
+/// length arrays in the C++ DBC but arrive as JSON arrays; serde collects them
+/// directly.
+#[derive(Debug, Clone, Deserialize)]
 pub struct HolidaysEntry {
     pub date: Vec<u32>,
     /// Stage durations in **hours**.
     pub duration: Vec<u32>,
     pub calendar_filter_type: i32,
+    #[serde(deserialize_with = "deserialize_int_as_bool")]
     pub looping: bool,
     pub region: u32,
 }
 
-// ── unix_to_civil ─────────────────────────────────────────────────────────────
-
-/// Convert a Unix timestamp to a `CivilDate`, applying a fixed TZ offset.
-///
-/// This is the inverse of `civil_to_unix` — the Rust equivalent of
-/// `Acore::Time::TimeBreakdown(t)` (which calls `localtime_r`).
-///
-/// Algorithm: compute calendar date from days-since-epoch using a proleptic
-/// Gregorian calendar formula (Fliegel & Van Flandern via Julian Day), then
-/// extract h/m from the intraday remainder.
-///
-/// `tz_offset_secs`: positive = east of UTC (e.g., UTC+8 → 28800).
-/// The local time = UTC time + tz_offset_secs.
-///
-/// **DST caveat:** uses a fixed offset.  If the server TZ has DST, Task 7 must
-/// supply the correct wall-clock offset for the given instant.
-/// // TODO(Task 7): DST
-pub fn unix_to_civil(unix: i64, tz_offset_secs: i32) -> CivilDate {
-    // Shift to local time, then decompose.
-    let local = unix + tz_offset_secs as i64;
-
-    // Intraday seconds
-    let intraday = local.rem_euclid(86_400);
-    let hour = (intraday / 3600) as i32;
-    let min = ((intraday % 3600) / 60) as i32;
-
-    // Days since 1970-01-01
-    let days = (local - intraday) / 86_400;
-
-    // Convert days-since-epoch to (year, month, day) via the civil calendar.
-    // Algorithm: shift epoch to 1 Mar 0000 (makes leap-year handling regular),
-    // then apply the 400/100/4-year cycle.
-    //
-    // Reference: Howard Hinnant, "chrono-Compatible Low-Level Date Algorithms"
-    // (https://howardhinnant.github.io/date_algorithms.html), `civil_from_days`.
-    let z = days + 719_468; // shift to 1 Mar 0000
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097; // day of era [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // year of era [0, 399]
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year [0, 365]
-    let mp = (5 * doy + 2) / 153; // month of year [0, 11] within [Mar,Feb]
-    let d = doy - (153 * mp + 2) / 5 + 1; // day [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    let yr = if m <= 2 { y + 1 } else { y };
-
-    let mut date = CivilDate {
-        year: yr as i32,
-        mon0: (m - 1) as i32,
-        mday: d as i32,
-        hour,
-        min,
-        wday: 0,
-    };
-    normalize_date(&mut date);
-    date
-}
+// `unix_to_civil` was moved to `packed.rs` (P.S. nit, Task 11) — calendar primitive
+// belongs next to `CivilDate`. It is imported via `crate::packed::unix_to_civil`.
 
 // ── set_holiday_event_time ────────────────────────────────────────────────────
 
@@ -188,7 +152,7 @@ pub fn unix_to_civil(unix: i64, tz_offset_secs: i32) -> CivilDate {
 /// `Date[0]` or `Duration[0]` are zero (invalid definitions, per C++ line 1923).
 ///
 /// `resolve_ref` = server game time at load (= `curTime` in C++).
-/// `tz_offset_secs` = server TZ offset in seconds (UTC → 0). // TODO(Task 7): DST
+/// `tz_offset_secs` = server TZ offset in seconds (UTC → 0). // TODO(Task 7 confirmed UTC): DST
 pub fn set_holiday_event_time(
     holiday_stage: u8,
     holiday: &HolidaysEntry,
@@ -282,7 +246,7 @@ pub fn set_holiday_event_time(
         let found_start: i64 = if let Some(&date_packed) = holiday.date.iter().find(|&&d| d != 0) {
             // C++ line 1979: tm timeInfo = Acore::Time::TimeBreakdown(curTime)
             // = localtime of curTime (with tz).
-            let cur_civil = unix_to_civil(resolve_ref, tz_offset_secs); // TODO(Task 7): DST
+            let cur_civil = unix_to_civil(resolve_ref, tz_offset_secs); // TODO(Task 7 confirmed UTC): DST
 
             // C++ line 1980: timeInfo.tm_year -= 1  (try last year first)
             let last_year = cur_civil.year - 1;
@@ -306,7 +270,7 @@ pub fn set_holiday_event_time(
                 wday: 0,
             };
             // C++ line 1990: startTime = mktime(&timeInfo)
-            let start_time = civil_to_unix(&last_year_civil, tz_offset_secs); // TODO(Task 7): DST
+            let start_time = civil_to_unix(&last_year_civil, tz_offset_secs); // TODO(Task 7 confirmed UTC): DST
 
             // C++ line 1991: if (curTime < startTime + stageOffset + event.Length * MINUTE)
             if resolve_ref < start_time + stage_offset + length_min * MINUTE {
@@ -325,7 +289,7 @@ pub fn set_holiday_event_time(
                     wday: 0,
                 };
                 // C++ line 2002: event.Start = mktime(&tmCopy) + stageOffset
-                civil_to_unix(&this_year_civil, tz_offset_secs) + stage_offset // TODO(Task 7): DST
+                civil_to_unix(&this_year_civil, tz_offset_secs) + stage_offset // TODO(Task 7 confirmed UTC): DST
             }
         } else {
             0 // no non-zero date found
@@ -369,7 +333,10 @@ pub fn generate_dynamic_dates(
         let location_offset = rule.month;
         let dates = get_darkmoon_faire_dates(location_offset, gen_year - 1, 4, rule.offset);
 
-        // C++ lines 1104-1112: fill Date[dateId++] up to MAX_HOLIDAY_DATES
+        // C++ lines 1104-1112: fill Date[dateId++] up to MAX_HOLIDAY_DATES.
+        // Intentional divergence from C++: C++ overwrites Date[dateId] in-place starting
+        // at 0 on a pre-allocated array; here we clear + push, which is semantically
+        // equivalent because the indices are always filled from 0 upward in order.
         entry.date.clear();
         for packed in dates.into_iter().take(MAX_HOLIDAY_DATES) {
             entry.date.push(packed);
@@ -416,9 +383,9 @@ pub fn generate_dynamic_dates(
 /// Packs `(yearOffset<<24)|(month<<20)|(day<<14)|(weekday<<11)` — NO hour/min,
 /// exactly matching C++ line 1186.
 ///
-/// **Fork note:** this implementation uses `game_event.start_time` as the
-/// override source (NOT a `holiday_dates` table) — confirmed by recon;
-/// Task 7 will re-verify with live data.
+/// **Upstream AC note:** this implementation faithfully mirrors upstream AzerothCore —
+/// `game_event.start_time` is the override source (C++ LoadHolidayDates line 1170,
+/// `fields[1].Get<uint64>()`).  This is NOT a fork divergence; Task 7 live data confirmed.
 pub fn apply_start_time_override(
     date: &mut Vec<u32>,
     game_event_start_time_unix: i64,
@@ -431,7 +398,7 @@ pub fn apply_start_time_override(
     }
 
     // C++ line 1174: Acore::Time::TimeBreakdown(startTime)
-    let time_info = unix_to_civil(game_event_start_time_unix, tz_offset_secs); // TODO(Task 7): DST
+    let time_info = unix_to_civil(game_event_start_time_unix, tz_offset_secs); // TODO(Task 7 confirmed UTC): DST
 
     // C++ line 1176: int year = timeInfo.tm_year + 1900
     let year = time_info.year;
@@ -538,7 +505,7 @@ pub fn resolve_holiday_event(
 mod tests {
     use super::*;
     use crate::holiday::get_packed_holiday_date;
-    use crate::packed::pack_date;
+    use crate::packed::{normalize_date, pack_date};
     use crate::schedule::{is_active, GameEventState};
 
     // ── Helpers ──────────────────────────────────────────────────────────────

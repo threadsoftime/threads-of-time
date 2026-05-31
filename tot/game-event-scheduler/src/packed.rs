@@ -170,6 +170,91 @@ pub fn unpack_date(packed: u32) -> CivilDate {
     d
 }
 
+// ── civil_to_unix / unix_to_civil (calendar primitives) ─────────────────────
+
+/// Convert a `CivilDate` to a Unix timestamp (seconds), applying a fixed TZ offset.
+///
+/// `tz_offset_secs`: positive = east of UTC (e.g., UTC+8 → 28800).
+/// Local time = UTC time + tz_offset_secs → UTC = local − tz_offset_secs.
+///
+/// Uses the Julian Day algorithm (Meeus, *Astronomical Algorithms*):
+/// JD for 1970-01-01 midnight = 2440587.5.
+///
+/// **DST caveat:** uses a fixed offset. If the server TZ has DST, the caller
+/// must supply the correct wall-clock offset for the given instant.
+/// Moved here from `holiday.rs` (Tasks 3+4) — calendar primitive belongs next
+/// to `CivilDate`.
+pub fn civil_to_unix(date: &CivilDate, tz_offset_secs: i32) -> i64 {
+    // Julian Day Number at midnight for (year, 1-indexed month, mday).
+    let (y, m) = if date.mon0 < 2 {
+        (date.year - 1, date.mon0 + 1 + 12)
+    } else {
+        (date.year, date.mon0 + 1)
+    };
+    let a = y / 100;
+    let b = 2 - a + (a / 4);
+    let jd = (365.25 * (y as f64 + 4716.0)).floor()
+        + (30.6001 * (m as f64 + 1.0)).floor()
+        + date.mday as f64
+        + b as f64
+        - 1524.5;
+    let days_since_epoch = (jd - 2_440_587.5).floor() as i64;
+    let secs = days_since_epoch * 86_400
+        + date.hour as i64 * 3_600
+        + date.min as i64 * 60;
+    secs - tz_offset_secs as i64
+}
+
+/// Convert a Unix timestamp to a `CivilDate`, applying a fixed TZ offset.
+///
+/// This is the inverse of `civil_to_unix` — the Rust equivalent of
+/// `Acore::Time::TimeBreakdown(t)` (which calls `localtime_r`).
+///
+/// Algorithm: Hinnant "chrono-Compatible Low-Level Date Algorithms", `civil_from_days`.
+/// `tz_offset_secs`: positive = east of UTC. Local time = UTC + tz_offset_secs.
+///
+/// **DST caveat:** uses a fixed offset.  If the server TZ has DST, the caller
+/// must supply the correct wall-clock offset for the given instant.
+/// Moved here from `resolve.rs` (Task 6) — calendar primitive belongs next to
+/// `CivilDate`.
+pub fn unix_to_civil(unix: i64, tz_offset_secs: i32) -> CivilDate {
+    // Shift to local time, then decompose.
+    let local = unix + tz_offset_secs as i64;
+
+    // Intraday seconds
+    let intraday = local.rem_euclid(86_400);
+    let hour = (intraday / 3_600) as i32;
+    let min = ((intraday % 3_600) / 60) as i32;
+
+    // Days since 1970-01-01
+    let days = (local - intraday) / 86_400;
+
+    // Convert days-since-epoch to (year, month, day).
+    // Shift epoch to 1 Mar 0000 (makes leap-year handling regular),
+    // then apply the 400/100/4-year cycle.
+    let z = days + 719_468; // shift to 1 Mar 0000
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // day of era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // year of era [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year [0, 365]
+    let mp = (5 * doy + 2) / 153; // month of year [0, 11] within [Mar,Feb]
+    let d = doy - (153 * mp + 2) / 5 + 1; // day [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let yr = if m <= 2 { y + 1 } else { y };
+
+    let mut date = CivilDate {
+        year: yr as i32,
+        mon0: (m - 1) as i32,
+        mday: d as i32,
+        hour,
+        min,
+        wday: 0,
+    };
+    normalize_date(&mut date);
+    date
+}
+
 // ── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
