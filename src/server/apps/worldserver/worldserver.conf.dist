@@ -4518,6 +4518,16 @@ Calendar.DeleteOldEventsHour = 6
 
 Event.Announce = 0
 
+#    GameEvent.SliceDriven
+#        Description: When enabled, the native GameEventMgr per-tick scheduler is
+#                     neutered and the Rust game-event-scheduler slice drives
+#                     world-event transitions via event.start / event.stop harness
+#                     primitives.  Reloadable via `.reload config` without restart.
+#        Default:     0 - (Disabled — native scheduler active, zero behavior change)
+#                     1 - (Enabled  — slice-driven; native Update loop returns early)
+
+GameEvent.SliceDriven = 0
+
 #
 ###################################################################################################
 

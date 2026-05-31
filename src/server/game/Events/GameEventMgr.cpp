@@ -1244,6 +1244,22 @@ uint32 GameEventMgr::StartSystem()                           // return the next 
 uint32 GameEventMgr::Update()                               // return the next event delay in ms
 {
     time_t currenttime = GameTime::GetGameTime().count();
+
+    // GES Inc-2: when slice-driven mode is ON, neuter the per-tick decision loop.
+    // The Rust game-event-scheduler slice drives transitions via event.start/event.stop
+    // harness primitives instead.  The early-return is skipped during StartSystem()
+    // (where _isSystemInit==false) so load-time initial activation + negative-event
+    // spawning (the !_isSystemInit branch below) remain intact.
+    // Default OFF — zero behavior change.  Reloadable via `.reload config`.
+    if (_isSystemInit && sWorld->getBoolConfig(CONFIG_GAMEEVENT_SLICE_DRIVEN))
+        return max_ge_check_delay * IN_MILLISECONDS;   // slice-driven: native per-tick decision off; reversible
+
+    // GES Inc-2 deadcheck: counts native StartEvent/StopEvent transitions fired by
+    // this Update path.  When SliceDriven is ON the early-return above prevents us
+    // reaching here; this counter must stay 0.  If it ever increments while ON,
+    // a LOG_ERROR fires as a live proof that the neuter was bypassed.
+    static uint64_t ge_native_transition_count = 0;
+
     uint32 nextEventDelay = max_ge_check_delay;             // 1 day
     uint32 calcDelay;
     std::set<uint16> activate, deactivate;
@@ -1308,13 +1324,29 @@ uint32 GameEventMgr::Update()                               // return the next e
     // a now activated event can contain a spawn of a to-be-deactivated one
     // following the activate - deactivate order, deactivating the first event later will leave the spawn in (wont disappear then reappear clientside)
     for (std::set<uint16>::iterator itr = activate.begin(); itr != activate.end(); ++itr)
+    {
         // start the event
         // returns true the started event completed
         // in that case, initiate next update in 1 second
         if (StartEvent(*itr))
             nextEventDelay = 0;
+        // GES Inc-2 deadcheck: native path fired a StartEvent transition.
+        ++ge_native_transition_count;
+        if (sWorld->getBoolConfig(CONFIG_GAMEEVENT_SLICE_DRIVEN))
+            LOG_ERROR("gameevent.deadcheck",
+                      "native GameEventMgr transition fired while slice-driven: "
+                      "StartEvent({}) — count={}", *itr, ge_native_transition_count);
+    }
     for (std::set<uint16>::iterator itr = deactivate.begin(); itr != deactivate.end(); ++itr)
+    {
         StopEvent(*itr);
+        // GES Inc-2 deadcheck: native path fired a StopEvent transition.
+        ++ge_native_transition_count;
+        if (sWorld->getBoolConfig(CONFIG_GAMEEVENT_SLICE_DRIVEN))
+            LOG_ERROR("gameevent.deadcheck",
+                      "native GameEventMgr transition fired while slice-driven: "
+                      "StopEvent({}) — count={}", *itr, ge_native_transition_count);
+    }
 
     LOG_DEBUG("gameevent", "Next game event check in {} seconds.", nextEventDelay + 1);
     return (nextEventDelay + 1) * IN_MILLISECONDS;           // Add 1 second to be sure event has started/stopped at next call

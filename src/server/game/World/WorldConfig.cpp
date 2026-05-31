@@ -348,6 +348,12 @@ void WorldConfig::BuildConfigCache()
 
     SetConfigValue<uint32>(CONFIG_EVENT_ANNOUNCE, "Event.Announce", 0);
 
+    // GES Inc-2: when true, native GameEventMgr per-tick scheduler is neutered and
+    // the Rust game-event-scheduler slice drives world-event transitions via
+    // event.start / event.stop harness primitives.  Default false (no behavior change).
+    // Reloadable: yes (default) — `.reload config` flips it live, no restart needed.
+    SetConfigValue<bool>(CONFIG_GAMEEVENT_SLICE_DRIVEN, "GameEvent.SliceDriven", false);
+
     SetConfigValue<float>(CONFIG_CREATURE_LEASH_RADIUS, "CreatureLeashRadius", 30.0f);
     SetConfigValue<float>(CONFIG_CREATURE_FAMILY_FLEE_ASSISTANCE_RADIUS, "CreatureFamilyFleeAssistanceRadius", 30.0f);
     SetConfigValue<float>(CONFIG_CREATURE_FAMILY_ASSISTANCE_RADIUS, "CreatureFamilyAssistanceRadius", 10.0f);
