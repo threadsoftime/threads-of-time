@@ -108,11 +108,16 @@ mod tests {
         "server_tz_offset_secs":0
     }"#;
 
-    /// Single-row `obs.query_db` response — null start_time.
-    const QUERY_DB_RESULT: &str = r#"[
-        {"eventEntry":1,"start_time":null,"end_time":1843316906,"occurence":525600,"length":20160,
-         "holiday":341,"holidayStage":1,"description":"d","world_event":0,"announce":2}
-    ]"#;
+    /// Single-row `obs.query_db` response — real live envelope shape (2026-05-31 verified).
+    /// result is an OBJECT `{ "row_count": <int>, "rows": [...] }`, NOT a bare array.
+    /// Row has BOTH start_time: null AND end_time: null (holiday row, eventEntry:1).
+    const QUERY_DB_RESULT: &str = r#"{
+        "row_count": 1,
+        "rows": [
+            {"eventEntry":1,"start_time":null,"end_time":null,"occurence":525600,"length":20160,
+             "holiday":341,"holidayStage":1,"description":"d","world_event":0,"announce":2}
+        ]
+    }"#;
 
     /// Spawn a minimal mock harness returning fixed payloads.
     async fn spawn_mock_harness() -> String {

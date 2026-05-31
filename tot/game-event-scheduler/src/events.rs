@@ -176,11 +176,21 @@ pub struct GameEventsResponse {
     pub result: GroundTruth,
 }
 
-/// Wrapper for `{ "ok": true, "result": [ <SqlGameEventRow>, ... ] }`.
+/// The `result` object returned by `obs.query_db`.
+///
+/// The real live wire shape is `{ "row_count": <int>, "rows": [ ... ] }`.
+/// We model only `rows`; serde ignores unknown fields by default, so
+/// `row_count` is silently skipped.
+#[derive(Debug, Deserialize)]
+pub struct QueryDbResult {
+    pub rows: Vec<SqlGameEventRow>,
+}
+
+/// Wrapper for `{ "ok": true, "result": { "row_count": <int>, "rows": [ ... ] } }`.
 #[derive(Debug, Deserialize)]
 pub struct SqlGameEventResponse {
     pub ok: bool,
-    pub result: Vec<SqlGameEventRow>,
+    pub result: QueryDbResult,
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -220,15 +230,21 @@ mod tests {
     /// Sample SQL row fixture (obs.query_db game_event_all).
     /// Uses camelCase keys as the DB returns them. `start_time` is null for
     /// event 1 (confirmed from live data: first row has `"start_time": null`).
+    ///
+    /// The REAL live wire shape (2026-05-31 verified) is:
+    /// `{ "ok": true, "result": { "row_count": <int>, "rows": [ ... ] } }`
     const SQL_ROWS_JSON: &str = r#"
     {
       "ok": true,
-      "result": [
-        {"eventEntry":1,"start_time":null,"end_time":1843316906,"occurence":525600,"length":20160,
-         "holiday":341,"holidayStage":1,"description":"Midsummer Fire Festival","world_event":0,"announce":2},
-        {"eventEntry":16,"start_time":1779033600,"end_time":1843316906,"occurence":10080,"length":4320,
-         "holiday":62,"holidayStage":1,"description":"Fireworks Spectacular","world_event":0,"announce":2}
-      ]
+      "result": {
+        "row_count": 2,
+        "rows": [
+          {"eventEntry":1,"start_time":null,"end_time":1843316906,"occurence":525600,"length":20160,
+           "holiday":341,"holidayStage":1,"description":"Midsummer Fire Festival","world_event":0,"announce":2},
+          {"eventEntry":16,"start_time":1779033600,"end_time":1843316906,"occurence":10080,"length":4320,
+           "holiday":62,"holidayStage":1,"description":"Fireworks Spectacular","world_event":0,"announce":2}
+        ]
+      }
     }"#;
 
     // ── GroundTruth deserialization ───────────────────────────────────────────
@@ -345,20 +361,20 @@ mod tests {
         let resp: SqlGameEventResponse = serde_json::from_str(SQL_ROWS_JSON)
             .expect("should parse SqlGameEventResponse");
         assert!(resp.ok);
-        assert_eq!(resp.result.len(), 2);
+        assert_eq!(resp.result.rows.len(), 2);
     }
 
     #[test]
     fn sql_row_camelcase_event_entry() {
         let resp: SqlGameEventResponse = serde_json::from_str(SQL_ROWS_JSON).unwrap();
-        assert_eq!(resp.result[0].event_entry, 1, "eventEntry should map to event_entry");
-        assert_eq!(resp.result[1].event_entry, 16);
+        assert_eq!(resp.result.rows[0].event_entry, 1, "eventEntry should map to event_entry");
+        assert_eq!(resp.result.rows[1].event_entry, 16);
     }
 
     #[test]
     fn sql_row_camelcase_holiday_stage() {
         let resp: SqlGameEventResponse = serde_json::from_str(SQL_ROWS_JSON).unwrap();
-        assert_eq!(resp.result[0].holiday_stage, 1, "holidayStage should map to holiday_stage");
+        assert_eq!(resp.result.rows[0].holiday_stage, 1, "holidayStage should map to holiday_stage");
     }
 
     #[test]
@@ -366,7 +382,7 @@ mod tests {
         let resp: SqlGameEventResponse = serde_json::from_str(SQL_ROWS_JSON).unwrap();
         // event 1 has null start_time
         assert!(
-            resp.result[0].start_time.is_none(),
+            resp.result.rows[0].start_time.is_none(),
             "null start_time should deserialize as None"
         );
     }
@@ -374,7 +390,7 @@ mod tests {
     #[test]
     fn sql_row_non_null_start_time() {
         let resp: SqlGameEventResponse = serde_json::from_str(SQL_ROWS_JSON).unwrap();
-        assert_eq!(resp.result[1].start_time, Some(1779033600));
+        assert_eq!(resp.result.rows[1].start_time, Some(1779033600));
     }
 
     // ── SqlGameEventRow → GameEventInput mapping ──────────────────────────────
@@ -382,7 +398,7 @@ mod tests {
     #[test]
     fn sql_row_to_game_event_input_null_start_becomes_zero() {
         let resp: SqlGameEventResponse = serde_json::from_str(SQL_ROWS_JSON).unwrap();
-        let row = resp.result[0].clone();
+        let row = resp.result.rows[0].clone();
         let input: GameEventInput = row.into();
         assert_eq!(input.start_time, 0, "null start_time → 0 in GameEventInput");
     }
@@ -390,7 +406,7 @@ mod tests {
     #[test]
     fn sql_row_to_game_event_input_fields() {
         let resp: SqlGameEventResponse = serde_json::from_str(SQL_ROWS_JSON).unwrap();
-        let row = resp.result[1].clone();
+        let row = resp.result.rows[1].clone();
         let input: GameEventInput = row.into();
         assert_eq!(input.entry, 16);
         assert_eq!(input.start_time, 1779033600);
@@ -404,7 +420,7 @@ mod tests {
     #[test]
     fn sql_row_to_game_event_input_state_is_normal() {
         let resp: SqlGameEventResponse = serde_json::from_str(SQL_ROWS_JSON).unwrap();
-        let input: GameEventInput = resp.result[0].clone().into();
+        let input: GameEventInput = resp.result.rows[0].clone().into();
         assert_eq!(
             input.state,
             GameEventState::Normal,
@@ -415,8 +431,34 @@ mod tests {
     #[test]
     fn sql_row_to_game_event_input_next_start_is_zero() {
         let resp: SqlGameEventResponse = serde_json::from_str(SQL_ROWS_JSON).unwrap();
-        let input: GameEventInput = resp.result[0].clone().into();
+        let input: GameEventInput = resp.result.rows[0].clone().into();
         assert_eq!(input.next_start, 0, "SQL rows have no next_start column → always 0");
+    }
+
+    // ── Both start_time and end_time null (holiday rows from live data) ────────
+
+    #[test]
+    fn sql_row_both_times_null_maps_to_zero_zero() {
+        // The real live first row (eventEntry:1 Midsummer Fire Festival) has BOTH
+        // start_time: null AND end_time: null (confirmed from live Heimdal 2026-05-31).
+        let json = r#"{
+          "ok": true,
+          "result": {
+            "row_count": 1,
+            "rows": [
+              {"eventEntry":1,"start_time":null,"end_time":null,"occurence":525600,"length":20160,
+               "holiday":341,"holidayStage":1,"description":"Midsummer Fire Festival","world_event":0,"announce":2}
+            ]
+          }
+        }"#;
+        let resp: SqlGameEventResponse = serde_json::from_str(json)
+            .expect("should parse row with both timestamps null");
+        let row = resp.result.rows[0].clone();
+        assert!(row.start_time.is_none(), "start_time should be None");
+        assert!(row.end_time.is_none(), "end_time should be None");
+        let input: GameEventInput = row.into();
+        assert_eq!(input.start_time, 0, "null start_time → 0");
+        assert_eq!(input.end_time, 0, "null end_time → 0");
     }
 
     // ── GroundTruthEvent → ResolvedEvent mapping ──────────────────────────────

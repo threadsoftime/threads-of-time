@@ -34,7 +34,7 @@
 use reqwest::Client;
 use serde_json::{json, Value};
 
-use crate::events::{GroundTruth, SqlGameEventRow};
+use crate::events::{GroundTruth, QueryDbResult};
 use crate::resolve::GameEventInput;
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -161,8 +161,10 @@ impl Harness {
     /// Fetch `obs.query_db` with the `game_event_all` template and deserialize
     /// each row to [`GameEventInput`].
     ///
-    /// The raw SQL rows are deserialized as [`SqlGameEventRow`] then mapped via
-    /// `From` to [`GameEventInput`] (null timestamps become 0).
+    /// The real live `obs.query_db` result is an OBJECT `{ "row_count": <int>, "rows": [...] }`,
+    /// NOT a bare array. We deserialize via [`QueryDbResult`] (which models only `rows`
+    /// and ignores `row_count`) then map each [`SqlGameEventRow`] via `From` to
+    /// [`GameEventInput`] (null timestamps become 0).
     pub async fn query_game_events(&self) -> Result<Vec<GameEventInput>, HarnessError> {
         let result = self
             .call(
@@ -170,9 +172,9 @@ impl Harness {
                 json!({"template_name": "game_event_all", "params": {}}),
             )
             .await?;
-        let rows: Vec<SqlGameEventRow> = serde_json::from_value(result)
+        let db_result: QueryDbResult = serde_json::from_value(result)
             .map_err(|e| HarnessError::Shape(format!("obs.query_db deserialize: {e}")))?;
-        Ok(rows.into_iter().map(GameEventInput::from).collect())
+        Ok(db_result.rows.into_iter().map(GameEventInput::from).collect())
     }
 }
 
@@ -205,11 +207,17 @@ mod tests {
         "server_tz_offset_secs":0
     }"#;
 
-    /// Fixed `obs.query_db` response — one row with null `start_time`.
-    const QUERY_DB_RESULT: &str = r#"[
-        {"eventEntry":1,"start_time":null,"end_time":1843316906,"occurence":525600,"length":20160,
-         "holiday":341,"holidayStage":1,"description":"d","world_event":0,"announce":2}
-    ]"#;
+    /// Fixed `obs.query_db` response — the REAL live envelope shape (2026-05-31 verified).
+    ///
+    /// The real `result` is an object `{ "row_count": <int>, "rows": [...] }`, NOT a bare array.
+    /// Row has BOTH `start_time: null` AND `end_time: null` (holiday row, eventEntry:1).
+    const QUERY_DB_RESULT: &str = r#"{
+        "row_count": 1,
+        "rows": [
+            {"eventEntry":1,"start_time":null,"end_time":null,"occurence":525600,"length":20160,
+             "holiday":341,"holidayStage":1,"description":"d","world_event":0,"announce":2}
+        ]
+    }"#;
 
     /// State shared by the mock axum handlers.
     #[derive(Clone)]
@@ -353,11 +361,24 @@ mod tests {
         let inputs = h.query_game_events().await.unwrap();
         let inp = &inputs[0];
         assert_eq!(inp.entry, 1);
-        assert_eq!(inp.end_time, 1843316906);
+        // The mock row has end_time: null (holiday row) → maps to 0
+        assert_eq!(inp.end_time, 0);
         assert_eq!(inp.occurence, 525600);
         assert_eq!(inp.length, 20160);
         assert_eq!(inp.holiday, 341);
         assert_eq!(inp.holiday_stage, 1);
+    }
+
+    #[tokio::test]
+    async fn query_game_events_both_times_null_map_to_zero() {
+        // The real live holiday rows (e.g. eventEntry:1) have BOTH
+        // start_time: null AND end_time: null. The mock QUERY_DB_RESULT uses
+        // this shape — confirm both map to 0 in GameEventInput.
+        let base_url = spawn_mock().await;
+        let h = Harness::new(base_url, "test-token");
+        let inputs = h.query_game_events().await.unwrap();
+        assert_eq!(inputs[0].start_time, 0, "null start_time should map to 0");
+        assert_eq!(inputs[0].end_time, 0, "null end_time should map to 0");
     }
 
     // ── HarnessError::Tool (422 ok:false) ─────────────────────────────────────
