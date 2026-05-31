@@ -92,7 +92,7 @@ impl CheckResult {
     }
 }
 
-/// Why a particular event was excluded from the active-set check.
+/// Why a particular event was excluded from the active-set check or the resolution check.
 ///
 /// Excluded events are counted separately; they do NOT contribute to
 /// `active_set.checked` or `active_set.matched`.  Their C++ `is_active`
@@ -103,9 +103,19 @@ pub enum ExclusionReason {
     /// These are condition-driven, timer-driven, or sticky via GM command — NOT calendar
     /// date math.  C++ `is_active` is sticky; Rust date math cannot predict it.
     NonNormalState,
-    /// NORMAL state + no holiday + raw_start == raw_end AND raw_end < resolve_reference.
-    /// These are GM-started events where `StartEvent(overwrite=true)` rebases `Start → boot`.
-    /// The raw SQL start/end are far in the past and equal — not date-predictable.
+    /// NORMAL state + no holiday + raw `start_time` and `end_time` are BOTH `Some`,
+    /// equal to each other, and less than `resolve_reference`.
+    ///
+    /// These are GM-started events where `StartEvent(overwrite=true)` rebases
+    /// `Start → boot`.  The raw SQL start/end are non-null, equal, and far in the
+    /// past — not date-predictable.
+    ///
+    /// **Null/null events are NOT ManualStart** — a NULL start or NULL end means
+    /// C++ uses a date-math default (start=0, end=resolve_ref+2yr) and the event
+    /// participates in date-scheduled active-set checking normally.
+    ///
+    /// Live example: event 60 (raw start_time=Some(946735200), end_time=Some(946735200),
+    /// both far past 946735200 << resolve_ref ~1780244906).
     ManualStart,
 }
 
@@ -149,6 +159,14 @@ pub struct ShadowReport {
     /// CHECK 1 — date math results.
     pub date_math: CheckResult,
     /// CHECK 2 — resolution results.
+    ///
+    /// **Scope:** ManualStart events are excluded from resolution checking too.
+    /// Event 60's start/end are GM-rebased (`StartEvent overwrite=true`) and
+    /// not date-predictable, so start/end mismatches from ManualStart events
+    /// are expected and out-of-scope.  See `resolution_exclusions` for the list.
+    /// NonNormalState events' resolution is kept IN scope — for Internal events
+    /// C++ retains the raw loaded start/end which the resolver reproduces; only
+    /// ManualStart needs resolution exclusion.
     pub resolution: CheckResult,
     /// CHECK 3 — active-set results (primary Inc-1 exit gate).
     ///
@@ -156,7 +174,13 @@ pub struct ShadowReport {
     /// date-scheduled (not a GM-started / manual-start event) contribute to
     /// `checked` and `matched`.  See `active_set_exclusions` for the rest.
     pub active_set: CheckResult,
-    /// Events excluded from the active-set check, with reasons.
+    /// Events excluded from the resolution check (CHECK 2), with reasons.
+    ///
+    /// Currently only `ManualStart` events are excluded from resolution.
+    /// Their raw start/end are GM-rebased and not date-predictable; any
+    /// resolution mismatch is expected rather than indicative of a Rust bug.
+    pub resolution_exclusions: Vec<ExcludedEvent>,
+    /// Events excluded from the active-set check (CHECK 3), with reasons.
     ///
     /// These events are NOT counted in `active_set.checked`.  C++ `is_active`
     /// is accepted as authoritative for them; no date-math prediction is made.
@@ -190,6 +214,37 @@ fn gen_year_from_unix(unix: i64, tz_offset_secs: i32) -> i32 {
     unix_to_civil(unix, tz_offset_secs).year
 }
 
+/// Determine whether an event is a ManualStart.
+///
+/// **ManualStart** ⇔ `state == Normal` AND `holiday == 0` AND `raw_start_time` is
+/// `Some(t)` AND `raw_end_time` is `Some(t)` (both non-null, equal) AND `t < resolve_ref`.
+///
+/// These are GM-started events where `StartEvent(overwrite=true)` rebases
+/// `Start → boot`.  The raw SQL timestamps are non-null, equal, and far in the
+/// past — not date-predictable.
+///
+/// **Critical: null/null events are NOT ManualStart.**  If either `raw_start_time` or
+/// `raw_end_time` is `None`, the event uses C++ null-default math
+/// (start=0, end=resolve_ref+2yr) and participates in date-scheduled checking.
+/// The ManualStart check MUST key off the raw `Option<i64>` values, NOT the
+/// post-`effective_*` materialized integers (which would map None→0 and could
+/// create false equality).
+///
+/// Live example of a real ManualStart: event 60 has
+/// `raw_start_time=Some(946735200)`, `raw_end_time=Some(946735200)` — both
+/// non-null, equal, and far before `resolve_reference_unixtime ≈ 1780244906`.
+fn is_manual_start(row: &GameEventInput, resolve_ref: i64) -> bool {
+    use crate::schedule::GameEventState;
+    if row.state != GameEventState::Normal || row.holiday != 0 {
+        return false;
+    }
+    // Both timestamps must be Some, equal, and before the resolve reference.
+    match (row.start_time, row.end_time) {
+        (Some(s), Some(e)) => s == e && e < resolve_ref,
+        _ => false, // None on either side → date-scheduled, NOT manual-start
+    }
+}
+
 /// Determine whether an event should be excluded from the active-set date-math check.
 ///
 /// Returns `Some(reason)` if excluded, `None` if in-scope.
@@ -202,11 +257,16 @@ fn gen_year_from_unix(unix: i64, tz_offset_secs: i32) -> i32 {
 /// states are condition/timer-driven.  C++ `is_active` is authoritative for these.
 ///
 /// **(b) Manual-start events:**
-/// `state == Normal` + `holiday == 0` + `raw_start == raw_end && raw_end < resolve_ref`.
+/// `state == Normal` + `holiday == 0` + `raw_start_time == raw_end_time` (both
+/// `Some`, equal) AND `raw_end_time.unwrap() < resolve_ref`.
 /// These are events started by GM command (`StartEvent overwrite=true` rebases
-/// `Start → boot`).  The raw SQL start/end are equal and far in the past — the
-/// date math cannot predict whether they are currently running.
-/// Live example: event 60 (raw start == end == 946735200, far past).
+/// `Start → boot`).  The raw SQL start/end are non-null, equal, and far in the
+/// past — the date math cannot predict whether they are currently running.
+/// Live example: event 60 (raw start_time=Some(946735200), end_time=Some(946735200)).
+///
+/// Null/null events (raw_start_time=None, raw_end_time=None) are **in scope** —
+/// they use C++ null-default math (start=0, end=resolve_ref+2yr) and ARE
+/// date-schedulable.
 ///
 /// ## Why scoping does NOT hide date-math bugs
 ///
@@ -218,8 +278,6 @@ fn gen_year_from_unix(unix: i64, tz_offset_secs: i32) -> i32 {
 /// are testing.
 fn active_set_exclusion_reason(
     row: &GameEventInput,
-    row_start: i64,
-    row_end: i64,
     resolve_ref: i64,
 ) -> Option<ExclusionReason> {
     use crate::schedule::GameEventState;
@@ -227,8 +285,28 @@ fn active_set_exclusion_reason(
     if row.state != GameEventState::Normal {
         return Some(ExclusionReason::NonNormalState);
     }
-    // (b) Manual-start: NORMAL + no holiday + raw_start == raw_end AND raw_end < resolve_ref
-    if row.holiday == 0 && row_start == row_end && row_end < resolve_ref {
+    // (b) Manual-start: keys off RAW Option<i64> values — see is_manual_start
+    if is_manual_start(row, resolve_ref) {
+        return Some(ExclusionReason::ManualStart);
+    }
+    None
+}
+
+/// Determine whether an event should be excluded from the resolution check (CHECK 2).
+///
+/// Returns `Some(reason)` if excluded, `None` if in-scope.
+///
+/// Only `ManualStart` events are excluded from resolution — their start/end are
+/// GM-rebased and not date-predictable, so any resolution mismatch is expected.
+/// NonNormalState events' resolution is kept IN scope: for Internal events C++
+/// retains the raw loaded start/end, which the Rust resolver reproduces, so they
+/// match; if an Internal event's resolution unexpectedly mismatches, that is a real
+/// bug that should surface.
+fn resolution_exclusion_reason(
+    row: &GameEventInput,
+    resolve_ref: i64,
+) -> Option<ExclusionReason> {
+    if is_manual_start(row, resolve_ref) {
         return Some(ExclusionReason::ManualStart);
     }
     None
@@ -356,6 +434,7 @@ pub fn compute_report(
     let mut date_math = CheckResult::new();
     let mut resolution = CheckResult::new();
     let mut active_set = CheckResult::new();
+    let mut resolution_exclusions: Vec<ExcludedEvent> = Vec::new();
     let mut active_set_exclusions: Vec<ExcludedEvent> = Vec::new();
     let mut mismatches: Vec<Mismatch> = Vec::new();
 
@@ -422,75 +501,86 @@ pub fn compute_report(
 
         // --- CHECK 2: Resolution ---
         // Compare Rust-resolved {start, end, occurence, length} to gt.events[entry].
+        // ManualStart events are excluded: their start/end are GM-rebased and not
+        // date-predictable; resolution mismatches are expected and out-of-scope.
+        // NonNormalState events' resolution is kept IN scope — Internal events'
+        // C++ start/end match the raw loaded values that the resolver reproduces.
         if let Some(&cpp_ev) = gt_event_by_entry.get(&row.entry) {
             let is_holiday = row.holiday != 0;
 
-            // occurence and length: exact for both periodic and holiday.
-            let occ_match = rust_resolved.occurence == cpp_ev.occurence;
-            resolution.record(occ_match);
-            if !occ_match {
-                mismatches.push(Mismatch {
-                    kind: CheckKind::Resolution,
-                    key: key.clone(),
-                    field: "occurence".into(),
-                    rust: rust_resolved.occurence.to_string(),
-                    cpp: cpp_ev.occurence.to_string(),
-                });
-            }
+            match resolution_exclusion_reason(row, gt.resolve_reference_unixtime) {
+                Some(reason) => {
+                    resolution_exclusions.push(ExcludedEvent { entry: row.entry, reason });
+                }
+                None => {
+                    // occurence and length: exact for both periodic and holiday.
+                    let occ_match = rust_resolved.occurence == cpp_ev.occurence;
+                    resolution.record(occ_match);
+                    if !occ_match {
+                        mismatches.push(Mismatch {
+                            kind: CheckKind::Resolution,
+                            key: key.clone(),
+                            field: "occurence".into(),
+                            rust: rust_resolved.occurence.to_string(),
+                            cpp: cpp_ev.occurence.to_string(),
+                        });
+                    }
 
-            let len_match = rust_resolved.length == cpp_ev.length;
-            resolution.record(len_match);
-            if !len_match {
-                mismatches.push(Mismatch {
-                    kind: CheckKind::Resolution,
-                    key: key.clone(),
-                    field: "length".into(),
-                    rust: rust_resolved.length.to_string(),
-                    cpp: cpp_ev.length.to_string(),
-                });
-            }
+                    let len_match = rust_resolved.length == cpp_ev.length;
+                    resolution.record(len_match);
+                    if !len_match {
+                        mismatches.push(Mismatch {
+                            kind: CheckKind::Resolution,
+                            key: key.clone(),
+                            field: "length".into(),
+                            rust: rust_resolved.length.to_string(),
+                            cpp: cpp_ev.length.to_string(),
+                        });
+                    }
 
-            // start and end: diagnostic for holiday events (reference-time-dependent),
-            // exact for periodic events (pure copy of DB columns).
-            let start_match = rust_resolved.start == cpp_ev.start;
-            resolution.record(start_match);
-            if !start_match {
-                let field_name = if is_holiday {
-                    "start[holiday-diagnostic]"
-                } else {
-                    "start"
-                };
-                mismatches.push(Mismatch {
-                    kind: CheckKind::Resolution,
-                    key: key.clone(),
-                    field: field_name.into(),
-                    rust: rust_resolved.start.to_string(),
-                    cpp: cpp_ev.start.to_string(),
-                });
-            }
+                    // start and end: diagnostic for holiday events (reference-time-dependent),
+                    // exact for periodic events (pure copy of DB columns).
+                    let start_match = rust_resolved.start == cpp_ev.start;
+                    resolution.record(start_match);
+                    if !start_match {
+                        let field_name = if is_holiday {
+                            "start[holiday-diagnostic]"
+                        } else {
+                            "start"
+                        };
+                        mismatches.push(Mismatch {
+                            kind: CheckKind::Resolution,
+                            key: key.clone(),
+                            field: field_name.into(),
+                            rust: rust_resolved.start.to_string(),
+                            cpp: cpp_ev.start.to_string(),
+                        });
+                    }
 
-            let end_match = rust_resolved.end == cpp_ev.end;
-            resolution.record(end_match);
-            if !end_match {
-                let field_name = if is_holiday {
-                    "end[holiday-diagnostic]"
-                } else {
-                    "end"
-                };
-                mismatches.push(Mismatch {
-                    kind: CheckKind::Resolution,
-                    key: key.clone(),
-                    field: field_name.into(),
-                    rust: rust_resolved.end.to_string(),
-                    cpp: cpp_ev.end.to_string(),
-                });
+                    let end_match = rust_resolved.end == cpp_ev.end;
+                    resolution.record(end_match);
+                    if !end_match {
+                        let field_name = if is_holiday {
+                            "end[holiday-diagnostic]"
+                        } else {
+                            "end"
+                        };
+                        mismatches.push(Mismatch {
+                            kind: CheckKind::Resolution,
+                            key: key.clone(),
+                            field: field_name.into(),
+                            rust: rust_resolved.end.to_string(),
+                            cpp: cpp_ev.end.to_string(),
+                        });
+                    }
+                }
             }
 
             // --- CHECK 3: ActiveSet ---
             // Scope: only check events where state==Normal AND not a GM-started event.
             // Excluded events are logged to active_set_exclusions but NOT counted in
             // active_set.checked — their C++ is_active is accepted as authoritative.
-            match active_set_exclusion_reason(row, row_start, row_end, gt.resolve_reference_unixtime) {
+            match active_set_exclusion_reason(row, gt.resolve_reference_unixtime) {
                 Some(reason) => {
                     active_set_exclusions.push(ExcludedEvent { entry: row.entry, reason });
                 }
@@ -540,6 +630,7 @@ pub fn compute_report(
         date_math,
         resolution,
         active_set,
+        resolution_exclusions,
         active_set_exclusions,
         mismatches,
     }
@@ -1324,5 +1415,304 @@ mod tests {
             json.contains("active_set_exclusions"),
             "serialized JSON must contain active_set_exclusions field"
         );
+        assert!(
+            json.contains("resolution_exclusions"),
+            "serialized JSON must contain resolution_exclusions field"
+        );
+    }
+
+    // ── ManualStart predicate: null/null is NOT ManualStart ───────────────────
+    //
+    // A null/null event (raw start_time=None, end_time=None) must NOT be excluded.
+    // With effective_* applied: start=0, end=resolve_ref+63072000 — the event is
+    // date-scheduled and must participate in active-set and resolution checking.
+
+    /// Build a `GameEventInput` with null start_time AND null end_time.
+    fn make_raw_null_null(entry: u16) -> GameEventInput {
+        GameEventInput {
+            entry,
+            start_time: None,
+            end_time: None,
+            occurence: 525_600,
+            length: 20_160,
+            holiday: 0,
+            holiday_stage: 0,
+            state: GameEventState::Normal,
+            next_start: 0,
+        }
+    }
+
+    // ── (h) null/null event is in-scope (NOT ManualStart) ─────────────────────
+
+    #[test]
+    fn null_null_event_is_not_manual_start_stays_in_scope() {
+        // Event 80: Normal, holiday=0, raw start_time=None, end_time=None.
+        // effective_start(None)=0, effective_end(None, RESOLVE_REF)=RESOLVE_REF+63_072_000.
+        // is_active: start=0 < SERVER_GAMETIME, so elapsed = SERVER_GAMETIME - 0.
+        // elapsed % (525600*60) and length*60: with occ=525600min, len=20160min...
+        // occ_secs=31536000, elapsed=SERVER_GAMETIME=1780394400 >> 31536000.
+        // elapsed % 31536000 = 1780394400 % 31536000. Let's compute:
+        // 1780394400 / 31536000 ≈ 56.45. remainder ≈ 0.45 * 31536000 ≈ 14191200.
+        // len_secs = 20160 * 60 = 1209600. 14191200 > 1209600 → INACTIVE.
+        // The point of the test is that it is IN SCOPE (checked), not its activity value.
+        // We set the C++ ground truth to match Rust's computation.
+        let raw = make_raw_null_null(80);
+        let row_start = crate::resolve::effective_start(raw.start_time);
+        let row_end = crate::resolve::effective_end(raw.end_time, RESOLVE_REF);
+        let rust_resolved = crate::resolve::resolve_periodic_event(&raw, row_start, row_end);
+        let rust_active = crate::schedule::is_active(&rust_resolved, SERVER_GAMETIME, |_| None);
+
+        let gt = GroundTruth {
+            events: vec![make_gt_event(80, rust_resolved.start, rust_resolved.end, rust_resolved.occurence, rust_resolved.length, rust_active)],
+            active_event_list: if rust_active { vec![80] } else { vec![] },
+            holidays: vec![],
+            server_gametime: SERVER_GAMETIME,
+            resolve_reference_unixtime: RESOLVE_REF,
+            server_tz_offset_secs: 0,
+        };
+        let raw_events = vec![raw];
+
+        let rules = holiday_rules();
+        let report = compute_report(&gt, &raw_events, rules);
+
+        // Must NOT be in active_set_exclusions
+        let excluded_80 = report.active_set_exclusions.iter().find(|e| e.entry == 80);
+        assert!(excluded_80.is_none(), "null/null event must NOT be excluded from active-set");
+
+        // Must NOT be in resolution_exclusions
+        let res_excluded_80 = report.resolution_exclusions.iter().find(|e| e.entry == 80);
+        assert!(res_excluded_80.is_none(), "null/null event must NOT be excluded from resolution");
+
+        // Must contribute to active_set.checked (×2 for vs_field + vs_list)
+        assert!(report.active_set.checked >= 2, "null/null event must be counted in active_set.checked");
+
+        // Must have zero active_set mismatches (we set gt to match Rust)
+        assert_eq!(report.active_set.mismatches(), 0, "null/null event with matching gt must have zero active_set mismatches");
+    }
+
+    // ── (i) null/null event that is date-active is checked and matches ─────────
+
+    #[test]
+    fn null_null_event_date_active_is_checked_and_matches() {
+        // Craft a null/null event that is ACTIVE at SERVER_GAMETIME.
+        // effective_start = 0. We need elapsed % occ_secs < len_secs.
+        // Use occ=YEAR (525600 min, 31536000 sec), len=len such that the
+        // remainder from SERVER_GAMETIME is within it.
+        // elapsed_in_period = SERVER_GAMETIME % 31536000 = 1780394400 % 31536000.
+        // 1780394400 / 31536000 = 56 remainder = 1780394400 - 56*31536000 = 1780394400 - 1766016000 = 14378400.
+        // So we need length * 60 > 14378400, i.e., length > 239640 minutes = ~166.4 days.
+        // Use length = 400000 minutes (> 277 days) so elapsed_in_period < len_secs.
+        let raw = GameEventInput {
+            entry: 81,
+            start_time: None,
+            end_time: None,
+            occurence: 525_600,
+            length: 400_000,   // huge window → active
+            holiday: 0,
+            holiday_stage: 0,
+            state: GameEventState::Normal,
+            next_start: 0,
+        };
+        let row_start = crate::resolve::effective_start(raw.start_time);
+        let row_end = crate::resolve::effective_end(raw.end_time, RESOLVE_REF);
+        let rust_resolved = crate::resolve::resolve_periodic_event(&raw, row_start, row_end);
+        let rust_active = crate::schedule::is_active(&rust_resolved, SERVER_GAMETIME, |_| None);
+
+        // With length=400000min (> 239640 remainder), Rust should compute is_active=true.
+        assert!(rust_active, "fixture design: null/null event with length=400000 should be active at SERVER_GAMETIME");
+
+        let gt = GroundTruth {
+            events: vec![make_gt_event(81, rust_resolved.start, rust_resolved.end, rust_resolved.occurence, rust_resolved.length, true)],
+            active_event_list: vec![81],
+            holidays: vec![],
+            server_gametime: SERVER_GAMETIME,
+            resolve_reference_unixtime: RESOLVE_REF,
+            server_tz_offset_secs: 0,
+        };
+        let raw_events = vec![raw];
+
+        let rules = holiday_rules();
+        let report = compute_report(&gt, &raw_events, rules);
+
+        // Active-set: event 81 must be checked (×2) and have zero mismatches
+        assert!(report.active_set.checked >= 2, "null/null active event must contribute to active_set.checked");
+        assert_eq!(report.active_set.mismatches(), 0, "null/null active event with matching gt must have zero mismatches");
+
+        // Not in any exclusion list
+        assert!(!report.active_set_exclusions.iter().any(|e| e.entry == 81), "event 81 must not be in active_set_exclusions");
+        assert!(!report.resolution_exclusions.iter().any(|e| e.entry == 81), "event 81 must not be in resolution_exclusions");
+    }
+
+    // ── (j) ManualStart excluded from BOTH active-set AND resolution ──────────
+
+    #[test]
+    fn manual_start_excluded_from_both_active_set_and_resolution() {
+        // Event 60: state=Normal, holiday=0, raw start_time=Some(gm_ts), end_time=Some(gm_ts),
+        // both far past (946735200 << RESOLVE_REF ~1780394400). → ManualStart.
+        // C++ says is_active=true AND reports mismatched start/end in resolution.
+        // Both checks should exclude this event — not count it as a mismatch.
+        let gm_ts: i64 = 946_735_200;
+
+        // Give the gt event a different start/end from what Rust would compute,
+        // to confirm that resolution does NOT fire a mismatch (it's excluded).
+        let cpp_start = gm_ts + 1000; // deliberately different from Rust's effective_start
+        let cpp_end   = gm_ts + 2000; // deliberately different from Rust's effective_end
+
+        let gt = GroundTruth {
+            events: vec![
+                make_gt_event(60, cpp_start, cpp_end, 525_600, 20_160, true),
+            ],
+            active_event_list: vec![60],
+            holidays: vec![],
+            server_gametime: SERVER_GAMETIME,
+            resolve_reference_unixtime: RESOLVE_REF,
+            server_tz_offset_secs: 0,
+        };
+
+        // raw row: both Some, equal, < RESOLVE_REF → ManualStart
+        let raw_events = vec![
+            make_raw_periodic(60, gm_ts, gm_ts, 525_600, 20_160),
+        ];
+
+        let rules = holiday_rules();
+        let report = compute_report(&gt, &raw_events, rules);
+
+        // active_set: excluded, not checked
+        assert_eq!(report.active_set.checked, 0, "ManualStart must not contribute to active_set.checked");
+        assert_eq!(report.active_set.mismatches(), 0, "ManualStart must not produce active_set mismatch");
+        assert_eq!(report.active_set_exclusions.len(), 1, "one active_set exclusion expected");
+        assert_eq!(report.active_set_exclusions[0].entry, 60);
+        assert!(
+            matches!(report.active_set_exclusions[0].reason, ExclusionReason::ManualStart),
+            "active_set exclusion reason must be ManualStart"
+        );
+
+        // resolution: excluded, not checked, NO mismatch despite deliberately different start/end in gt
+        assert_eq!(report.resolution.checked, 0, "ManualStart must not contribute to resolution.checked");
+        assert_eq!(report.resolution.mismatches(), 0, "ManualStart must not produce resolution mismatch (even though gt start/end differ)");
+        assert_eq!(report.resolution_exclusions.len(), 1, "one resolution exclusion expected");
+        assert_eq!(report.resolution_exclusions[0].entry, 60);
+        assert!(
+            matches!(report.resolution_exclusions[0].reason, ExclusionReason::ManualStart),
+            "resolution exclusion reason must be ManualStart"
+        );
+
+        // No mismatches of any kind
+        assert!(report.mismatches.is_empty(), "no mismatches for a ManualStart-only fixture");
+    }
+
+    // ── (k) Some(a) start with None end is NOT ManualStart ───────────────────
+
+    #[test]
+    fn some_start_none_end_is_not_manual_start() {
+        // An event with a real start_time but null end_time is NOT ManualStart.
+        // The null end gets materialized to resolve_ref+2yr and the event is
+        // date-scheduled.
+        let real_start: i64 = SERVER_GAMETIME - 3600; // 1 hour ago
+        let raw = GameEventInput {
+            entry: 82,
+            start_time: Some(real_start),
+            end_time: None,
+            occurence: 525_600,
+            length: 20_160,
+            holiday: 0,
+            holiday_stage: 0,
+            state: GameEventState::Normal,
+            next_start: 0,
+        };
+
+        let row_start = crate::resolve::effective_start(raw.start_time);
+        let row_end = crate::resolve::effective_end(raw.end_time, RESOLVE_REF);
+        let rust_resolved = crate::resolve::resolve_periodic_event(&raw, row_start, row_end);
+        let rust_active = crate::schedule::is_active(&rust_resolved, SERVER_GAMETIME, |_| None);
+
+        let gt = GroundTruth {
+            events: vec![make_gt_event(82, rust_resolved.start, rust_resolved.end, rust_resolved.occurence, rust_resolved.length, rust_active)],
+            active_event_list: if rust_active { vec![82] } else { vec![] },
+            holidays: vec![],
+            server_gametime: SERVER_GAMETIME,
+            resolve_reference_unixtime: RESOLVE_REF,
+            server_tz_offset_secs: 0,
+        };
+        let raw_events = vec![raw];
+
+        let rules = holiday_rules();
+        let report = compute_report(&gt, &raw_events, rules);
+
+        // Must NOT be excluded
+        assert!(!report.active_set_exclusions.iter().any(|e| e.entry == 82),
+            "Some(start)+None(end) event must NOT be ManualStart-excluded from active_set");
+        assert!(!report.resolution_exclusions.iter().any(|e| e.entry == 82),
+            "Some(start)+None(end) event must NOT be ManualStart-excluded from resolution");
+
+        // Must be checked in active_set
+        assert!(report.active_set.checked >= 2, "Some(start)+None(end) event must be counted in active_set.checked");
+        assert_eq!(report.active_set.mismatches(), 0, "matching gt must yield zero mismatches");
+    }
+
+    // ── (l) ManualStart: None+None → not excluded; Some(t)/Some(t) past → excluded ──
+
+    #[test]
+    fn manual_start_requires_both_some_and_equal_and_past() {
+        // Three events tested in isolation via is_manual_start:
+        //   event A: None/None → NOT ManualStart (date-scheduled)
+        //   event B: Some(t)/Some(t), t < RESOLVE_REF → ManualStart
+        //   event C: Some(t)/Some(t+1), t < RESOLVE_REF → NOT ManualStart (unequal)
+
+        let gm_ts: i64 = 946_735_200;
+
+        // Event A: null/null → in-scope
+        let ev_a = make_raw_null_null(90);
+        assert!(!is_manual_start(&ev_a, RESOLVE_REF), "null/null must NOT be ManualStart");
+
+        // Event B: Some(gm_ts)/Some(gm_ts) → ManualStart
+        let ev_b = make_raw_periodic(91, gm_ts, gm_ts, 525_600, 20_160);
+        assert!(is_manual_start(&ev_b, RESOLVE_REF), "Some(t)==Some(t), t<ref must be ManualStart");
+
+        // Event C: Some(gm_ts)/Some(gm_ts+1) → NOT ManualStart (unequal)
+        let ev_c = make_raw_periodic(92, gm_ts, gm_ts + 1, 525_600, 20_160);
+        assert!(!is_manual_start(&ev_c, RESOLVE_REF), "Some(t)!=Some(t+1) must NOT be ManualStart");
+
+        // Event D: Some(gm_ts)/None → NOT ManualStart
+        let ev_d = GameEventInput {
+            entry: 93,
+            start_time: Some(gm_ts),
+            end_time: None,
+            occurence: 525_600,
+            length: 20_160,
+            holiday: 0,
+            holiday_stage: 0,
+            state: GameEventState::Normal,
+            next_start: 0,
+        };
+        assert!(!is_manual_start(&ev_d, RESOLVE_REF), "Some(start)+None(end) must NOT be ManualStart");
+
+        // Event E: None/Some(gm_ts) → NOT ManualStart
+        let ev_e = GameEventInput {
+            entry: 94,
+            start_time: None,
+            end_time: Some(gm_ts),
+            occurence: 525_600,
+            length: 20_160,
+            holiday: 0,
+            holiday_stage: 0,
+            state: GameEventState::Normal,
+            next_start: 0,
+        };
+        assert!(!is_manual_start(&ev_e, RESOLVE_REF), "None(start)+Some(end) must NOT be ManualStart");
+
+        // Event F: Some(gm_ts)/Some(gm_ts), holiday != 0 → NOT ManualStart
+        let ev_f = GameEventInput {
+            entry: 95,
+            start_time: Some(gm_ts),
+            end_time: Some(gm_ts),
+            occurence: 525_600,
+            length: 20_160,
+            holiday: 62,   // has a holiday → not manual-start
+            holiday_stage: 1,
+            state: GameEventState::Normal,
+            next_start: 0,
+        };
+        assert!(!is_manual_start(&ev_f, RESOLVE_REF), "holiday event must NOT be ManualStart even if start==end");
     }
 }
