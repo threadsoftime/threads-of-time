@@ -158,6 +158,32 @@ impl Harness {
             .map_err(|e| HarnessError::Shape(format!("obs.game_events deserialize: {e}")))
     }
 
+    /// Call `event.start` to activate a game event on the server.
+    ///
+    /// `event_id` — the entry ID of the game event to start.
+    ///
+    /// Returns the raw `result` value from the harness envelope on success.
+    /// The caller may inspect `result["is_active_now"]` if needed; the drive step
+    /// only needs to know the call succeeded (no error).
+    ///
+    /// Wire: `POST /v1/tools/event.start` with `{ "event_id": <event_id> }`.
+    /// Expected result: `{ "started": true, "event_id": <event_id>, "is_active_now": <bool> }`.
+    pub async fn event_start(&self, event_id: u16) -> Result<Value, HarnessError> {
+        self.call("event.start", json!({"event_id": event_id})).await
+    }
+
+    /// Call `event.stop` to deactivate a game event on the server.
+    ///
+    /// `event_id` — the entry ID of the game event to stop.
+    ///
+    /// Returns the raw `result` value from the harness envelope on success.
+    ///
+    /// Wire: `POST /v1/tools/event.stop` with `{ "event_id": <event_id> }`.
+    /// Expected result: `{ "stopped": true, "event_id": <event_id>, "is_active_now": <bool> }`.
+    pub async fn event_stop(&self, event_id: u16) -> Result<Value, HarnessError> {
+        self.call("event.stop", json!({"event_id": event_id})).await
+    }
+
     /// Fetch `obs.query_db` with the `game_event_all` template and deserialize
     /// each row to [`GameEventInput`].
     ///
@@ -244,6 +270,44 @@ mod tests {
         Json(json!({"ok": true, "result": result}))
     }
 
+    /// Handler: POST /v1/tools/event.start — echoes the event_id back in the result.
+    async fn handle_event_start(Json(body): Json<Value>) -> Json<Value> {
+        let event_id = body.get("event_id").and_then(Value::as_u64).unwrap_or(0) as u16;
+        Json(json!({
+            "ok": true,
+            "result": {
+                "started": true,
+                "event_id": event_id,
+                "is_active_now": true
+            }
+        }))
+    }
+
+    /// Handler: POST /v1/tools/event.stop — echoes the event_id back in the result.
+    async fn handle_event_stop(Json(body): Json<Value>) -> Json<Value> {
+        let event_id = body.get("event_id").and_then(Value::as_u64).unwrap_or(0) as u16;
+        Json(json!({
+            "ok": true,
+            "result": {
+                "stopped": true,
+                "event_id": event_id,
+                "is_active_now": false
+            }
+        }))
+    }
+
+    /// Handler: POST /v1/tools/event.start — returns `{ok:false}` for error path testing.
+    async fn handle_event_start_fail() -> (axum::http::StatusCode, Json<Value>) {
+        (
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "ok": false,
+                "error": "event_not_found",
+                "detail": "event_id 9999 does not exist"
+            })),
+        )
+    }
+
     /// Handler: POST /v1/tools/fail.tool — returns `{ok:false}` with detail.
     async fn handle_fail() -> (axum::http::StatusCode, Json<Value>) {
         (
@@ -270,6 +334,31 @@ mod tests {
         let app = Router::new()
             .route("/v1/tools/obs.game_events", post(handle_game_events))
             .route("/v1/tools/obs.query_db", post(handle_query_db))
+            .route("/v1/tools/event.start", post(handle_event_start))
+            .route("/v1/tools/event.stop", post(handle_event_stop))
+            .route("/v1/tools/fail.tool", post(handle_fail))
+            .route("/v1/tools/shape.bad", post(handle_shape_bad))
+            .with_state(state);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{}", addr)
+    }
+
+    /// Spawn a mock that routes `event.start` to a failure handler.
+    async fn spawn_mock_with_start_fail() -> String {
+        let state = MockState {
+            game_events_result: GAME_EVENTS_RESULT.into(),
+            query_db_result: QUERY_DB_RESULT.into(),
+        };
+        let app = Router::new()
+            .route("/v1/tools/obs.game_events", post(handle_game_events))
+            .route("/v1/tools/obs.query_db", post(handle_query_db))
+            .route("/v1/tools/event.start", post(handle_event_start_fail))
+            .route("/v1/tools/event.stop", post(handle_event_stop))
             .route("/v1/tools/fail.tool", post(handle_fail))
             .route("/v1/tools/shape.bad", post(handle_shape_bad))
             .with_state(state);
@@ -421,6 +510,85 @@ mod tests {
         assert!(
             matches!(err, HarnessError::Shape(_)),
             "expected HarnessError::Shape, got {err:?}"
+        );
+    }
+
+    // ── event_start() ─────────────────────────────────────────────────────────
+
+    /// event_start sends the correct wire args and returns the result envelope.
+    #[tokio::test]
+    async fn event_start_sends_correct_args_and_returns_result() {
+        let base_url = spawn_mock().await;
+        let h = Harness::new(base_url, "test-token");
+        let result = h.event_start(42).await.expect("event_start should succeed");
+        // The mock handler echoes back event_id in the result.
+        assert_eq!(
+            result.get("event_id").and_then(Value::as_u64),
+            Some(42),
+            "result must contain the event_id we sent"
+        );
+        assert_eq!(
+            result.get("started").and_then(Value::as_bool),
+            Some(true),
+            "result must contain started: true"
+        );
+        assert_eq!(
+            result.get("is_active_now").and_then(Value::as_bool),
+            Some(true),
+            "mock result must report is_active_now: true after start"
+        );
+    }
+
+    /// event_start propagates a HarnessError::Tool when the server returns ok:false.
+    #[tokio::test]
+    async fn event_start_tool_error_on_ok_false() {
+        let base_url = spawn_mock_with_start_fail().await;
+        let h = Harness::new(base_url, "test-token");
+        let err = h.event_start(9999).await.expect_err("should return an error for ok:false");
+        match err {
+            HarnessError::Tool { detail } => {
+                assert!(
+                    detail.contains("9999") || detail.contains("event_id"),
+                    "detail should mention event_id or the id: {detail}"
+                );
+            }
+            other => panic!("expected HarnessError::Tool, got {other:?}"),
+        }
+    }
+
+    // ── event_stop() ──────────────────────────────────────────────────────────
+
+    /// event_stop sends the correct wire args and returns the result envelope.
+    #[tokio::test]
+    async fn event_stop_sends_correct_args_and_returns_result() {
+        let base_url = spawn_mock().await;
+        let h = Harness::new(base_url, "test-token");
+        let result = h.event_stop(17).await.expect("event_stop should succeed");
+        assert_eq!(
+            result.get("event_id").and_then(Value::as_u64),
+            Some(17),
+            "result must contain the event_id we sent"
+        );
+        assert_eq!(
+            result.get("stopped").and_then(Value::as_bool),
+            Some(true),
+            "result must contain stopped: true"
+        );
+        assert_eq!(
+            result.get("is_active_now").and_then(Value::as_bool),
+            Some(false),
+            "mock result must report is_active_now: false after stop"
+        );
+    }
+
+    /// event_stop returns HarnessError::Http on connection refused.
+    #[tokio::test]
+    async fn event_stop_http_error_on_connection_refused() {
+        let h = Harness::new("http://127.0.0.1:1", "test-token");
+        let err = h.event_stop(1).await.expect_err("should fail on connection refused");
+        assert!(
+            matches!(err, HarnessError::Http(_)),
+            "expected HarnessError::Http, got {err:?}"
         );
     }
 }

@@ -27,8 +27,8 @@ async fn main() {
     };
 
     eprintln!(
-        "[ges] starting — listen={} harness={} tick={}s",
-        cfg.listen_addr, cfg.harness_base_url, cfg.tick_secs
+        "[ges] starting — listen={} harness={} tick={}s drive={}",
+        cfg.listen_addr, cfg.harness_base_url, cfg.tick_secs, cfg.drive
     );
 
     let harness = Harness::new(cfg.harness_base_url.clone(), cfg.harness_bearer.clone());

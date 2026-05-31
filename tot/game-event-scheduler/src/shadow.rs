@@ -249,6 +249,9 @@ fn is_manual_start(row: &GameEventInput, resolve_ref: i64) -> bool {
 ///
 /// Returns `Some(reason)` if excluded, `None` if in-scope.
 ///
+/// This is also used by the drive step in `tick.rs` to ensure that the drive
+/// logic applies to EXACTLY the same set of events as the active-set shadow check.
+///
 /// ## Exclusion rules (checked in this precedence order):
 ///
 /// **(a) Non-Normal state (`gt_event.state != Normal`):**
@@ -291,7 +294,7 @@ fn is_manual_start(row: &GameEventInput, resolve_ref: i64) -> bool {
 /// because Normal in-scope events ARE checked.  Excluding state!=0 events only
 /// removes events whose `is_active` state is NOT produced by the date math we
 /// are testing.
-fn active_set_exclusion_reason(
+pub(crate) fn active_set_exclusion_reason(
     row: &GameEventInput,
     gt_event: &GroundTruthEvent,
     resolve_ref: i64,

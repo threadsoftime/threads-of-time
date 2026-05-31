@@ -15,6 +15,12 @@ pub struct Config {
     pub harness_bearer: String,
     /// Tick interval in seconds (default: 15; clamped to minimum 1 at use-site).
     pub tick_secs: u64,
+    /// When `true`, the tick loop reconciles live world-event state against Rust's
+    /// schedule computation by calling `event.start` / `event.stop` on divergences.
+    ///
+    /// **Default: `false` (shadow-only mode).**  Set `GES_DRIVE=true` to enable.
+    /// Drive mode NEVER acts on excluded events (Internal / ManualStart / non-Normal).
+    pub drive: bool,
 }
 
 impl Config {
@@ -26,6 +32,10 @@ impl Config {
     /// | `HARNESS_BASE_URL` | yes | — |
     /// | `HARNESS_BEARER` | yes | — |
     /// | `GES_TICK_SECS` | no | `15` |
+    /// | `GES_DRIVE` | no | `false` |
+    ///
+    /// `GES_DRIVE` accepts `"true"` or `"1"` (case-insensitive) to enable drive mode.
+    /// Any other value is treated as `false`.
     ///
     /// Returns `Err(String)` with a human-readable message for any missing required
     /// variable or parse failure.
@@ -46,7 +56,12 @@ impl Config {
             Err(_) => 15,
         };
 
-        Ok(Config { listen_addr, harness_base_url, harness_bearer, tick_secs })
+        let drive = match std::env::var("GES_DRIVE") {
+            Ok(s) => matches!(s.to_lowercase().as_str(), "true" | "1"),
+            Err(_) => false,
+        };
+
+        Ok(Config { listen_addr, harness_base_url, harness_bearer, tick_secs, drive })
     }
 }
 
@@ -181,6 +196,74 @@ mod tests {
                 let result = Config::from_env();
                 assert!(result.is_err());
                 assert!(result.unwrap_err().contains("GES_TICK_SECS"));
+            },
+        );
+    }
+
+    #[test]
+    fn drive_defaults_to_false_when_ges_drive_unset() {
+        with_env(
+            &[
+                ("HARNESS_BASE_URL", Some("http://localhost:8099")),
+                ("HARNESS_BEARER", Some("tok")),
+                ("GES_LISTEN_ADDR", None),
+                ("GES_TICK_SECS", None),
+                ("GES_DRIVE", None),
+            ],
+            || {
+                let cfg = Config::from_env().expect("should succeed");
+                assert!(!cfg.drive, "drive must default to false when GES_DRIVE is unset");
+            },
+        );
+    }
+
+    #[test]
+    fn drive_true_when_ges_drive_is_true_string() {
+        with_env(
+            &[
+                ("HARNESS_BASE_URL", Some("http://localhost:8099")),
+                ("HARNESS_BEARER", Some("tok")),
+                ("GES_LISTEN_ADDR", None),
+                ("GES_TICK_SECS", None),
+                ("GES_DRIVE", Some("true")),
+            ],
+            || {
+                let cfg = Config::from_env().expect("should succeed");
+                assert!(cfg.drive, "drive must be true when GES_DRIVE=true");
+            },
+        );
+    }
+
+    #[test]
+    fn drive_true_when_ges_drive_is_one() {
+        with_env(
+            &[
+                ("HARNESS_BASE_URL", Some("http://localhost:8099")),
+                ("HARNESS_BEARER", Some("tok")),
+                ("GES_LISTEN_ADDR", None),
+                ("GES_TICK_SECS", None),
+                ("GES_DRIVE", Some("1")),
+            ],
+            || {
+                let cfg = Config::from_env().expect("should succeed");
+                assert!(cfg.drive, "drive must be true when GES_DRIVE=1");
+            },
+        );
+    }
+
+    #[test]
+    fn drive_false_when_ges_drive_is_false_string() {
+        with_env(
+            &[
+                ("HARNESS_BASE_URL", Some("http://localhost:8099")),
+                ("HARNESS_BEARER", Some("tok")),
+                ("GES_LISTEN_ADDR", None),
+                ("GES_TICK_SECS", None),
+                ("GES_DRIVE", Some("false")),
+            ],
+            || {
+                let cfg = Config::from_env().expect("should succeed");
+                assert!(!cfg.drive, "drive must be false when GES_DRIVE=false");
             },
         );
     }
