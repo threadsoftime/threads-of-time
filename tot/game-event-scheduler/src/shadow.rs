@@ -249,12 +249,18 @@ fn is_manual_start(row: &GameEventInput, resolve_ref: i64) -> bool {
 ///
 /// Returns `Some(reason)` if excluded, `None` if in-scope.
 ///
-/// ## Exclusion rules:
+/// ## Exclusion rules (checked in this precedence order):
 ///
-/// **(a) Non-Normal state (`state != Normal`):**
+/// **(a) Non-Normal state (`gt_event.state != Normal`):**
 /// States 1-5 (WorldInactive, WorldConditions, WorldNextphase, WorldFinished, Internal)
 /// are NOT calendar-driven.  Internal is sticky via `StartInternalEvent`; world-phase
 /// states are condition/timer-driven.  C++ `is_active` is authoritative for these.
+///
+/// **Critical:** The runtime state is read from `gt_event.state` (the C++ ground-truth
+/// `obs.game_events` response), NOT from `row.state` (the SQL-derived `GameEventInput`).
+/// The AC fork has no `state` column in `game_event`, so `From<SqlGameEventRow>` always
+/// sets `GameEventInput.state = Normal`.  Reading `row.state` for this check would cause
+/// NonNormalState to NEVER fire (live-caught bug, 2026-05-31).
 ///
 /// **(b) Manual-start events:**
 /// `state == Normal` + `holiday == 0` + `raw_start_time == raw_end_time` (both
@@ -268,6 +274,15 @@ fn is_manual_start(row: &GameEventInput, resolve_ref: i64) -> bool {
 /// they use C++ null-default math (start=0, end=resolve_ref+2yr) and ARE
 /// date-schedulable.
 ///
+/// ## Why reading gt_event.state is NOT a circularity violation
+///
+/// `state` is a structural classification of the event's activation mechanism
+/// (calendar-driven vs. condition/GM-driven) — it is NOT a date-math answer
+/// and NOT a prediction of `is_active`.  Reading it to decide WHETHER to run
+/// our date-math check is scoping, not prediction.  The anti-circularity rule
+/// applies to using `gt.events[].start/end/is_active` as compute inputs; `state`
+/// is a different field with a different role.
+///
 /// ## Why scoping does NOT hide date-math bugs
 ///
 /// Non-Normal events are not calendar-driven — their `is_active` is set by C++
@@ -278,14 +293,19 @@ fn is_manual_start(row: &GameEventInput, resolve_ref: i64) -> bool {
 /// are testing.
 fn active_set_exclusion_reason(
     row: &GameEventInput,
+    gt_event: &GroundTruthEvent,
     resolve_ref: i64,
 ) -> Option<ExclusionReason> {
     use crate::schedule::GameEventState;
-    // (a) Non-Normal state
-    if row.state != GameEventState::Normal {
+    // (a) Non-Normal state: key off the C++ runtime state from the ground truth,
+    //     NOT row.state (which is always Normal for SQL-derived rows in this fork).
+    //     Check this FIRST so Internal events with start==end are labeled NonNormalState,
+    //     not ManualStart.
+    if gt_event.state != GameEventState::Normal {
         return Some(ExclusionReason::NonNormalState);
     }
-    // (b) Manual-start: keys off RAW Option<i64> values — see is_manual_start
+    // (b) Manual-start: keys off RAW Option<i64> values — see is_manual_start.
+    //     Only reached when gt_event.state == Normal.
     if is_manual_start(row, resolve_ref) {
         return Some(ExclusionReason::ManualStart);
     }
@@ -577,10 +597,12 @@ pub fn compute_report(
             }
 
             // --- CHECK 3: ActiveSet ---
-            // Scope: only check events where state==Normal AND not a GM-started event.
-            // Excluded events are logged to active_set_exclusions but NOT counted in
-            // active_set.checked — their C++ is_active is accepted as authoritative.
-            match active_set_exclusion_reason(row, gt.resolve_reference_unixtime) {
+            // Scope: only check events where state==Normal (per C++ runtime state) AND
+            // not a GM-started event.  Excluded events are logged to active_set_exclusions
+            // but NOT counted in active_set.checked — their C++ is_active is authoritative.
+            // NOTE: cpp_ev (the matched GroundTruthEvent) provides the runtime state;
+            // row.state is always Normal for SQL-derived rows and MUST NOT be used here.
+            match active_set_exclusion_reason(row, cpp_ev, gt.resolve_reference_unixtime) {
                 Some(reason) => {
                     active_set_exclusions.push(ExcludedEvent { entry: row.entry, reason });
                 }
@@ -1383,6 +1405,119 @@ mod tests {
         assert!(
             matches!(report.active_set_exclusions[0].reason, ExclusionReason::NonNormalState),
             "WorldInactive must be excluded as NonNormalState"
+        );
+    }
+
+    // ── NEW (e2) Internal event with DISTINCT start/end → NonNormalState (not mismatch) ──
+    //
+    // This is the regression test for the live-caught bug (2026-05-31):
+    // Before the fix, `active_set_exclusion_reason` checked `row.state` (always Normal
+    // from SQL), so this Internal event with distinct start/end would NOT be excluded
+    // and would produce a mismatch (Rust computes inactive from date math; C++ says active).
+    // After the fix, it checks `gt_event.state` (Internal=5) and correctly excludes it
+    // as NonNormalState — even though its start != end (no ManualStart coincidence to rely on).
+
+    #[test]
+    fn internal_event_distinct_start_end_excluded_as_non_normal_state() {
+        // Event 55: state=Internal (5), C++ reports is_active=true.
+        // start != end (distinct timestamps) — so the ManualStart coincidence is absent.
+        // Rust date math would compute is_active=false (end is past relative to RESOLVE_REF).
+        // Before the fix: not excluded → mismatch. After the fix: excluded as NonNormalState.
+        let start_55: i64 = SERVER_GAMETIME - 3600;   // 1 hour ago
+        let end_55: i64 = SERVER_GAMETIME - 1800;     // 30 minutes ago (past → Rust inactive)
+
+        let gt = GroundTruth {
+            events: vec![
+                make_gt_non_normal_event(55, start_55, end_55, GameEventState::Internal, true),
+            ],
+            active_event_list: vec![55],  // C++ says active (Internal sticky)
+            holidays: vec![],
+            server_gametime: SERVER_GAMETIME,
+            resolve_reference_unixtime: RESOLVE_REF,
+            server_tz_offset_secs: 0,
+        };
+
+        // Raw row has start != end and state=Internal (but SQL-derived rows always have
+        // state=Normal — that was the bug: the old code checked row.state here).
+        let raw_events = vec![
+            make_raw_with_state(55, Some(start_55), Some(end_55), GameEventState::Internal),
+        ];
+
+        let rules = holiday_rules();
+        let report = compute_report(&gt, &raw_events, rules);
+
+        // Must be excluded — NOT checked in active_set
+        assert_eq!(
+            report.active_set.checked, 0,
+            "Internal event with distinct start/end must NOT contribute to active_set.checked (regression: previously mismatched)"
+        );
+
+        // Must be zero mismatches
+        assert_eq!(
+            report.active_set.mismatches(), 0,
+            "Internal event with distinct start/end must not produce any mismatch"
+        );
+
+        // Exclusion list must contain entry 55 as NonNormalState
+        assert_eq!(report.active_set_exclusions.len(), 1, "one exclusion expected");
+        assert_eq!(report.active_set_exclusions[0].entry, 55);
+        assert!(
+            matches!(report.active_set_exclusions[0].reason, ExclusionReason::NonNormalState),
+            "reason must be NonNormalState (not ManualStart): {:?}",
+            report.active_set_exclusions[0].reason
+        );
+    }
+
+    // ── NEW (e3) Internal event WITH start==end → NonNormalState (not ManualStart) ──
+    //
+    // Verifies the precedence rule: NonNormalState is checked BEFORE ManualStart.
+    // An Internal event that also satisfies the ManualStart criteria (start==end, past)
+    // must be labeled NonNormalState, not ManualStart, because state!=Normal fires first.
+
+    #[test]
+    fn internal_event_equal_start_end_labeled_non_normal_not_manual_start() {
+        // Event 56: state=Internal (5), raw_start==raw_end (past) — satisfies both
+        // NonNormalState AND ManualStart criteria on paper.
+        // Precedence: NonNormalState fires first → reason must be NonNormalState.
+        let gm_ts: i64 = 946_735_200; // far past (2000-01-01 approx)
+
+        let gt = GroundTruth {
+            events: vec![
+                make_gt_non_normal_event(56, gm_ts, gm_ts, GameEventState::Internal, true),
+            ],
+            active_event_list: vec![56],
+            holidays: vec![],
+            server_gametime: SERVER_GAMETIME,
+            resolve_reference_unixtime: RESOLVE_REF,
+            server_tz_offset_secs: 0,
+        };
+
+        // Raw row: start==end (would satisfy ManualStart if state were Normal).
+        let raw_events = vec![
+            make_raw_with_state(56, Some(gm_ts), Some(gm_ts), GameEventState::Internal),
+        ];
+
+        let rules = holiday_rules();
+        let report = compute_report(&gt, &raw_events, rules);
+
+        // Must be excluded
+        assert_eq!(
+            report.active_set.checked, 0,
+            "Internal event (start==end) must not contribute to active_set.checked"
+        );
+        assert_eq!(report.active_set.mismatches(), 0, "no mismatches expected");
+        assert_eq!(report.active_set_exclusions.len(), 1, "one exclusion expected");
+        assert_eq!(report.active_set_exclusions[0].entry, 56);
+
+        // Must be NonNormalState, NOT ManualStart — precedence check
+        assert!(
+            matches!(report.active_set_exclusions[0].reason, ExclusionReason::NonNormalState),
+            "Internal state must produce NonNormalState exclusion, not ManualStart: {:?}",
+            report.active_set_exclusions[0].reason
+        );
+        assert!(
+            !matches!(report.active_set_exclusions[0].reason, ExclusionReason::ManualStart),
+            "reason must NOT be ManualStart for Internal state even when start==end"
         );
     }
 
