@@ -1,20 +1,16 @@
-pub mod api;
-pub mod config;
-pub mod events;
-pub mod harness;
-pub mod holiday;
-pub mod packed;
-pub mod resolve;
-pub mod schedule;
-pub mod shadow;
-pub mod tick;
+//! Standalone binary entry point for the game-event-scheduler.
+//!
+//! This thin wrapper is kept for Inc-1/Inc-2 deploy compatibility (the path
+//! `tot/game-event-scheduler` is referenced in existing deploy docs).  Production
+//! hosting will use `slice-host` (T32 onward).
 
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
-use crate::api::AppState;
-use crate::config::Config;
-use crate::harness::Harness;
+use game_event_scheduler::api;
+use game_event_scheduler::config::Config;
+use game_event_scheduler::harness::Harness;
+use game_event_scheduler::tick;
 
 #[tokio::main]
 async fn main() {
@@ -32,9 +28,9 @@ async fn main() {
     );
 
     let harness = Harness::new(cfg.harness_base_url.clone(), cfg.harness_bearer.clone());
-    let state = Arc::new(AppState::new());
+    let state = Arc::new(api::AppState::new());
 
-    // Build the HTTP router.
+    // Build the HTTP router (includes /healthz, /report, /report/history).
     let app = api::router(state.clone());
 
     // Bind the listener.
@@ -72,8 +68,7 @@ async fn main() {
     };
 
     // Spawn the tick loop; keep the JoinHandle so we can monitor it.
-    let tick_handle =
-        tokio::spawn(tick::run(state.clone(), harness, cfg.clone()));
+    let tick_handle = tokio::spawn(tick::run(state.clone(), harness, cfg.clone()));
 
     // Axum server future with graceful shutdown wired to the OS signal.
     let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal);

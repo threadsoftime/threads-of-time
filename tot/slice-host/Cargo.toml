@@ -1,0 +1,22 @@
+[package]
+name = "slice-host"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "slice-host"
+path = "src/main.rs"
+
+[dependencies]
+# Strangler-fig slices hosted here.
+game-event-scheduler = { path = "../game-event-scheduler" }
+
+# Async runtime + HTTP server.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
+axum = "0.7"
+
+# ── To add a second slice later (e.g. lfg-matchmaker):
+# lfg-matchmaker = { path = "../lfg-matchmaker" }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

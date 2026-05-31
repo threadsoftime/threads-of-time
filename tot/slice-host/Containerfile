@@ -1,0 +1,77 @@
+# ── slice-host Containerfile ──────────────────────────────────────────────────
+#
+# Multi-stage build → minimal-footprint fully-static binary on scratch.
+#
+# Build target: x86_64-unknown-linux-musl (static musl libc — no dynamic libc).
+# Runtime base: scratch (zero OS layer — just the binary).
+#
+# TLS rationale: the harness wire is plain http:// (http://192.168.1.3:8099).
+# The reqwest client is compiled with rustls-tls but the binary NEVER opens a
+# TLS connection at runtime.  No CA certificates are needed, so the scratch image
+# works without any cert bundle.
+#
+# Build on Heimdal (T32):
+#   podman build -f tot/slice-host/Containerfile -t slice-host:latest tot/
+#
+# Or from within tot/slice-host/:
+#   podman build -f Containerfile -t slice-host:latest ..
+#
+# Run (minimal):
+#   podman run --rm \
+#     -e HARNESS_BASE_URL=http://192.168.1.3:8099 \
+#     -e HARNESS_BEARER=<token> \
+#     -p 8092:8092 \
+#     slice-host:latest
+#
+# ── Stage 1: build ────────────────────────────────────────────────────────────
+
+FROM rust:1-slim AS builder
+
+# Install the musl cross-compilation target and linker.
+RUN rustup target add x86_64-unknown-linux-musl \
+    && apt-get update -qq \
+    && apt-get install -y --no-install-recommends musl-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set the default target for this stage.
+ENV CARGO_BUILD_TARGET=x86_64-unknown-linux-musl
+
+WORKDIR /build
+
+# Copy only the workspace manifests first for layer-cache efficiency.
+# If only source files change (not Cargo.toml / Cargo.lock), the dep-compile
+# layer is reused.
+COPY Cargo.toml Cargo.lock ./
+COPY game-event-scheduler/Cargo.toml ./game-event-scheduler/
+COPY slice-host/Cargo.toml             ./slice-host/
+
+# Create stub lib/main files so `cargo build` can resolve and cache all deps
+# without compiling actual sources.  We replace them with real sources in the
+# next COPY step.
+RUN mkdir -p game-event-scheduler/src slice-host/src \
+    && echo 'pub fn _stub() {}' > game-event-scheduler/src/lib.rs \
+    && echo 'fn main() {}' > game-event-scheduler/src/main.rs \
+    && echo 'fn main() {}' > slice-host/src/main.rs \
+    && cargo build --release -p slice-host \
+    && rm -rf game-event-scheduler/src slice-host/src
+
+# Now copy the real sources and rebuild.  Only the workspace crates are
+# recompiled; all external deps are already built in the cache.
+COPY game-event-scheduler/src ./game-event-scheduler/src/
+COPY slice-host/src             ./slice-host/src/
+
+RUN cargo build --release -p slice-host
+
+# ── Stage 2: runtime ──────────────────────────────────────────────────────────
+
+FROM scratch
+
+# Copy the fully-static binary from the build stage.
+COPY --from=builder \
+    /build/target/x86_64-unknown-linux-musl/release/slice-host \
+    /slice-host
+
+# Default listen address; override with SLICE_HOST_LISTEN env var.
+EXPOSE 8092
+
+ENTRYPOINT ["/slice-host"]

@@ -130,9 +130,23 @@ pub struct HistoryResponse {
 // ── Router ────────────────────────────────────────────────────────────────────
 
 /// Build the axum [`Router`] with the three report endpoints wired to `state`.
+///
+/// Includes `/healthz`.  Used by the standalone binary entry point.  In the
+/// multi-slice `slice-host`, use [`routes`] instead and let the host own `/healthz`.
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(handle_healthz))
+        .route("/report", get(handle_report))
+        .route("/report/history", get(handle_history))
+        .with_state(state)
+}
+
+/// Build the slice-only axum [`Router`] — `/report` and `/report/history` only.
+///
+/// Does NOT include `/healthz`; the host binary (`slice-host`) owns that route
+/// and mounts this router under a prefix (e.g. `/game-events`).
+pub fn routes(state: Arc<AppState>) -> Router {
+    Router::new()
         .route("/report", get(handle_report))
         .route("/report/history", get(handle_history))
         .with_state(state)
