@@ -76,3 +76,23 @@ def test_obs_game_events_registered() -> None:
     assert entry.required_scope == "obs.game_events"
     assert entry.subject_guid_arg is None
     assert entry.forwards_to_ac is True
+
+
+def test_event_start_registered() -> None:
+    reg = build_v1_registry()
+    entry = reg.find("event.start")
+    assert entry.name == "event.start"
+    assert entry.required_scope == "event.start"
+    # No subject GUID — event_id is a plain arg, not a player/bot guid
+    assert entry.subject_guid_arg is None
+    assert entry.forwards_to_ac is True
+
+
+def test_event_stop_registered() -> None:
+    reg = build_v1_registry()
+    entry = reg.find("event.stop")
+    assert entry.name == "event.stop"
+    assert entry.required_scope == "event.stop"
+    # No subject GUID — event_id is a plain arg, not a player/bot guid
+    assert entry.subject_guid_arg is None
+    assert entry.forwards_to_ac is True

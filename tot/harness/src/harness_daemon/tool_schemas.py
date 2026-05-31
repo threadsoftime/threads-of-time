@@ -288,6 +288,22 @@ class ObsGameEventsArgs(BaseModel):
     pass
 
 
+# --- event.* (GES Inc-2 — slice-driven scheduler enactment primitives) ---
+
+class EventStartArgs(BaseModel):
+    event_id: int = Field(..., ge=1, description=(
+        "Game event ID (1..N). The adapter validates the ID is in-bounds and "
+        "refers to a valid (non-tombstone) event before calling StartEvent."
+    ))
+
+
+class EventStopArgs(BaseModel):
+    event_id: int = Field(..., ge=1, description=(
+        "Game event ID (1..N). The adapter validates the ID is in-bounds and "
+        "refers to a valid (non-tombstone) event before calling StopEvent."
+    ))
+
+
 # --- daemon-direct ---
 
 class ObsQueryDbArgs(BaseModel):
@@ -450,6 +466,9 @@ TOOL_SCHEMAS: dict[str, tuple[type[BaseModel], str]] = {
     # GES Inc-1 — game-event schedule snapshot (C++ adapter reads sGameEventMgr + sHolidaysStore)
     "obs.game_events":         (ObsGameEventsArgs,          "Full game-event schedule: active set, resolved start/end/next per event, and raw sHolidaysStore dump."),
     "obs.query_db":            (ObsQueryDbArgs,             "Run an allowlisted MySQL template against the auth/char DBs."),
+    # GES Inc-2 — event control primitives (slice-driven scheduler enactment)
+    "event.start":             (EventStartArgs,             "Start a game event by id (slice-driven scheduler enactment primitive)."),
+    "event.stop":              (EventStopArgs,              "Stop a game event by id (slice-driven scheduler enactment primitive)."),
     # Memory subsystem (Phase 6B — V1 memory.* tools)
     "memory.write":            (MemoryWriteArgs,            "Write a new episode to a bot's episodic memory store."),
     "memory.read":             (MemoryReadArgs,             "Fetch a single episode by primary-key ID."),

@@ -110,6 +110,9 @@ def build_v1_registry() -> Registry:
         ToolEntry("obs.get_talents",           "obs.get_talents",           "target_guid", True),
         # GES Inc-1 — game-event schedule snapshot (no subject guid, read-only)
         ToolEntry("obs.game_events",           "obs.game_events",           None,          True),
+        # GES Inc-2 — event control primitives (subject is event_id, not a player/bot guid)
+        ToolEntry("event.start",               "event.start",               None,          True),
+        ToolEntry("event.stop",                "event.stop",                None,          True),
         # Daemon-direct
         ToolEntry("obs.query_db",              "obs.query_db",              None,          False),
         # Memory subsystem (Phase 6B — V1 memory.* tools)
