@@ -33,8 +33,9 @@ use crate::schedule::{GameEventState, ResolvedEvent};
 /// Deserialize an integer 0..5 into [`GameEventState`].
 ///
 /// The harness payload sends `"state": 0` (not a string); this function maps it.
-/// Unknown values fall back to `Normal` (safe: live data is all 0; any future
-/// world-event states that appear will also degrade gracefully).
+/// Unknown values are a hard deserialization failure — the C++ state enum is closed
+/// at 0..5 and any unrecognized value signals a schema mismatch that must not be
+/// silently ignored.
 fn deserialize_state<'de, D: Deserializer<'de>>(d: D) -> Result<GameEventState, D::Error> {
     let v = u8::deserialize(d)?;
     GameEventState::try_from(v).map_err(|unknown| {
