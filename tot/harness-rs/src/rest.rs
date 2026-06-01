@@ -317,10 +317,9 @@ mod tests {
     use crate::audit::AuditLogger;
     use crate::auth::TokenStore;
     use crate::config::TokenRecord;
-    use crate::db_client::DbClient;
     use crate::registry::build_v1_registry;
     use crate::rest::{AppState, build_router};
-    use crate::test_support::{MockConfig, spawn_mock_ac, spawn_mock_ac_with_config};
+    use crate::test_support::{MockConfig, spawn_mock_ac_with_config};
 
     // ── test AppState builder ─────────────────────────────────────────────────
 

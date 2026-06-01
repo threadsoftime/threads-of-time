@@ -2,17 +2,20 @@
 //!
 //! Port of `harness_daemon/tool_schemas.py` — one `XxxArgs` inner struct plus
 //! one `XxxWrapper { pub args: XxxArgs }` per tool. Both carry
-//! `#[derive(Debug, Deserialize, schemars::JsonSchema)]`.
+//! `#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]`.
+//!
+//! `Serialize` is required by the MCP handler to call `serde_json::to_value(&w.args)`
+//! (the exclude_none path in `forward()`).
 //!
 //! All 46 tools from `TOOL_SCHEMAS` are represented here.
 
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 // ── Shared enums ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BotState {
     Combat,
@@ -21,7 +24,7 @@ pub enum BotState {
     All,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatChannel {
     Say,
@@ -32,7 +35,7 @@ pub enum ChatChannel {
     Whisper,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BotRole {
     Tank,
@@ -42,14 +45,14 @@ pub enum BotRole {
     None,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BotMode {
     Lfg,
     Direct,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EpisodeType {
     Chat,
@@ -64,7 +67,7 @@ pub enum EpisodeType {
 
 // ── Sub-model: LfgFormGroupMember ─────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct LfgFormGroupMember {
     /// Player low GUID to force-add to the group.
     pub guid: i64,
@@ -74,7 +77,7 @@ pub struct LfgFormGroupMember {
 
 // ── gm.additem ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GmAdditemArgs {
     /// Low-32 GUID of the online player or bot.
     pub target_guid: i64,
@@ -92,27 +95,27 @@ fn default_false_opt() -> Option<bool> { Some(false) }
 
 fn default_empty_object() -> serde_json::Value { serde_json::json!({}) }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GmAdditemWrapper {
     pub args: GmAdditemArgs,
 }
 
 // ── gm.equip_all ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GmEquipAllArgs {
     /// Low-32 GUID of the online player or bot.
     pub target_guid: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GmEquipAllWrapper {
     pub args: GmEquipAllArgs,
 }
 
 // ── gm.teleport ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GmTeleportArgs {
     /// Low-32 GUID of the online player or bot.
     pub target_guid: i64,
@@ -126,14 +129,14 @@ pub struct GmTeleportArgs {
     pub orientation: f64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GmTeleportWrapper {
     pub args: GmTeleportArgs,
 }
 
 // ── gm.set_level ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GmSetLevelArgs {
     /// Low-32 GUID of the online player or bot.
     pub target_guid: i64,
@@ -142,40 +145,40 @@ pub struct GmSetLevelArgs {
     pub level: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GmSetLevelWrapper {
     pub args: GmSetLevelArgs,
 }
 
 // ── gm.run_console ───────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GmRunConsoleArgs {
     /// Console command. Allowlisted prefixes only.
     pub command: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GmRunConsoleWrapper {
     pub args: GmRunConsoleArgs,
 }
 
 // ── gm.read_console_output ───────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GmReadConsoleOutputArgs {
     /// Request ID returned by the preceding gm.run_console call.
     pub request_id: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GmReadConsoleOutputWrapper {
     pub args: GmReadConsoleOutputArgs,
 }
 
 // ── gm.strip_gear ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GmStripGearArgs {
     /// Low-32 GUID of the online player or bot.
     pub target_guid: i64,
@@ -187,14 +190,14 @@ pub struct GmStripGearArgs {
     pub clear_bag: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GmStripGearWrapper {
     pub args: GmStripGearArgs,
 }
 
 // ── bot.set_goal ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotSetGoalArgs {
     /// Low-32 GUID of the bot to retask.
     pub bot_guid: i64,
@@ -202,14 +205,14 @@ pub struct BotSetGoalArgs {
     pub goal: Value,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotSetGoalWrapper {
     pub args: BotSetGoalArgs,
 }
 
 // ── bot.set_strategy ─────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotSetStrategyArgs {
     /// Low-32 GUID of the bot.
     pub bot_guid: i64,
@@ -222,14 +225,14 @@ pub struct BotSetStrategyArgs {
 
 fn default_bot_state() -> Option<BotState> { Some(BotState::All) }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotSetStrategyWrapper {
     pub args: BotSetStrategyArgs,
 }
 
 // ── bot.get_strategies ───────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotGetStrategiesArgs {
     /// Low-32 GUID of the bot.
     pub bot_guid: i64,
@@ -238,14 +241,14 @@ pub struct BotGetStrategiesArgs {
     pub bot_state: Option<BotState>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotGetStrategiesWrapper {
     pub args: BotGetStrategiesArgs,
 }
 
 // ── bot.send_chat ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotSendChatArgs {
     /// Low-32 GUID of the bot.
     pub bot_guid: i64,
@@ -259,14 +262,14 @@ pub struct BotSendChatArgs {
     pub recipient_name: Option<String>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotSendChatWrapper {
     pub args: BotSendChatArgs,
 }
 
 // ── bot.follow ───────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotFollowArgs {
     /// Low-32 GUID of the bot.
     pub bot_guid: i64,
@@ -274,14 +277,14 @@ pub struct BotFollowArgs {
     pub leader_guid: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotFollowWrapper {
     pub args: BotFollowArgs,
 }
 
 // ── bot.stop ─────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotStopArgs {
     /// Low-32 GUID of the bot.
     pub bot_guid: i64,
@@ -290,14 +293,14 @@ pub struct BotStopArgs {
     pub clear_combat: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotStopWrapper {
     pub args: BotStopArgs,
 }
 
 // ── bot.invite_to_group ──────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotInviteToGroupArgs {
     /// Low-32 GUID of the inviting bot.
     pub bot_guid: i64,
@@ -305,40 +308,40 @@ pub struct BotInviteToGroupArgs {
     pub target_guid: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotInviteToGroupWrapper {
     pub args: BotInviteToGroupArgs,
 }
 
 // ── bot.accept_invite ────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotAcceptInviteArgs {
     /// Low-32 GUID of the bot accepting the invite.
     pub bot_guid: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotAcceptInviteWrapper {
     pub args: BotAcceptInviteArgs,
 }
 
 // ── bot.leave_group ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotLeaveGroupArgs {
     /// Low-32 GUID of the bot leaving the group.
     pub bot_guid: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotLeaveGroupWrapper {
     pub args: BotLeaveGroupArgs,
 }
 
 // ── bot.set_role ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotSetRoleArgs {
     /// Low-32 GUID of the bot.
     pub bot_guid: i64,
@@ -346,14 +349,14 @@ pub struct BotSetRoleArgs {
     pub role: BotRole,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotSetRoleWrapper {
     pub args: BotSetRoleArgs,
 }
 
 // ── bot.queue_for_dungeon ────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotQueueForDungeonArgs {
     /// Low-32 GUID of the bot.
     pub bot_guid: i64,
@@ -364,14 +367,14 @@ pub struct BotQueueForDungeonArgs {
     pub roles_mask: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotQueueForDungeonWrapper {
     pub args: BotQueueForDungeonArgs,
 }
 
 // ── bot.enter_instance ───────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotEnterInstanceArgs {
     /// Low-32 GUID of the bot.
     pub bot_guid: i64,
@@ -392,63 +395,63 @@ pub struct BotEnterInstanceArgs {
 
 fn default_zero_f64() -> Option<f64> { Some(0.0) }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotEnterInstanceWrapper {
     pub args: BotEnterInstanceArgs,
 }
 
 // ── obs.ping ─────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsPingArgs {}
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsPingWrapper {
     pub args: ObsPingArgs,
 }
 
 // ── obs.get_state ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetStateArgs {
     /// Low-32 GUID of the online player or bot.
     pub target_guid: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetStateWrapper {
     pub args: ObsGetStateArgs,
 }
 
 // ── obs.get_auras ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetAurasArgs {
     /// Low-32 GUID of the online player or bot.
     pub target_guid: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetAurasWrapper {
     pub args: ObsGetAurasArgs,
 }
 
 // ── obs.get_inventory ────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetInventoryArgs {
     /// Low-32 GUID of the online player or bot.
     pub target_guid: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetInventoryWrapper {
     pub args: ObsGetInventoryArgs,
 }
 
 // ── obs.get_combat_log ───────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetCombatLogArgs {
     /// Low-32 GUID of the online player or bot.
     pub target_guid: i64,
@@ -461,135 +464,135 @@ pub struct ObsGetCombatLogArgs {
     pub limit: Option<i64>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetCombatLogWrapper {
     pub args: ObsGetCombatLogArgs,
 }
 
 // ── obs.get_quest_log ────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetQuestLogArgs {
     /// Low-32 GUID of the online player or bot.
     pub target_guid: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetQuestLogWrapper {
     pub args: ObsGetQuestLogArgs,
 }
 
 // ── obs.get_xp ───────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetXpArgs {
     /// Low-32 GUID of the online player or bot.
     pub target_guid: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetXpWrapper {
     pub args: ObsGetXpArgs,
 }
 
 // ── obs.list_players ─────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsListPlayersArgs {}
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsListPlayersWrapper {
     pub args: ObsListPlayersArgs,
 }
 
 // ── obs.list_bot_population ──────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsListBotPopulationArgs {}
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsListBotPopulationWrapper {
     pub args: ObsListBotPopulationArgs,
 }
 
 // ── obs.get_rpg_status ───────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetRpgStatusArgs {
     /// Low-32 GUID of the online player or bot.
     pub target_guid: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetRpgStatusWrapper {
     pub args: ObsGetRpgStatusArgs,
 }
 
 // ── obs.get_money ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetMoneyArgs {
     /// Low-32 GUID of the online player or bot.
     pub target_guid: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetMoneyWrapper {
     pub args: ObsGetMoneyArgs,
 }
 
 // ── obs.get_position ─────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetPositionArgs {
     /// Low-32 GUID of the online player or bot.
     pub target_guid: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetPositionWrapper {
     pub args: ObsGetPositionArgs,
 }
 
 // ── obs.get_group ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetGroupArgs {
     /// Low-32 GUID of the online player or bot.
     pub target_guid: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetGroupWrapper {
     pub args: ObsGetGroupArgs,
 }
 
 // ── obs.get_talents ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetTalentsArgs {
     /// Low-32 GUID of the online player or bot.
     pub target_guid: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGetTalentsWrapper {
     pub args: ObsGetTalentsArgs,
 }
 
 // ── obs.game_events ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGameEventsArgs {}
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsGameEventsWrapper {
     pub args: ObsGameEventsArgs,
 }
 
 // ── obs.query_db ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsQueryDbArgs {
     /// Allowlisted query template name.
     pub template_name: String,
@@ -598,14 +601,14 @@ pub struct ObsQueryDbArgs {
     pub params: Value,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsQueryDbWrapper {
     pub args: ObsQueryDbArgs,
 }
 
 // ── obs.lfg_pending ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsLfgPendingArgs {
     /// Max pending LFG intents to drain in this call.
     #[serde(default = "default_max")]
@@ -614,42 +617,42 @@ pub struct ObsLfgPendingArgs {
 
 fn default_max() -> i64 { 64 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ObsLfgPendingWrapper {
     pub args: ObsLfgPendingArgs,
 }
 
 // ── event.start ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct EventStartArgs {
     /// Game event ID (1..N).
     #[schemars(range(min = 1))]
     pub event_id: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct EventStartWrapper {
     pub args: EventStartArgs,
 }
 
 // ── event.stop ───────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct EventStopArgs {
     /// Game event ID (1..N).
     #[schemars(range(min = 1))]
     pub event_id: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct EventStopWrapper {
     pub args: EventStopArgs,
 }
 
 // ── memory.write ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryWriteArgs {
     /// Low-32 GUID of the bot whose memory is written.
     pub bot_guid: i64,
@@ -673,14 +676,14 @@ pub struct MemoryWriteArgs {
     pub source: Option<String>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryWriteWrapper {
     pub args: MemoryWriteArgs,
 }
 
 // ── memory.read ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryReadArgs {
     /// Low-32 GUID of the bot.
     pub bot_guid: i64,
@@ -688,14 +691,14 @@ pub struct MemoryReadArgs {
     pub episode_id: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryReadWrapper {
     pub args: MemoryReadArgs,
 }
 
 // ── memory.recall ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryRecallArgs {
     /// Low-32 GUID of the bot.
     pub bot_guid: i64,
@@ -731,14 +734,14 @@ pub struct MemoryRecallArgs {
     pub mmr_lambda: Option<f64>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryRecallWrapper {
     pub args: MemoryRecallArgs,
 }
 
 // ── memory.search ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct MemorySearchArgs {
     /// Low-32 GUID of the bot.
     pub bot_guid: i64,
@@ -754,14 +757,14 @@ pub struct MemorySearchArgs {
     pub top_k: Option<i64>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct MemorySearchWrapper {
     pub args: MemorySearchArgs,
 }
 
 // ── memory.list ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryListArgs {
     /// Low-32 GUID of the bot.
     pub bot_guid: i64,
@@ -787,14 +790,14 @@ pub struct MemoryListArgs {
     pub offset: Option<i64>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryListWrapper {
     pub args: MemoryListArgs,
 }
 
 // ── memory.update ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryUpdateArgs {
     /// Low-32 GUID of the bot.
     pub bot_guid: i64,
@@ -812,14 +815,14 @@ pub struct MemoryUpdateArgs {
     pub metadata: Option<Value>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryUpdateWrapper {
     pub args: MemoryUpdateArgs,
 }
 
 // ── memory.delete ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryDeleteArgs {
     /// Low-32 GUID of the bot.
     pub bot_guid: i64,
@@ -827,14 +830,14 @@ pub struct MemoryDeleteArgs {
     pub episode_id: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct MemoryDeleteWrapper {
     pub args: MemoryDeleteArgs,
 }
 
 // ── lfg.form_group ───────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct LfgFormGroupArgs {
     /// Low GUID of the group leader; must also appear in members.
     pub leader_guid: i64,
@@ -844,7 +847,7 @@ pub struct LfgFormGroupArgs {
     pub dungeon_id: i64,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct LfgFormGroupWrapper {
     pub args: LfgFormGroupArgs,
 }

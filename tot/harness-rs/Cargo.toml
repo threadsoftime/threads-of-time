@@ -37,11 +37,13 @@ clap = { version = "4", features = ["derive", "env"] }
 uuid = { version = "1", features = ["v4"] }
 tower = "0.5"
 http = "1"
+# Needed by auth_layer.rs (BoxBody body type matching StreamableHttpService).
+# Already pulled transitively by rmcp/axum — made explicit to use in src/ code.
+bytes = "1"
+http-body-util = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 # spike example deps — pulled transitively by axum/rmcp in the main deps already
-bytes = "1"
 http-body = "1"
-http-body-util = "0.1"
 anyhow = "1"
