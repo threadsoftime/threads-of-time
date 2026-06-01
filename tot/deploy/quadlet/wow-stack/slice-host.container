@@ -1,0 +1,37 @@
+# slice-host — single-container host for the Rust strangler-fig slices (Inc 3).
+#
+# Heimdal-concrete unit (as deployed 2026-05-31), NOT the @-templated operator-install
+# form used by harness-daemon.container: slice-host is a STANDALONE process that reaches
+# the harness over LAN (http://192.168.1.3:8099), so it is deliberately NOT attached to
+# wow-server.pod. Installed on Heimdal at /etc/containers/systemd/wow-stack/slice-host.container.
+#
+# The bearer token is supplied via EnvironmentFile (0600 root:root), never inlined here:
+#   /opt/containers/wow/etc/slice-host.env  ->  HARNESS_BEARER=<token>
+#
+# GES_DRIVE=true: the scheduler slice runs in drive mode. While GameEvent.SliceDriven=0 in
+# worldserver.conf the native C++ scheduler is authoritative and this service is a no-op
+# corrector (it computes the schedule and finds 0 mismatches). T33 flips SliceDriven=1 to
+# make this service the live driver; after T34 (C++ scheduler deleted) it is the SOLE driver.
+
+[Unit]
+Description=ToT slice-host (game-event-scheduler)
+After=harness-daemon.service
+Wants=harness-daemon.service
+
+[Container]
+Image=localhost/slice-host:current
+ContainerName=slice-host
+Environment=HARNESS_BASE_URL=http://192.168.1.3:8099
+Environment=GES_DRIVE=true
+Environment=GES_TICK_SECS=15
+Environment=SLICE_HOST_LISTEN=0.0.0.0:8092
+EnvironmentFile=/opt/containers/wow/etc/slice-host.env
+PublishPort=8092:8092
+PodmanArgs=--memory=128m --cpus=0.25
+
+[Service]
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

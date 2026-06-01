@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+# Explicit members — NOT a glob, because tot/lfg-matchmaker has no sources on this branch.
+members = [
+    "game-event-scheduler",
+    "slice-host",
+]
+
+# Shared release profile: minimal-footprint single static binary (Steam Deck).
+# panic=abort affects release only; dev/test still unwind so #[should_panic]
+# and assertion panics behave normally.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

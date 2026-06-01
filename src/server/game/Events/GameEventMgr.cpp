@@ -21,7 +21,6 @@
 #include "DisableMgr.h"
 #include "GameObjectAI.h"
 #include "GameTime.h"
-#include "HolidayDateCalculator.h"
 #include "Language.h"
 #include "Log.h"
 #include "MapMgr.h"
@@ -35,89 +34,11 @@
 #include "WorldSessionMgr.h"
 #include "WorldState.h"
 #include "WorldStatePackets.h"
-#include <chrono>
 
 GameEventMgr* GameEventMgr::instance()
 {
     static GameEventMgr instance;
     return &instance;
-}
-
-bool GameEventMgr::CheckOneGameEvent(uint16 entry) const
-{
-    switch (_gameEvent[entry].State)
-    {
-        default:
-        case GAMEEVENT_NORMAL:
-            {
-                time_t currenttime = GameTime::GetGameTime().count();
-                // Get the event information
-                return _gameEvent[entry].Start < currenttime
-                       && currenttime < _gameEvent[entry].End
-                       && (currenttime - _gameEvent[entry].Start) % (_gameEvent[entry].Occurence * MINUTE) < _gameEvent[entry].Length * MINUTE;
-            }
-        // if the state is conditions or nextphase, then the event should be active
-        case GAMEEVENT_WORLD_CONDITIONS:
-        case GAMEEVENT_WORLD_NEXTPHASE:
-            return true;
-        // finished world events are inactive
-        case GAMEEVENT_WORLD_FINISHED:
-        case GAMEEVENT_INTERNAL:
-            return false;
-        // if inactive world event, check the prerequisite events
-        case GAMEEVENT_WORLD_INACTIVE:
-            {
-                time_t currenttime = GameTime::GetGameTime().count();
-                for (std::set<uint16>::const_iterator itr = _gameEvent[entry].PrerequisiteEvents.begin(); itr != _gameEvent[entry].PrerequisiteEvents.end(); ++itr)
-                {
-                    if ((_gameEvent[*itr].State != GAMEEVENT_WORLD_NEXTPHASE && _gameEvent[*itr].State != GAMEEVENT_WORLD_FINISHED) ||   // if prereq not in nextphase or finished state, then can't start this one
-                            _gameEvent[*itr].NextStart > currenttime)               // if not in nextphase state for long enough, can't start this one
-                        return false;
-                }
-                // all prerequisite events are met
-                // but if there are no prerequisites, this can be only activated through gm command
-                return !(_gameEvent[entry].PrerequisiteEvents.empty());
-            }
-    }
-}
-
-uint32 GameEventMgr::NextCheck(uint16 entry) const
-{
-    time_t currenttime = GameTime::GetGameTime().count();
-
-    // for NEXTPHASE state world events, return the delay to start the next event, so the followup event will be checked correctly
-    if ((_gameEvent[entry].State == GAMEEVENT_WORLD_NEXTPHASE || _gameEvent[entry].State == GAMEEVENT_WORLD_FINISHED) && _gameEvent[entry].NextStart >= currenttime)
-        return uint32(_gameEvent[entry].NextStart - currenttime);
-
-    // for CONDITIONS state world events, return the length of the wait period, so if the conditions are met, this check will be called again to set the timer as NEXTPHASE event
-    if (_gameEvent[entry].State == GAMEEVENT_WORLD_CONDITIONS)
-    {
-        if (_gameEvent[entry].Length)
-            return _gameEvent[entry].Length * 60;
-        else
-            return max_ge_check_delay;
-    }
-
-    // outdated event: we return max
-    if (currenttime > _gameEvent[entry].End)
-        return max_ge_check_delay;
-
-    // never started event, we return delay before start
-    if (_gameEvent[entry].Start > currenttime)
-        return uint32(_gameEvent[entry].Start - currenttime);
-
-    uint32 delay;
-    // in event, we return the end of it
-    if ((((currenttime - _gameEvent[entry].Start) % (_gameEvent[entry].Occurence * 60)) < (_gameEvent[entry].Length * 60)))
-        // we return the delay before it ends
-        delay = (_gameEvent[entry].Length * MINUTE) - ((currenttime - _gameEvent[entry].Start) % (_gameEvent[entry].Occurence * MINUTE));
-    else                                                    // not in window, we return the delay before next start
-        delay = (_gameEvent[entry].Occurence * MINUTE) - ((currenttime - _gameEvent[entry].Start) % (_gameEvent[entry].Occurence * MINUTE));
-    // In case the end is before next check
-    if (_gameEvent[entry].End < time_t(currenttime + delay))
-        return uint32(_gameEvent[entry].End - currenttime);
-    else
-        return delay;
 }
 
 void GameEventMgr::StartInternalEvent(uint16 eventId)
@@ -383,8 +304,10 @@ void GameEventMgr::LoadEvents()
                 LOG_ERROR("sql.sql", "`game_event` game event id ({}) have not existed holiday id {}.", eventId, pGameEvent.HolidayId);
                 pGameEvent.HolidayId = HOLIDAY_NONE;
             }
-
-            SetHolidayEventTime(pGameEvent);
+            // Holiday date scheduling is handled by the Rust game-event-scheduler slice.
+            // SetHolidayEventTime (and HolidayDateCalculator) have been removed as part of
+            // the GES Inc-3 scheduler deletion. The slice drives start/stop via event.start
+            // and event.stop harness adapters.
         }
     } while (result->NextRow());
 
@@ -1069,130 +992,6 @@ void GameEventMgr::LoadFromDB()
     LoadEventPoolData();
 }
 
-void GameEventMgr::LoadHolidayDates()
-{
-    uint32 const oldMSTime = getMSTime();
-    uint32 dynamicCount = 0;
-    uint32 dbCount = 0;
-
-    // Step 1: Generate dynamic holiday dates based on current year
-    std::chrono::system_clock::time_point const now = std::chrono::system_clock::now();
-    std::time_t const nowTime = std::chrono::system_clock::to_time_t(now);
-    std::tm localTime = {};
-#ifdef _WIN32
-    localtime_s(&localTime, &nowTime);
-#else
-    localtime_r(&nowTime, &localTime);
-#endif
-    int const currentYear = localTime.tm_year + 1900;
-
-    for (auto const& rule : HolidayDateCalculator::GetHolidayRules())
-    {
-        HolidaysEntry* entry = const_cast<HolidaysEntry*>(sHolidaysStore.LookupEntry(rule.holidayId));
-        if (!entry)
-        {
-            LOG_INFO("server.loading", ">> Holiday {} not found in DBC - cannot set dynamic dates", rule.holidayId);
-            continue;
-        }
-
-        // Special handling for Darkmoon Faire - needs multiple dates per year (4 occurrences)
-        if (rule.type == HolidayCalculationType::DARKMOON_FAIRE)
-        {
-            int const locationOffset = rule.month;
-            std::vector<uint32_t> const dates = HolidayDateCalculator::GetDarkmoonFaireDates(locationOffset, currentYear - 1, 4, rule.offset);
-
-            uint8 dateId = 0;
-            for (auto const& packedDate : dates)
-            {
-                if (dateId >= MAX_HOLIDAY_DATES)
-                    break;
-
-                entry->Date[dateId++] = packedDate;
-                ++dynamicCount;
-            }
-
-            // Darkmoon Faire lasts 7 days (168 hours) - set Duration if not already set
-            if (!entry->Duration[0])
-                entry->Duration[0] = 168; // 7 days in hours
-
-            auto itr = std::lower_bound(ModifiedHolidays.begin(), ModifiedHolidays.end(), entry->Id);
-            if (itr == ModifiedHolidays.end() || *itr != entry->Id)
-                ModifiedHolidays.insert(itr, entry->Id);
-
-            continue;
-        }
-
-        // Generate dates for current year + 2 ahead (year capped at 2030 due to 5-bit client limitation)
-        for (int yearOffset = -1; yearOffset <= 2; ++yearOffset)
-        {
-            int const year = currentYear + yearOffset;
-            if (year > 2030)
-                break;
-
-            uint8 const dateId = static_cast<uint8>(yearOffset + 1);
-            if (dateId >= MAX_HOLIDAY_DATES)
-                break;
-
-            uint32_t const packedDate = HolidayDateCalculator::GetPackedHolidayDate(rule.holidayId, year);
-            entry->Date[dateId] = packedDate;
-
-            // Debug: decode and log the date
-            std::tm const date = HolidayDateCalculator::UnpackDate(packedDate);
-            LOG_DEBUG("server.loading", ">> Holiday {} Date[{}] = {}-{:02d}-{:02d}",
-                rule.holidayId, dateId, date.tm_year + 1900, date.tm_mon + 1, date.tm_mday);
-
-            ++dynamicCount;
-        }
-
-        auto itr = std::lower_bound(ModifiedHolidays.begin(), ModifiedHolidays.end(), entry->Id);
-        if (itr == ModifiedHolidays.end() || *itr != entry->Id)
-            ModifiedHolidays.insert(itr, entry->Id);
-    }
-
-    // Step 2: Check game_event.start_time for overrides (allows custom servers to override calculated dates)
-    // Only use as override if start_time year >= current year (ignore old static dates)
-    QueryResult result = WorldDatabase.Query("SELECT holiday, UNIX_TIMESTAMP(start_time) FROM game_event WHERE holiday != 0 AND start_time > '2000-12-31'");
-
-    if (result)
-    {
-        do
-        {
-            Field* fields = result->Fetch();
-
-            uint32 const holidayId = fields[0].Get<uint32>();
-            HolidaysEntry* entry = const_cast<HolidaysEntry*>(sHolidaysStore.LookupEntry(holidayId));
-            if (!entry)
-                continue;
-
-            if (fields[1].IsNull())
-                continue;
-
-            time_t const startTime = fields[1].Get<uint64>();
-            if (startTime == 0)
-                continue;
-
-            std::tm const timeInfo = Acore::Time::TimeBreakdown(startTime);
-
-            int const year = timeInfo.tm_year + 1900;
-            // Only override if start_time is current year or later (ignore old static dates)
-            if (year < currentYear || year > 2030)
-                continue;
-
-            // Pack the date in WoW format and override Date[0]
-            uint32_t const yearOffset = static_cast<uint32_t>(year - 2000);
-            uint32_t const month = static_cast<uint32_t>(timeInfo.tm_mon);
-            uint32_t const day = static_cast<uint32_t>(timeInfo.tm_mday - 1);
-            uint32_t const weekday = static_cast<uint32_t>(timeInfo.tm_wday);
-            entry->Date[0] = (yearOffset << 24) | (month << 20) | (day << 14) | (weekday << 11);
-
-            ++dbCount;
-        } while (result->NextRow());
-    }
-
-    LOG_INFO("server.loading", ">> Loaded {} Holiday Dates ({} dynamic, {} game_event overrides) in {} ms",
-        dynamicCount + dbCount, dynamicCount, dbCount, GetMSTimeDiffToNow(oldMSTime));
-}
-
 uint32 GameEventMgr::GetNPCFlag(Creature* cr)
 {
     uint32 mask = 0;
@@ -1233,91 +1032,35 @@ void GameEventMgr::Initialize()
     }
 }
 
-uint32 GameEventMgr::StartSystem()                           // return the next event delay in ms
+void GameEventMgr::SpawnNegativeEventObjects()
 {
-    _activeEvents.clear();
-    uint32 delay = Update();
-    _isSystemInit = true;
-    return delay;
-}
-
-uint32 GameEventMgr::Update()                               // return the next event delay in ms
-{
-    time_t currenttime = GameTime::GetGameTime().count();
-    uint32 nextEventDelay = max_ge_check_delay;             // 1 day
-    uint32 calcDelay;
-    std::set<uint16> activate, deactivate;
+    // GES Inc-3: called once at load time from StartSystem().
+    // Spawns objects tagged to "negative" (inactive) event slots — those that exist
+    // in the world when an event is NOT running.  This is load-time-only work and
+    // does not depend on the deleted date-scheduler.  All per-tick scheduling is now
+    // handled by the Rust game-event-scheduler slice via event.start / event.stop
+    // harness adapters.
     for (uint16 itr = 1; itr < _gameEvent.size(); ++itr)
     {
-        // must do the activating first, and after that the deactivating
-        // so first queue it
-        //LOG_ERROR("sql.sql", "Checking event {}", itr);
-
-        sScriptMgr->OnGameEventCheck(itr);
-
-        if (CheckOneGameEvent(itr))
+        if (!IsActiveEvent(itr))
         {
-            // if the world event is in NEXTPHASE state, and the time has passed to finish this event, then do so
-            if (_gameEvent[itr].State == GAMEEVENT_WORLD_NEXTPHASE && _gameEvent[itr].NextStart <= currenttime)
-            {
-                // set this event to finished, null the nextstart time
-                _gameEvent[itr].State = GAMEEVENT_WORLD_FINISHED;
-                _gameEvent[itr].NextStart = 0;
-                // save the state of this gameevent
-                SaveWorldEventStateToDB(itr);
-                // queue for deactivation
-                if (IsActiveEvent(itr))
-                    deactivate.insert(itr);
-                // go to next event, this no longer needs an event update timer
-                continue;
-            }
-            else if (_gameEvent[itr].State == GAMEEVENT_WORLD_CONDITIONS && CheckOneGameEventConditions(itr))
-                // changed, save to DB the gameevent state, will be updated in next update cycle
-                SaveWorldEventStateToDB(itr);
-
-            // queue for activation
-            if (!IsActiveEvent(itr))
-                activate.insert(itr);
+            int16 event_nid = (-1) * (int16)(itr);
+            GameEventSpawn(event_nid);
         }
-        else
-        {
-            // If event is inactive, periodically clean up its worldstate
-            sWorldState->setWorldState(itr, 0);
-
-            if (IsActiveEvent(itr))
-            {
-                // Xinef: do not deactivate internal events on whim
-                if (_gameEvent[itr].State != GAMEEVENT_INTERNAL)
-                    deactivate.insert(itr);
-            }
-            else
-            {
-                if (!_isSystemInit)
-                {
-                    int16 event_nid = (-1) * (itr);
-                    // spawn all negative ones for this event
-                    GameEventSpawn(event_nid);
-                }
-            }
-        }
-        calcDelay = NextCheck(itr);
-        if (calcDelay < nextEventDelay)
-            nextEventDelay = calcDelay;
     }
-    // now activate the queue
-    // a now activated event can contain a spawn of a to-be-deactivated one
-    // following the activate - deactivate order, deactivating the first event later will leave the spawn in (wont disappear then reappear clientside)
-    for (std::set<uint16>::iterator itr = activate.begin(); itr != activate.end(); ++itr)
-        // start the event
-        // returns true the started event completed
-        // in that case, initiate next update in 1 second
-        if (StartEvent(*itr))
-            nextEventDelay = 0;
-    for (std::set<uint16>::iterator itr = deactivate.begin(); itr != deactivate.end(); ++itr)
-        StopEvent(*itr);
+}
 
-    LOG_DEBUG("gameevent", "Next game event check in {} seconds.", nextEventDelay + 1);
-    return (nextEventDelay + 1) * IN_MILLISECONDS;           // Add 1 second to be sure event has started/stopped at next call
+void GameEventMgr::StartSystem()
+{
+    // GES Inc-3: the date scheduler (Update/CheckOneGameEvent/NextCheck/LoadHolidayDates/
+    // SetHolidayEventTime/HolidayDateCalculator) has been deleted.  The Rust
+    // game-event-scheduler slice drives all world-event transitions via the
+    // event.start / event.stop harness adapters.  At boot the active set starts empty;
+    // the slice reconciles it to the correct schedule within one tick (~5 s).
+    _activeEvents.clear();
+    SpawnNegativeEventObjects();
+    _isSystemInit = true;
+    LOG_INFO("server.loading", "GameEvent system started (slice-driven; native scheduler removed).");
 }
 
 void GameEventMgr::UnApplyEvent(uint16 eventId)
@@ -1911,98 +1654,6 @@ void GameEventMgr::RunSmartAIScripts(uint16 eventId, bool activate)
         TypeContainerVisitor<GameEventAIHookWorker, MapStoredObjectTypesContainer> visitor(worker);
         visitor.Visit(map->GetObjectsStore());
     });
-}
-
-void GameEventMgr::SetHolidayEventTime(GameEventData& event)
-{
-    if (!event.HolidayStage) // Ignore holiday
-        return;
-
-    HolidaysEntry const* holiday = sHolidaysStore.LookupEntry(event.HolidayId);
-
-    if (!holiday->Date[0] || !holiday->Duration[0]) // Invalid definitions
-    {
-        LOG_ERROR("sql.sql", "Missing date or duration for holiday {}.", event.HolidayId);
-        return;
-    }
-
-    uint8 stageIndex = event.HolidayStage - 1;
-    event.Length = holiday->Duration[stageIndex] * HOUR / MINUTE;
-
-    time_t stageOffset = 0;
-    for (uint8 i = 0; i < stageIndex; ++i)
-    {
-        stageOffset += holiday->Duration[i] * HOUR;
-    }
-
-    switch (holiday->CalendarFilterType)
-    {
-        case -1: // Yearly
-            event.Occurence = YEAR / MINUTE; // Not all too useful
-            break;
-        case 0: // Weekly
-            event.Occurence = WEEK / MINUTE;
-            break;
-        case 1: // Defined dates only (Darkmoon Faire)
-            break;
-        case 2: // Only used for looping events (Call to Arms)
-            break;
-    }
-
-    if (holiday->Looping)
-    {
-        event.Occurence = 0;
-        for (uint8 i = 0; i < MAX_HOLIDAY_DURATIONS && holiday->Duration[i]; ++i)
-        {
-            event.Occurence += holiday->Duration[i] * HOUR / MINUTE;
-        }
-    }
-
-    bool singleDate = ((holiday->Date[0] >> 24) & 0x1F) == 31; // Events with fixed date within year have - 1
-
-    time_t curTime = GameTime::GetGameTime().count();
-
-    if (!singleDate)
-    {
-        time_t start = HolidayDateCalculator::FindStartTimeForStage(
-            holiday->Date, MAX_HOLIDAY_DATES, stageOffset, event.Length, curTime);
-        if (start)
-            event.Start = start;
-
-        return;
-    }
-
-    for (uint8 i = 0; i < MAX_HOLIDAY_DATES && holiday->Date[i]; ++i)
-    {
-        uint32 date = holiday->Date[i];
-
-        tm timeInfo = Acore::Time::TimeBreakdown(curTime);
-        timeInfo.tm_year -= 1; // First try last year (event active through New Year)
-
-        timeInfo.tm_mon = (date >> 20) & 0xF;
-        timeInfo.tm_mday = ((date >> 14) & 0x3F) + 1;
-        timeInfo.tm_hour = (date >> 6) & 0x1F;
-        timeInfo.tm_min = date & 0x3F;
-        timeInfo.tm_sec = 0;
-        timeInfo.tm_isdst = -1;
-
-        // try to get next start time (skip past dates)
-        time_t startTime = mktime(&timeInfo);
-        if (curTime < startTime + stageOffset + event.Length * MINUTE)
-        {
-            event.Start = startTime + stageOffset;
-            break;
-        }
-        else
-        {
-            tm tmCopy = Acore::Time::TimeBreakdown(curTime);
-            int year = tmCopy.tm_year; // This year
-            tmCopy = timeInfo;
-            tmCopy.tm_year = year;
-            event.Start = mktime(&tmCopy) + stageOffset;
-            break;
-        }
-    }
 }
 
 uint32 GameEventMgr::GetHolidayEventId(uint32 holidayId) const

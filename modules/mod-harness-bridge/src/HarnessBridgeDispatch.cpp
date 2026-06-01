@@ -146,6 +146,9 @@ namespace HarnessBridge
 #include "Adapters/MemoryDeleteAdapter.h"
 #include "Adapters/LfgFormGroupAdapter.h"
 #include "Adapters/ObsLfgPendingAdapter.h"
+#include "Adapters/ObsGameEventsAdapter.h"
+#include "Adapters/EventStartAdapter.h"
+#include "Adapters/EventStopAdapter.h"
 
 #include <unordered_map>
 #include <functional>
@@ -165,8 +168,12 @@ namespace HarnessBridge
         // obs.list_players, obs.list_bot_population.
         // LFG strangler-fig Inc-1 Stage 1: +1 lfg.form_group.
         // LFG strangler-fig Inc-1 Stage 3: +1 obs.lfg_pending.
-        // Total C++ adapters: 42. Daemon-direct obs.query_db brings the
-        // total exposed surface to 43 tools across HTTP /v1/* and MCP.
+        // GES Inc-1 (Task 9): +1 obs.game_events (resolved schedule +
+        // active set + sHolidaysStore dump — read-only).
+        // GES Inc-2 (Task A): +2 mutating event primitives:
+        // event.start, event.stop (slice-driven transitions).
+        // Total C++ adapters: 45. Daemon-direct obs.query_db brings the
+        // total exposed surface to 46 tools across HTTP /v1/* and MCP.
         static std::unordered_map<std::string, AdapterFn> const table = {
             {"obs.ping",                  &Adapters::ObsPing},
             {"obs.get_state",             &Adapters::ObsGetState},
@@ -181,6 +188,9 @@ namespace HarnessBridge
             {"obs.get_group",             &Adapters::ObsGetGroup},
             {"obs.list_bot_population",   &Adapters::ObsListBotPopulation},
             {"obs.list_players",          &Adapters::ObsListPlayers},
+            {"obs.game_events",           &Adapters::ObsGameEvents},
+            {"event.start",               &Adapters::EventStart},
+            {"event.stop",                &Adapters::EventStop},
             {"gm.additem",                &Adapters::GmAdditem},
             {"gm.equip_all",              &Adapters::GmEquipAll},
             {"gm.teleport",               &Adapters::GmTeleport},
