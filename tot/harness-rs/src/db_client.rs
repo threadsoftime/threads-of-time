@@ -5,8 +5,6 @@
 //! parameter names and produces a parameterised statement via mysql_async
 //! prepared-statement (`exec`) protocol.
 
-use std::collections::HashMap;
-
 use mysql_async::{
     prelude::Queryable,
     Opts, OptsBuilder, Pool, Row as MysqlRow, Value as MysqlValue,
@@ -91,10 +89,6 @@ static V1_TEMPLATES: &[QueryTemplate] = &[
     },
 ];
 
-fn templates_map() -> HashMap<&'static str, QueryTemplate> {
-    V1_TEMPLATES.iter().map(|t| (t.name, *t)).collect()
-}
-
 // ── DbError ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
@@ -118,9 +112,9 @@ pub fn validate_template(
     name: &str,
     params: &Value,
 ) -> Result<(QueryTemplate, Vec<Value>), DbError> {
-    let map = templates_map();
-    let tpl = map
-        .get(name)
+    let tpl = V1_TEMPLATES
+        .iter()
+        .find(|t| t.name == name)
         .copied()
         .ok_or_else(|| DbError::UnknownTemplate(name.to_string()))?;
 
@@ -196,18 +190,18 @@ fn mysql_to_json(v: MysqlValue) -> Value {
 /// Convert a `mysql_async::Row` to a `serde_json::Value` Object.
 ///
 /// Column name → cell value. Column names come from `row.columns_ref()`.
-fn row_to_json(row: MysqlRow) -> Value {
+/// Single-pass: binds `mut row` once, calls `take(i)` for each column in
+/// order. No per-column clone of the whole row.
+fn row_to_json(mut row: MysqlRow) -> Value {
+    let columns = row.columns_ref().to_vec();
     let mut map = Map::new();
-    let columns = row.columns_ref().to_vec(); // clone column metadata
     for (i, col) in columns.iter().enumerate() {
         let name = col.name_str().into_owned();
-        // `row.as_ref(i)` borrows, so we use `take` to move the Value out.
-        let cell: Option<MysqlValue> = row.clone().take(i); // take consumes cell
-        let json_val = match cell {
+        let cell: Option<MysqlValue> = row.take::<MysqlValue, usize>(i);
+        map.insert(name, match cell {
             Some(v) => mysql_to_json(v),
-            None    => Value::Null, // column was taken (shouldn't happen here)
-        };
-        map.insert(name, json_val);
+            None    => Value::Null,
+        });
     }
     Value::Object(map)
 }
@@ -244,8 +238,9 @@ impl DbClient {
 
         let mut conn = self.pool.get_conn().await?;
 
-        // Switch database.
-        conn.query_drop(format!("USE {}", tpl.db)).await?;
+        // Switch database.  Backtick-quote the identifier for defense-in-depth
+        // (db names are a static allowlist, but quoting is the correct form).
+        conn.query_drop(format!("USE `{}`", tpl.db)).await?;
 
         // Convert JSON params to mysql_async Params.
         let mysql_params: Vec<MysqlValue> = ordered_params
@@ -275,14 +270,14 @@ mod tests {
 
     #[test]
     fn all_6_templates_registered() {
-        let m = templates_map();
-        assert_eq!(m.len(), 6, "expected 6 templates, got {}", m.len());
-        assert!(m.contains_key("bracket_set_bonus_map_for"));
-        assert!(m.contains_key("item_template_set_pieces"));
-        assert!(m.contains_key("bracketsets_diag"));
-        assert!(m.contains_key("character_online"));
-        assert!(m.contains_key("character_online_by_class"));
-        assert!(m.contains_key("game_event_all"));
+        let names: Vec<&str> = V1_TEMPLATES.iter().map(|t| t.name).collect();
+        assert_eq!(names.len(), 6, "expected 6 templates, got {}", names.len());
+        assert!(names.contains(&"bracket_set_bonus_map_for"));
+        assert!(names.contains(&"item_template_set_pieces"));
+        assert!(names.contains(&"bracketsets_diag"));
+        assert!(names.contains(&"character_online"));
+        assert!(names.contains(&"character_online_by_class"));
+        assert!(names.contains(&"game_event_all"));
     }
 
     #[test]
@@ -327,8 +322,7 @@ mod tests {
 
     #[test]
     fn bracket_set_bonus_map_signature() {
-        let m = templates_map();
-        let tpl = m["bracket_set_bonus_map_for"];
+        let tpl = V1_TEMPLATES.iter().find(|t| t.name == "bracket_set_bonus_map_for").unwrap();
         assert_eq!(tpl.db, "acore_world");
         assert_eq!(tpl.params, &["itemset_id", "class_id", "spec_id"]);
         assert!(tpl.sql.contains("FROM bracket_set_bonus_map"));
@@ -336,8 +330,7 @@ mod tests {
 
     #[test]
     fn game_event_all_is_parameter_free() {
-        let m = templates_map();
-        let tpl = m["game_event_all"];
+        let tpl = V1_TEMPLATES.iter().find(|t| t.name == "game_event_all").unwrap();
         assert_eq!(tpl.db, "acore_world");
         assert!(tpl.params.is_empty(), "game_event_all must have no params");
         // Required columns per schema check 2026-05-30:

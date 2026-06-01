@@ -64,7 +64,7 @@ async fn handle_dispatch(
     let recorded = RecordedRequest {
         headers: headers
             .iter()
-            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<non-utf8>").to_string()))
             .collect(),
         body: body.clone(),
     };

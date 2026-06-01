@@ -272,6 +272,8 @@ mod tests {
         // Build a tiny one-shot axum server that returns plain text:
         let text_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let text_port = text_listener.local_addr().unwrap().port();
+        // Bind happens before spawn — the OS socket is already listening, so no
+        // sleep is needed before connecting (new connections queue in the kernel).
         tokio::spawn(async move {
             let text_app = axum::Router::new().route(
                 "/dispatch",
@@ -285,9 +287,6 @@ mod tests {
             );
             axum::serve(text_listener, text_app).await.unwrap();
         });
-
-        // Give the background server a moment to start
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         let client = ACClient::new(&format!("http://127.0.0.1:{text_port}"), 3.0);
         let resp = client
@@ -312,6 +311,8 @@ mod tests {
 
         let text_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let text_port = text_listener.local_addr().unwrap().port();
+        // Bind happens before spawn — the OS socket is already listening, so no
+        // sleep is needed before connecting (new connections queue in the kernel).
         tokio::spawn(async move {
             let text_app = axum::Router::new().route(
                 "/dispatch",
@@ -328,8 +329,6 @@ mod tests {
             );
             axum::serve(text_listener, text_app).await.unwrap();
         });
-
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         let client = ACClient::new(&format!("http://127.0.0.1:{text_port}"), 3.0);
         let resp = client
