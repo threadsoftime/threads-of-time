@@ -868,9 +868,13 @@ dependencies = [
 name = "harness-rs"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "axum 0.8.9",
+ "bytes",
  "clap",
  "http",
+ "http-body",
+ "http-body-util",
  "mysql_async",
  "nix",
  "reqwest",

@@ -40,3 +40,8 @@ http = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
+# spike example deps — pulled transitively by axum/rmcp in the main deps already
+bytes = "1"
+http-body = "1"
+http-body-util = "0.1"
+anyhow = "1"
