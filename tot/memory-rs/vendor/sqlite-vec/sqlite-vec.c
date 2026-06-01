@@ -65,9 +65,23 @@ SQLITE_EXTENSION_INIT1
 #ifndef __EMSCRIPTEN__
 #ifndef __COSMOPOLITAN__
 #ifndef __wasi__
+/* On Linux (both glibc and musl) <stdint.h> (included above) already defines
+ * uint8_t / uint16_t / uint64_t to the correct underlying types.  The BSD
+ * aliases u_int8_t / u_int16_t / u_int64_t are not portable across musl
+ * versions and clang musl-targeting toolchains, so we skip this block.
+ * On non-Linux POSIX targets (macOS, FreeBSD) <sys/types.h> defines the BSD
+ * aliases and these would be valid no-op redeclarations — but those targets
+ * are also excluded since they already have the types from <stdint.h>.
+ * The musl-gcc (Debian musl-tools) and zig-cc musl-targeting failures were:
+ *   musl-gcc 1.2.5: error: unknown type name 'u_int8_t'
+ *   zig-cc musl:    error: typedef redefinition ('unsigned _Int64' vs
+ *                          'unsigned long long') for uint64_t
+ * Both are resolved by not emitting these typedefs on __linux__. */
+#ifndef __linux__
 typedef u_int8_t uint8_t;
 typedef u_int16_t uint16_t;
 typedef u_int64_t uint64_t;
+#endif /* __linux__ */
 #endif
 #endif
 #endif

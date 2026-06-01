@@ -20,41 +20,45 @@ fn main() {
         // vendor dir for the sqlite-vec.h self-reference.
         .include("vendor/sqlite-vec");
 
-    // musl cross-compilation fix — applies to x86_64-unknown-linux-musl (the
-    // Heimdal container target) but NOT to macOS or glibc Linux targets.
+    // musl / Linux cross-compilation fix.
     //
-    // Root cause: sqlite-vec.c lines 64-74 contain a platform guard that
-    // intentionally skips a `typedef u_int8_t uint8_t` block only for _WIN32,
-    // __EMSCRIPTEN__, __COSMOPOLITAN__, and __wasi__. On any other target
-    // (including Linux/musl) the block runs. musl's standard headers do NOT
-    // export `u_int8_t` by default — it is a BSD extension available only when
-    // _BSD_SOURCE or _GNU_SOURCE is defined (musl sys/types.h §2). Without it,
-    // musl-gcc (in pre-C99 implicit-int mode) treats the undeclared `u_int8_t`
-    // as `int`. The typedef chain becomes:
-    //   typedef int uint8_t;   // wrong — should be unsigned char
-    //   typedef uint8_t u8;    // so u8 = int
-    // Functions like bitmap_copy/bitmap_get take `u8 *` (i.e. `int *`) but the
-    // call sites pass `unsigned char *` → the pointer-type mismatch the musl-gcc
-    // error reports: "u8 * {aka int *}". This IS a real codegen type bug under
-    // musl-gcc WITHOUT this fix: the pointer types differ in sign and (on some
-    // ABI) alignment assumptions.
+    // Root cause: sqlite-vec.c contained a block (lines 64-74 in the vendored
+    // amalgamation, now patched in vendor/sqlite-vec/sqlite-vec.c) that tried
+    // to re-typedef uint8_t / uint16_t / uint64_t via BSD aliases:
     //
-    // Fix: define _GNU_SOURCE for the musl target. musl honours _GNU_SOURCE as
-    // an alias for _BSD_SOURCE; it causes <sys/types.h> to define u_int8_t as
-    // `unsigned char` — the same underlying type that <stdint.h> already gave
-    // uint8_t. C11 §6.7.8 permits redeclaring a typedef to the IDENTICAL
-    // underlying type, so the repeated `typedef unsigned char uint8_t` is legal.
-    // Result: u8 = uint8_t = unsigned char — correct and consistent with the
-    // call sites. No miscompilation of bitmap operations; vec0 on-disk format
-    // is unchanged (it is determined by the SQLite virtual-table schema, not
-    // by this typedef).
+    //   #ifndef _WIN32 / __EMSCRIPTEN__ / __COSMOPOLITAN__ / __wasi__
+    //   typedef u_int8_t uint8_t;   // BSD alias — NOT in musl
+    //   typedef u_int16_t uint16_t;
+    //   typedef u_int64_t uint64_t;
+    //   #endif
     //
-    // macOS / glibc Linux: clang + Apple/BSD headers define u_int8_t via
-    // <sys/types.h> unconditionally, so the typedef was always correct there.
-    // That is why the bug only manifested under musl-gcc.
-    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("musl") {
-        build.define("_GNU_SOURCE", None);
-    }
+    // <stdint.h> is already included above the block and defines the correct
+    // types. The block was an unnecessary redeclaration — valid only when the
+    // BSD aliases exist AND expand to the identical underlying type. It failed
+    // in two distinct ways on Linux:
+    //
+    //   musl-gcc 1.2.5 (Heimdal, Debian musl-tools): u_int8_t not defined at
+    //     all — even with _GNU_SOURCE (musl does not expose BSD aliases via
+    //     _GNU_SOURCE; they must come from _BSD_SOURCE, which sqlite-vec does
+    //     not define). The compiler falls back to implicit int, making u8 = int
+    //     and triggering incompatible-pointer-type errors throughout.
+    //
+    //   zig-cc 0.16 (local musl cross via cargo-zigbuild): defines uint64_t as
+    //     `unsigned _Int64` (a clang internal alias); redefining it as
+    //     `unsigned long long` is a type-name conflict.
+    //
+    // Fix applied: the vendored sqlite-vec.c is patched to guard the block with
+    // an additional `#ifndef __linux__`. On Linux (glibc and musl), <stdint.h>
+    // provides the correct definitions; the BSD-alias block is skipped. On
+    // macOS / FreeBSD the block is also skipped (they have their own <stdint.h>
+    // already). No build.rs define needed — the C source patch is self-contained
+    // and robust across compilers.
+    //
+    // Previous attempts that did NOT work:
+    //   * -D_GNU_SOURCE (bake #1): musl ignores it for BSD aliases.
+    //   * -Du_int8_t="unsigned char" etc. (bake #2 candidate): resolves the
+    //     musl-gcc case but still fails zig-cc due to the unsigned _Int64
+    //     conflict for uint64_t.
 
     // The amalgamation does `#include "sqlite3.h"` under SQLITE_CORE. Point cc
     // at the *bundled* SQLite header that libsqlite3-sys ships and the static
