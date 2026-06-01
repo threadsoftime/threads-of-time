@@ -1,7 +1,7 @@
 //! Shadow diff engine — three-check comparison of Rust-computed schedule against
 //! the C++ `obs.game_events` ground truth.
 //!
-//! `compute_report(gt, raw_events, rules)` is the single public entry point.
+//! `compute_report(gt, raw_events, rules, live_shadow_resolution)` is the single public entry point.
 //!
 //! # The three checks (and their anti-circularity contracts)
 //!
@@ -441,8 +441,24 @@ fn check_date_math_for_holiday(
 ///   sHolidaysStore dump + timing metadata).
 /// - `raw_events`: the raw SQL `game_event_all` rows (the compute inputs for CHECK 2).
 /// - `rules`: the static holiday rules from `holiday_rules()`.
+/// - `live_shadow_resolution`: when `true`, CHECK 1 (DateMath) and CHECK 2 (Resolution)
+///   are executed and their mismatches appear in `report.mismatches`.  When `false`
+///   (the post-Inc-3 default), those checks are skipped — their `CheckResult` fields
+///   remain at `{checked:0, matched:0}` and no `DateMath`/`Resolution` mismatches are
+///   produced.
 ///
-/// # Anti-circularity guarantee
+///   **Why this defaults to `false`:** the native C++ date resolver
+///   (`SetHolidayEventTime`, `LoadHolidayDates`, `HolidayDateCalculator`) was deleted
+///   in GES Inc-3.  The C++ `obs.game_events` adapter now reports raw/unresolved holiday
+///   dates and event Start/End.  Diffing Rust's correct resolved values against C++ raw
+///   values produces ~126 spurious mismatches (100 DateMath + 26 Resolution) on every
+///   tick, making the report misleading.  The active_set check retains valid live ground
+///   truth (the C++ active event list) and is the sole live invariant.  DateMath and
+///   Resolution correctness are validated by deterministic unit tests (the ported
+///   `HolidayDateCalculatorTest` vectors + forward-date probes) that do not depend on
+///   live C++ state.
+///
+/// # Anti-circularity guarantee (unchanged)
 /// - CHECK 1 uses only `holiday_id` + the rule to compute dates; `gt.holidays[].date[]`
 ///   is the comparison target only.
 /// - CHECK 2 uses `raw_events` rows + `HolidaysEntry` DBC data (not resolved start/end)
@@ -453,6 +469,7 @@ pub fn compute_report(
     gt: &GroundTruth,
     raw_events: &[GameEventInput],
     rules: &[HolidayRule],
+    live_shadow_resolution: bool,
 ) -> ShadowReport {
     let mut date_math = CheckResult::new();
     let mut resolution = CheckResult::new();
@@ -464,20 +481,26 @@ pub fn compute_report(
     let gen_year = gen_year_from_unix(gt.server_gametime, gt.server_tz_offset_secs);
 
     // ── CHECK 1: DateMath ──────────────────────────────────────────────────────
-    // For each holiday in the C++ dump, find its rule and compare Rust-computed dates.
-    for cpp_holiday in &gt.holidays {
-        if let Some(rule) = rule_for(cpp_holiday.holiday_id, rules) {
-            check_date_math_for_holiday(
-                cpp_holiday,
-                rule,
-                gen_year,
-                &mut date_math,
-                &mut mismatches,
-            );
+    // Gated by `live_shadow_resolution`.  When false (post-Inc-3 default), the C++
+    // date resolver has been deleted so the C++ holiday date dump is raw/unresolved —
+    // there is no valid ground truth to diff against.  The correctness of this math
+    // is covered by deterministic unit tests; skip the live diff to avoid spurious
+    // mismatches in the report.
+    if live_shadow_resolution {
+        for cpp_holiday in &gt.holidays {
+            if let Some(rule) = rule_for(cpp_holiday.holiday_id, rules) {
+                check_date_math_for_holiday(
+                    cpp_holiday,
+                    rule,
+                    gen_year,
+                    &mut date_math,
+                    &mut mismatches,
+                );
+            }
+            // If no rule is found (holiday not in our rules table), skip silently —
+            // the rules table only covers calculable holidays; DBC-static ones have
+            // no rule and their dates are constant, not computed.
         }
-        // If no rule is found (holiday not in our rules table), skip silently —
-        // the rules table only covers calculable holidays; DBC-static ones have
-        // no rule and their dates are constant, not computed.
     }
 
     // Build a lookup map: entry → &GroundTruthEvent (for CHECK 2 + 3 comparisons).
@@ -523,81 +546,84 @@ pub fn compute_report(
         let key = format!("event:{}", row.entry);
 
         // --- CHECK 2: Resolution ---
-        // Compare Rust-resolved {start, end, occurence, length} to gt.events[entry].
-        // ManualStart events are excluded: their start/end are GM-rebased and not
-        // date-predictable; resolution mismatches are expected and out-of-scope.
-        // NonNormalState events' resolution is kept IN scope — Internal events'
-        // C++ start/end match the raw loaded values that the resolver reproduces.
+        // Gated by `live_shadow_resolution`.  When false (post-Inc-3 default), the C++
+        // date resolver has been deleted so gt.events[].{start,end,occurence,length} are
+        // raw/unresolved for holiday events — there is no valid ground truth to diff against.
+        // Resolution correctness is covered by deterministic unit tests.
         if let Some(&cpp_ev) = gt_event_by_entry.get(&row.entry) {
             let is_holiday = row.holiday != 0;
 
-            match resolution_exclusion_reason(row, gt.resolve_reference_unixtime) {
-                Some(reason) => {
-                    resolution_exclusions.push(ExcludedEvent { entry: row.entry, reason });
-                }
-                None => {
-                    // occurence and length: exact for both periodic and holiday.
-                    let occ_match = rust_resolved.occurence == cpp_ev.occurence;
-                    resolution.record(occ_match);
-                    if !occ_match {
-                        mismatches.push(Mismatch {
-                            kind: CheckKind::Resolution,
-                            key: key.clone(),
-                            field: "occurence".into(),
-                            rust: rust_resolved.occurence.to_string(),
-                            cpp: cpp_ev.occurence.to_string(),
-                        });
+            if live_shadow_resolution {
+                match resolution_exclusion_reason(row, gt.resolve_reference_unixtime) {
+                    Some(reason) => {
+                        resolution_exclusions.push(ExcludedEvent { entry: row.entry, reason });
                     }
+                    None => {
+                        // occurence and length: exact for both periodic and holiday.
+                        let occ_match = rust_resolved.occurence == cpp_ev.occurence;
+                        resolution.record(occ_match);
+                        if !occ_match {
+                            mismatches.push(Mismatch {
+                                kind: CheckKind::Resolution,
+                                key: key.clone(),
+                                field: "occurence".into(),
+                                rust: rust_resolved.occurence.to_string(),
+                                cpp: cpp_ev.occurence.to_string(),
+                            });
+                        }
 
-                    let len_match = rust_resolved.length == cpp_ev.length;
-                    resolution.record(len_match);
-                    if !len_match {
-                        mismatches.push(Mismatch {
-                            kind: CheckKind::Resolution,
-                            key: key.clone(),
-                            field: "length".into(),
-                            rust: rust_resolved.length.to_string(),
-                            cpp: cpp_ev.length.to_string(),
-                        });
-                    }
+                        let len_match = rust_resolved.length == cpp_ev.length;
+                        resolution.record(len_match);
+                        if !len_match {
+                            mismatches.push(Mismatch {
+                                kind: CheckKind::Resolution,
+                                key: key.clone(),
+                                field: "length".into(),
+                                rust: rust_resolved.length.to_string(),
+                                cpp: cpp_ev.length.to_string(),
+                            });
+                        }
 
-                    // start and end: diagnostic for holiday events (reference-time-dependent),
-                    // exact for periodic events (pure copy of DB columns).
-                    let start_match = rust_resolved.start == cpp_ev.start;
-                    resolution.record(start_match);
-                    if !start_match {
-                        let field_name = if is_holiday {
-                            "start[holiday-diagnostic]"
-                        } else {
-                            "start"
-                        };
-                        mismatches.push(Mismatch {
-                            kind: CheckKind::Resolution,
-                            key: key.clone(),
-                            field: field_name.into(),
-                            rust: rust_resolved.start.to_string(),
-                            cpp: cpp_ev.start.to_string(),
-                        });
-                    }
+                        // start and end: diagnostic for holiday events (reference-time-dependent),
+                        // exact for periodic events (pure copy of DB columns).
+                        let start_match = rust_resolved.start == cpp_ev.start;
+                        resolution.record(start_match);
+                        if !start_match {
+                            let field_name = if is_holiday {
+                                "start[holiday-diagnostic]"
+                            } else {
+                                "start"
+                            };
+                            mismatches.push(Mismatch {
+                                kind: CheckKind::Resolution,
+                                key: key.clone(),
+                                field: field_name.into(),
+                                rust: rust_resolved.start.to_string(),
+                                cpp: cpp_ev.start.to_string(),
+                            });
+                        }
 
-                    let end_match = rust_resolved.end == cpp_ev.end;
-                    resolution.record(end_match);
-                    if !end_match {
-                        let field_name = if is_holiday {
-                            "end[holiday-diagnostic]"
-                        } else {
-                            "end"
-                        };
-                        mismatches.push(Mismatch {
-                            kind: CheckKind::Resolution,
-                            key: key.clone(),
-                            field: field_name.into(),
-                            rust: rust_resolved.end.to_string(),
-                            cpp: cpp_ev.end.to_string(),
-                        });
+                        let end_match = rust_resolved.end == cpp_ev.end;
+                        resolution.record(end_match);
+                        if !end_match {
+                            let field_name = if is_holiday {
+                                "end[holiday-diagnostic]"
+                            } else {
+                                "end"
+                            };
+                            mismatches.push(Mismatch {
+                                kind: CheckKind::Resolution,
+                                key: key.clone(),
+                                field: field_name.into(),
+                                rust: rust_resolved.end.to_string(),
+                                cpp: cpp_ev.end.to_string(),
+                            });
+                        }
                     }
                 }
             }
+            // When live_shadow_resolution=false: skip CHECK 2 entirely — no entries in
+            // resolution.checked / resolution_exclusions / mismatches[Resolution].
 
             // --- CHECK 3: ActiveSet ---
             // Scope: only check events where state==Normal (per C++ runtime state) AND
@@ -950,7 +976,7 @@ mod tests {
     fn all_consistent_zero_active_set_mismatches() {
         let (gt, raw_events) = build_consistent_gt_and_raw(None);
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
         assert_eq!(
             report.active_set.mismatches(),
             0,
@@ -964,7 +990,7 @@ mod tests {
     fn periodic_active_event_passes_resolution_and_active_set() {
         let (gt, raw_events) = build_consistent_gt_and_raw(None);
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
 
         // Event 10 is active — should contribute matched entries to active_set.
         let active_mismatches_for_10: Vec<_> = report
@@ -981,7 +1007,7 @@ mod tests {
     fn periodic_inactive_event_matches_gt() {
         let (gt, raw_events) = build_consistent_gt_and_raw(None);
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
 
         // Event 11 is inactive — should also have no mismatches.
         let active_mismatches_for_11: Vec<_> = report
@@ -998,7 +1024,7 @@ mod tests {
     fn holiday_event_active_set_matches() {
         let (gt, raw_events) = build_consistent_gt_and_raw(None);
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
 
         // Event 16 (holiday) is inactive at Jun 2 (before Jul 4 2026).
         // active_set check should agree.
@@ -1016,7 +1042,7 @@ mod tests {
     fn date_math_hallowsend_agrees() {
         let (gt, raw_events) = build_consistent_gt_and_raw(None);
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
 
         let date_math_mismatches: Vec<_> = report
             .mismatches
@@ -1044,7 +1070,7 @@ mod tests {
         ev10.is_active = false; // injected lie
 
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
 
         let active_mismatches_for_10: Vec<_> = report
             .mismatches
@@ -1087,7 +1113,7 @@ mod tests {
         h324.date[1] = 0xDEADBEEF; // injected wrong value
 
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
 
         let date_mismatches_324: Vec<_> = report
             .mismatches
@@ -1117,7 +1143,7 @@ mod tests {
     fn report_metadata_fields() {
         let (gt, raw_events) = build_consistent_gt_and_raw(None);
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
         assert_eq!(report.server_gametime, SERVER_GAMETIME);
         assert_eq!(report.resolve_reference_unixtime, RESOLVE_REF);
     }
@@ -1128,7 +1154,7 @@ mod tests {
     fn shadow_report_is_serializable() {
         let (gt, raw_events) = build_consistent_gt_and_raw(None);
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
         let json = serde_json::to_string(&report).expect("ShadowReport must serialize to JSON");
         assert!(json.contains("server_gametime"), "serialized JSON must contain server_gametime");
         assert!(json.contains("active_set"), "serialized JSON must contain active_set");
@@ -1143,7 +1169,7 @@ mod tests {
         // Build gt where active_event_list does NOT contain event 10, but is_active=true.
         let (gt, raw_events) = build_consistent_gt_and_raw(Some(vec![])); // empty active list
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
 
         // Rust computes event 10 as active (is_active=true).
         // vs_list: true vs false (not in list) → mismatch.
@@ -1254,7 +1280,7 @@ mod tests {
         ];
 
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
 
         // active_set.checked must be 0 (excluded, not checked)
         assert_eq!(
@@ -1303,7 +1329,7 @@ mod tests {
         ];
 
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
 
         // active_set.checked must be 0 (excluded)
         assert_eq!(
@@ -1341,7 +1367,7 @@ mod tests {
         raw_events.push(make_raw_with_state(50, Some(start_50), Some(end_50), GameEventState::Internal));
 
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
 
         // active_set_exclusions must contain event 50
         let excluded_50 = report.active_set_exclusions.iter().find(|e| e.entry == 50);
@@ -1369,7 +1395,7 @@ mod tests {
         // with non-equal start/end relative to RESOLVE_REF.
         let (gt, raw_events) = build_consistent_gt_and_raw(None);
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
 
         assert_eq!(
             report.active_set.matched, report.active_set.checked,
@@ -1401,7 +1427,7 @@ mod tests {
             make_raw_with_state(70, Some(start_70), Some(end_70), GameEventState::WorldInactive),
         ];
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
 
         assert_eq!(report.active_set.checked, 0, "WorldInactive event must not contribute to checked");
         assert_eq!(report.active_set_exclusions.len(), 1);
@@ -1447,7 +1473,7 @@ mod tests {
         ];
 
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
 
         // Must be excluded — NOT checked in active_set
         assert_eq!(
@@ -1501,7 +1527,7 @@ mod tests {
         ];
 
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
 
         // Must be excluded
         assert_eq!(
@@ -1532,7 +1558,7 @@ mod tests {
         // This verifies the manual-start exclusion does not false-positive.
         let (gt, raw_events) = build_consistent_gt_and_raw(None);
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
 
         // No exclusions expected for the standard fixture
         let excluded_10 = report.active_set_exclusions.iter().find(|e| e.entry == 10);
@@ -1547,7 +1573,7 @@ mod tests {
     fn shadow_report_serialization_includes_exclusions_field() {
         let (gt, raw_events) = build_consistent_gt_and_raw(None);
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
         let json = serde_json::to_string(&report).expect("must serialize");
         assert!(
             json.contains("active_set_exclusions"),
@@ -1611,7 +1637,7 @@ mod tests {
         let raw_events = vec![raw];
 
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
 
         // Must NOT be in active_set_exclusions
         let excluded_80 = report.active_set_exclusions.iter().find(|e| e.entry == 80);
@@ -1670,7 +1696,7 @@ mod tests {
         let raw_events = vec![raw];
 
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
 
         // Active-set: event 81 must be checked (×2) and have zero mismatches
         assert!(report.active_set.checked >= 2, "null/null active event must contribute to active_set.checked");
@@ -1713,7 +1739,7 @@ mod tests {
         ];
 
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
 
         // active_set: excluded, not checked
         assert_eq!(report.active_set.checked, 0, "ManualStart must not contribute to active_set.checked");
@@ -1775,7 +1801,7 @@ mod tests {
         let raw_events = vec![raw];
 
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw_events, rules);
+        let report = compute_report(&gt, &raw_events, rules, true);
 
         // Must NOT be excluded
         assert!(!report.active_set_exclusions.iter().any(|e| e.entry == 82),
@@ -1852,5 +1878,197 @@ mod tests {
             next_start: 0,
         };
         assert!(!is_manual_start(&ev_f, RESOLVE_REF), "holiday event must NOT be ManualStart even if start==end");
+    }
+
+    // ── live_shadow_resolution=false gate tests ───────────────────────────────
+    //
+    // Post-GES-Inc-3: the native C++ date resolver (SetHolidayEventTime /
+    // LoadHolidayDates / HolidayDateCalculator) was deleted.  The C++ ground
+    // truth for holiday dates and resolved event Start/End is now raw/unresolved.
+    // These tests verify:
+    //
+    //  (m) When live_shadow_resolution=false, a raw-vs-resolved DateMath difference
+    //      does NOT produce a mismatch (the check is skipped entirely).
+    //  (n) When live_shadow_resolution=false, a raw-vs-resolved Resolution difference
+    //      does NOT produce a mismatch.
+    //  (o) When live_shadow_resolution=false, an active_set divergence still fires.
+    //  (p) When live_shadow_resolution=false, date_math and resolution CheckResults
+    //      remain at {checked:0, matched:0} even with corrupted C++ ground truth.
+    //  (q) When live_shadow_resolution=true, the same corrupted data produces mismatches
+    //      (confirming the gate actually controls behaviour).
+
+    // ── (m) date_math corruption suppressed when gate=false ──────────────────
+
+    #[test]
+    fn date_math_corruption_suppressed_when_gate_off() {
+        // Use the standard consistent fixture but corrupt date[1] for holiday 324.
+        let (mut gt, raw_events) = build_consistent_gt_and_raw(None);
+        let h324 = gt.holidays.iter_mut().find(|h| h.holiday_id == 324).unwrap();
+        h324.date[1] = 0xDEADBEEF; // injected wrong value — would fire when gate=true
+
+        let rules = holiday_rules();
+        // Gate OFF (post-Inc-3 default): spurious C++ raw data must not produce mismatches.
+        let report = compute_report(&gt, &raw_events, rules, false);
+
+        // No DateMath mismatches
+        let date_mismatches: Vec<_> = report
+            .mismatches
+            .iter()
+            .filter(|m| matches!(m.kind, CheckKind::DateMath))
+            .collect();
+        assert!(
+            date_mismatches.is_empty(),
+            "DateMath mismatches must be suppressed when live_shadow_resolution=false: {:?}",
+            date_mismatches
+        );
+
+        // date_math CheckResult stays at {0, 0}
+        assert_eq!(
+            report.date_math.checked, 0,
+            "date_math.checked must be 0 when live_shadow_resolution=false"
+        );
+        assert_eq!(
+            report.date_math.matched, 0,
+            "date_math.matched must be 0 when live_shadow_resolution=false"
+        );
+    }
+
+    // ── (n) resolution corruption suppressed when gate=false ─────────────────
+
+    #[test]
+    fn resolution_corruption_suppressed_when_gate_off() {
+        // Corrupt the C++ start value for event 10 (periodic, in-scope).
+        let (mut gt, raw_events) = build_consistent_gt_and_raw(None);
+        let ev10 = gt.events.iter_mut().find(|e| e.entry == 10).unwrap();
+        ev10.start = ev10.start + 99_999; // deliberate mismatch vs Rust-computed start
+
+        let rules = holiday_rules();
+        // Gate OFF: resolution diff must be suppressed.
+        let report = compute_report(&gt, &raw_events, rules, false);
+
+        // No Resolution mismatches
+        let res_mismatches: Vec<_> = report
+            .mismatches
+            .iter()
+            .filter(|m| matches!(m.kind, CheckKind::Resolution))
+            .collect();
+        assert!(
+            res_mismatches.is_empty(),
+            "Resolution mismatches must be suppressed when live_shadow_resolution=false: {:?}",
+            res_mismatches
+        );
+
+        // resolution CheckResult stays at {0, 0}
+        assert_eq!(
+            report.resolution.checked, 0,
+            "resolution.checked must be 0 when live_shadow_resolution=false"
+        );
+        assert_eq!(
+            report.resolution.matched, 0,
+            "resolution.matched must be 0 when live_shadow_resolution=false"
+        );
+    }
+
+    // ── (o) active_set divergence still fires when gate=false ─────────────────
+
+    #[test]
+    fn active_set_mismatch_still_fires_when_gate_off() {
+        // Flip event 10's C++ is_active to produce a divergence.
+        let (mut gt, raw_events) = build_consistent_gt_and_raw(None);
+        let ev10 = gt.events.iter_mut().find(|e| e.entry == 10).unwrap();
+        ev10.is_active = false; // injected lie — Rust computes true
+
+        let rules = holiday_rules();
+        // Gate OFF: active_set check must still run and detect the mismatch.
+        let report = compute_report(&gt, &raw_events, rules, false);
+
+        let active_mismatches: Vec<_> = report
+            .mismatches
+            .iter()
+            .filter(|m| matches!(m.kind, CheckKind::ActiveSet))
+            .collect();
+        assert!(
+            !active_mismatches.is_empty(),
+            "active_set mismatch must still be recorded even when live_shadow_resolution=false"
+        );
+        assert!(
+            report.active_set.mismatches() > 0,
+            "active_set.mismatches() must be > 0"
+        );
+    }
+
+    // ── (p) gate=false → date_math and resolution stay {0,0} even with corrupt data ──
+
+    #[test]
+    fn gate_off_leaves_date_math_and_resolution_zeroed() {
+        // Corrupt BOTH date_math and resolution ground truth.
+        let (mut gt, raw_events) = build_consistent_gt_and_raw(None);
+        // Corrupt holiday 324 dates
+        let h324 = gt.holidays.iter_mut().find(|h| h.holiday_id == 324).unwrap();
+        h324.date[0] = 0x11111111;
+        h324.date[1] = 0x22222222;
+        h324.date[2] = 0x33333333;
+        // Corrupt event 10 resolution
+        let ev10 = gt.events.iter_mut().find(|e| e.entry == 10).unwrap();
+        ev10.start = 0;
+        ev10.end = 1;
+        ev10.occurence = 1;
+        ev10.length = 1;
+
+        let rules = holiday_rules();
+        let report = compute_report(&gt, &raw_events, rules, false);
+
+        assert_eq!(report.date_math.checked, 0, "date_math.checked must remain 0");
+        assert_eq!(report.date_math.matched, 0, "date_math.matched must remain 0");
+        assert_eq!(report.resolution.checked, 0, "resolution.checked must remain 0");
+        assert_eq!(report.resolution.matched, 0, "resolution.matched must remain 0");
+
+        // Only active_set mismatches may appear (event 10's is_active is still correct here
+        // since we only corrupted start/end/occ/len — is_active is still the right value
+        // matching Rust's computation from the raw event… actually since we corrupted
+        // ev10.start/end this means the gt event start/end are wrong but we're not using
+        // those for is_active in CHECK 3 — Rust uses raw_events.  So active_set should be fine.)
+        // Active_set check computes Rust is_active from raw_events (not from gt.events[].start/end),
+        // so it is unaffected by the ev10 start/end corruption.
+        // The is_active field on ev10 is still 'true' (from is_active_10=true above).
+        // So active_set.mismatches() should still be 0.
+        assert_eq!(
+            report.active_set.mismatches(), 0,
+            "active_set.mismatches() must be 0 when active_set ground truth is untouched"
+        );
+
+        // Total mismatches in the report: only from active_set (which is 0 here).
+        assert_eq!(
+            report.mismatches.len(), 0,
+            "report.mismatches must be empty when only date_math/resolution ground truth is corrupted and gate=false"
+        );
+    }
+
+    // ── (q) gate=true with same corrupted data → mismatches fire ─────────────
+
+    #[test]
+    fn gate_on_with_corrupt_data_fires_mismatches() {
+        // Confirming the gate is actually what suppresses: same corruption as (m),
+        // but gate=true → DateMath mismatches appear.
+        let (mut gt, raw_events) = build_consistent_gt_and_raw(None);
+        let h324 = gt.holidays.iter_mut().find(|h| h.holiday_id == 324).unwrap();
+        h324.date[1] = 0xDEADBEEF;
+
+        let rules = holiday_rules();
+        let report = compute_report(&gt, &raw_events, rules, true); // gate ON
+
+        let date_mismatches: Vec<_> = report
+            .mismatches
+            .iter()
+            .filter(|m| matches!(m.kind, CheckKind::DateMath))
+            .collect();
+        assert!(
+            !date_mismatches.is_empty(),
+            "DateMath mismatches must fire when live_shadow_resolution=true and data is corrupt"
+        );
+        assert!(
+            report.date_math.checked > 0,
+            "date_math.checked must be > 0 when gate=true"
+        );
     }
 }

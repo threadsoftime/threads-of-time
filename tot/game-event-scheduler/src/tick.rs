@@ -68,7 +68,7 @@ pub async fn run(state: Arc<AppState>, harness: Harness, cfg: Config) {
         };
 
         let rules = holiday_rules();
-        let report = compute_report(&gt, &raw, rules);
+        let report = compute_report(&gt, &raw, rules, cfg.live_shadow_resolution);
 
         eprintln!(
             "[shadow] gametime={} active={}/{} resolution={}/{} date_math={}/{} mismatches={}",
@@ -240,6 +240,7 @@ mod tests {
             harness_bearer: "unused".to_string(),
             tick_secs: 1, // fire once, then again after 1s; we abort quickly
             drive: false,
+            live_shadow_resolution: false,
         };
 
         let handle = tokio::spawn(run(state.clone(), harness, cfg));
@@ -283,6 +284,7 @@ mod tests {
             harness_bearer: "unused".to_string(),
             tick_secs: 1,
             drive: false,
+            live_shadow_resolution: false,
         };
 
         let handle = tokio::spawn(run(state.clone(), harness, cfg));
@@ -309,6 +311,7 @@ mod tests {
             harness_bearer: "unused".to_string(),
             tick_secs: 1,
             drive: false,
+            live_shadow_resolution: false,
         };
 
         let handle = tokio::spawn(run(state.clone(), harness, cfg));
@@ -464,6 +467,7 @@ mod tests {
             harness_bearer: "unused".to_string(),
             tick_secs: 1,
             drive: true,
+            live_shadow_resolution: false,
         };
 
         let handle = tokio::spawn(run(state.clone(), harness, cfg));
@@ -528,6 +532,7 @@ mod tests {
             harness_bearer: "unused".to_string(),
             tick_secs: 1,
             drive: true,
+            live_shadow_resolution: false,
         };
 
         let handle = tokio::spawn(run(state.clone(), harness, cfg));
@@ -610,6 +615,7 @@ mod tests {
             harness_bearer: "unused".to_string(),
             tick_secs: 1,
             drive: true,
+            live_shadow_resolution: false,
         };
 
         let handle = tokio::spawn(run(state.clone(), harness, cfg));
@@ -669,6 +675,7 @@ mod tests {
             harness_bearer: "unused".to_string(),
             tick_secs: 1,
             drive: false,  // shadow-only — must NOT drive
+            live_shadow_resolution: false,
         };
 
         let handle = tokio::spawn(run(state.clone(), harness, cfg));

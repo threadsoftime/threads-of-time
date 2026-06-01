@@ -21,6 +21,24 @@ pub struct Config {
     /// **Default: `false` (shadow-only mode).**  Set `GES_DRIVE=true` to enable.
     /// Drive mode NEVER acts on excluded events (Internal / ManualStart / non-Normal).
     pub drive: bool,
+
+    /// When `true`, the live shadow report includes CHECK 1 (DateMath) and CHECK 2
+    /// (Resolution) diff results, and their mismatches contribute to `report.mismatches`.
+    ///
+    /// **Default: `false`.**  The native C++ date resolver (`SetHolidayEventTime`,
+    /// `LoadHolidayDates`, `HolidayDateCalculator`) was deleted in GES Inc-3, so the
+    /// C++ ground truth for holiday dates and resolved event Start/End is now raw/unresolved.
+    /// Diffing Rust's correct resolved values against C++ raw values produces ~126 spurious
+    /// mismatches on every tick, making the report misleading.  The active_set check still
+    /// has valid C++ ground truth (the live active set) and is the sole live invariant.
+    ///
+    /// The date-math and resolution correctness are validated by deterministic unit tests
+    /// (the ported `HolidayDateCalculatorTest` vectors + forward-date probes), which do not
+    /// depend on live C++ state and are unaffected by this flag.
+    ///
+    /// Set `GES_LIVE_SHADOW_RESOLUTION=true` to re-enable if/when a future C++ resolver
+    /// is added and live ground truth becomes valid again.
+    pub live_shadow_resolution: bool,
 }
 
 impl Config {
@@ -33,9 +51,15 @@ impl Config {
     /// | `HARNESS_BEARER` | yes | — |
     /// | `GES_TICK_SECS` | no | `15` |
     /// | `GES_DRIVE` | no | `false` |
+    /// | `GES_LIVE_SHADOW_RESOLUTION` | no | `false` |
     ///
-    /// `GES_DRIVE` accepts `"true"` or `"1"` (case-insensitive) to enable drive mode.
-    /// Any other value is treated as `false`.
+    /// `GES_DRIVE` and `GES_LIVE_SHADOW_RESOLUTION` accept `"true"` or `"1"`
+    /// (case-insensitive) to enable.  Any other value is treated as `false`.
+    ///
+    /// `GES_LIVE_SHADOW_RESOLUTION` defaults to `false` because the C++ date resolver
+    /// was deleted in GES Inc-3 — the C++ ground truth for holiday dates and resolved
+    /// event Start/End is now raw/unresolved.  See `Config::live_shadow_resolution` for
+    /// the full rationale.
     ///
     /// Returns `Err(String)` with a human-readable message for any missing required
     /// variable or parse failure.
@@ -61,7 +85,21 @@ impl Config {
             Err(_) => false,
         };
 
-        Ok(Config { listen_addr, harness_base_url, harness_bearer, tick_secs, drive })
+        // Default false: native C++ resolver deleted in GES Inc-3; live date/resolution
+        // ground truth is no longer valid — active_set is the sole live invariant.
+        let live_shadow_resolution = match std::env::var("GES_LIVE_SHADOW_RESOLUTION") {
+            Ok(s) => matches!(s.to_lowercase().as_str(), "true" | "1"),
+            Err(_) => false,
+        };
+
+        Ok(Config {
+            listen_addr,
+            harness_base_url,
+            harness_bearer,
+            tick_secs,
+            drive,
+            live_shadow_resolution,
+        })
     }
 }
 
@@ -264,6 +302,93 @@ mod tests {
             || {
                 let cfg = Config::from_env().expect("should succeed");
                 assert!(!cfg.drive, "drive must be false when GES_DRIVE=false");
+            },
+        );
+    }
+
+    // ── GES_LIVE_SHADOW_RESOLUTION ────────────────────────────────────────────
+    //
+    // These tests mirror the GES_DRIVE tests above.  The default is false because
+    // the native C++ date resolver was deleted in GES Inc-3; re-enable only if a
+    // future resolver is added and live ground truth becomes valid again.
+
+    #[test]
+    fn live_shadow_resolution_defaults_to_false_when_unset() {
+        with_env(
+            &[
+                ("HARNESS_BASE_URL", Some("http://localhost:8099")),
+                ("HARNESS_BEARER", Some("tok")),
+                ("GES_LISTEN_ADDR", None),
+                ("GES_TICK_SECS", None),
+                ("GES_DRIVE", None),
+                ("GES_LIVE_SHADOW_RESOLUTION", None),
+            ],
+            || {
+                let cfg = Config::from_env().expect("should succeed");
+                assert!(
+                    !cfg.live_shadow_resolution,
+                    "live_shadow_resolution must default to false when GES_LIVE_SHADOW_RESOLUTION is unset"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn live_shadow_resolution_true_when_set_to_true_string() {
+        with_env(
+            &[
+                ("HARNESS_BASE_URL", Some("http://localhost:8099")),
+                ("HARNESS_BEARER", Some("tok")),
+                ("GES_LISTEN_ADDR", None),
+                ("GES_TICK_SECS", None),
+                ("GES_LIVE_SHADOW_RESOLUTION", Some("true")),
+            ],
+            || {
+                let cfg = Config::from_env().expect("should succeed");
+                assert!(
+                    cfg.live_shadow_resolution,
+                    "live_shadow_resolution must be true when GES_LIVE_SHADOW_RESOLUTION=true"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn live_shadow_resolution_true_when_set_to_one() {
+        with_env(
+            &[
+                ("HARNESS_BASE_URL", Some("http://localhost:8099")),
+                ("HARNESS_BEARER", Some("tok")),
+                ("GES_LISTEN_ADDR", None),
+                ("GES_TICK_SECS", None),
+                ("GES_LIVE_SHADOW_RESOLUTION", Some("1")),
+            ],
+            || {
+                let cfg = Config::from_env().expect("should succeed");
+                assert!(
+                    cfg.live_shadow_resolution,
+                    "live_shadow_resolution must be true when GES_LIVE_SHADOW_RESOLUTION=1"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn live_shadow_resolution_false_when_set_to_false_string() {
+        with_env(
+            &[
+                ("HARNESS_BASE_URL", Some("http://localhost:8099")),
+                ("HARNESS_BEARER", Some("tok")),
+                ("GES_LISTEN_ADDR", None),
+                ("GES_TICK_SECS", None),
+                ("GES_LIVE_SHADOW_RESOLUTION", Some("false")),
+            ],
+            || {
+                let cfg = Config::from_env().expect("should succeed");
+                assert!(
+                    !cfg.live_shadow_resolution,
+                    "live_shadow_resolution must be false when GES_LIVE_SHADOW_RESOLUTION=false"
+                );
             },
         );
     }
