@@ -22,15 +22,16 @@ namespace HarnessBridge::Adapters
     DispatchResult BotQueueForDungeon(nlohmann::json const& args)
     {
         DispatchResult res;
-        if (!args.contains("bot_guid") || !args.contains("dungeon_id") || !args.contains("roles_mask"))
+        if (!args.contains("bot_guid") || !args.contains("dungeon_id"))
         {
             res.outcome = DispatchResult::Outcome::BadArgs;
-            res.error_message = "bot.queue_for_dungeon: bot_guid + dungeon_id + roles_mask required";
+            res.error_message = "bot.queue_for_dungeon: bot_guid + dungeon_id required";
             return res;
         }
         uint64_t bot_low   = args["bot_guid"].get<uint64_t>();
         int dungeon_id_arg = args["dungeon_id"].get<int>();
-        int roles_mask_arg = args["roles_mask"].get<int>();
+        // roles_mask is optional: absent or 0 → auto-detect from bot's talent spec.
+        int roles_mask_arg = args.contains("roles_mask") ? args["roles_mask"].get<int>() : 0;
 
         Player* p = ObjectAccessor::FindPlayer(ObjectGuid::Create<HighGuid::Player>(bot_low));
         if (!p)
@@ -61,13 +62,24 @@ namespace HarnessBridge::Adapters
             return res;
         }
 
-        // Auto-detect role if roles_mask == 0.
+        // Auto-detect role if roles_mask == 0 (absent or explicitly 0).
+        //
+        // Use bySpec=true to derive the role from the bot's dominant talent tree
+        // rather than the runtime combat-strategy set.  The bySpec=false default
+        // checks ContainsStrategy(STRATEGY_TYPE_TANK/HEAL), which reflects which
+        // strategy was loaded when the bot was initialised — not necessarily the
+        // talent spec.  In practice most bots' strategies are initialised to DPS
+        // (e.g. a Holy-spec paladin gets "dps" strategy at level ≤25 before the
+        // strategy engine re-evaluates), so bySpec=false makes every bot appear
+        // as DPS regardless of spec.  bySpec=true goes straight to
+        // AiFactory::GetPlayerSpecTab, which reads the live talent map and
+        // returns the correct tab regardless of loaded strategies.
         uint8 roleMask = static_cast<uint8>(roles_mask_arg);
         if (roleMask == 0)
         {
-            if (ai->IsTank(p))
+            if (PlayerbotAI::IsTank(p, /*bySpec=*/true))
                 roleMask = HARNESS_ROLE_TANK;
-            else if (ai->IsHeal(p))
+            else if (PlayerbotAI::IsHeal(p, /*bySpec=*/true))
                 roleMask = HARNESS_ROLE_HEALER;
             else
                 roleMask = HARNESS_ROLE_DAMAGE;
