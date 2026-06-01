@@ -7,6 +7,7 @@
 //! - `GET  /health`                                          — liveness probe
 //! - `POST /v1/memory/:bot_guid/episodes`                   — write an episode (Phase 4)
 //! - `GET  /v1/memory/:bot_guid/episodes/:episode_id`       — read an episode (Phase 4)
+//! - `POST /v1/memory/:bot_guid/recall`                     — hybrid recall (Phase 5)
 
 use axum::{Router, routing::{get, post}};
 use crate::state::AppState;
@@ -14,6 +15,7 @@ use crate::routes::health::health;
 use crate::routes::write::write_episode;
 use crate::routes::read::read_episode;
 use crate::routes::list::list_episodes;
+use crate::routes::recall::recall_handler;
 
 /// Build the axum [`Router`] with [`AppState`] injected.
 pub fn build_router(state: AppState) -> Router {
@@ -24,5 +26,6 @@ pub fn build_router(state: AppState) -> Router {
             post(write_episode).get(list_episodes),
         )
         .route("/v1/memory/:bot_guid/episodes/:episode_id", get(read_episode))
+        .route("/v1/memory/:bot_guid/recall", post(recall_handler))
         .with_state(state)
 }
