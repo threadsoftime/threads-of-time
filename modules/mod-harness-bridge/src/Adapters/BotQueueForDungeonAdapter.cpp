@@ -69,6 +69,13 @@ namespace HarnessBridge::Adapters
             return res;
         }
 
+        if (p->isDead())
+        {
+            res.outcome = DispatchResult::Outcome::ExecutorFailed;
+            res.error_message = "bot.queue_for_dungeon: bot is dead";
+            return res;
+        }
+
         // Auto-detect role if roles_mask == 0 (absent or explicitly 0).
         //
         // Use bySpec=true to derive the role from the bot's dominant talent tree
