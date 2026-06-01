@@ -43,17 +43,20 @@ WORKDIR /build
 # layer is reused.
 COPY Cargo.toml Cargo.lock ./
 COPY game-event-scheduler/Cargo.toml ./game-event-scheduler/
+COPY lfg-matchmaker/Cargo.toml        ./lfg-matchmaker/
 COPY slice-host/Cargo.toml             ./slice-host/
 
 # Create stub lib/main files so `cargo build` can resolve and cache all deps
 # without compiling actual sources.  We replace them with real sources in the
 # next COPY step.
-RUN mkdir -p game-event-scheduler/src slice-host/src \
+RUN mkdir -p game-event-scheduler/src lfg-matchmaker/src slice-host/src \
     && echo 'pub fn _stub() {}' > game-event-scheduler/src/lib.rs \
     && echo 'fn main() {}' > game-event-scheduler/src/main.rs \
+    && echo 'pub fn _stub() {}' > lfg-matchmaker/src/lib.rs \
+    && echo 'fn main() {}' > lfg-matchmaker/src/main.rs \
     && echo 'fn main() {}' > slice-host/src/main.rs \
     && cargo build --release -p slice-host \
-    && rm -rf game-event-scheduler/src slice-host/src
+    && rm -rf game-event-scheduler/src lfg-matchmaker/src slice-host/src
 
 # Now copy the real sources and rebuild.  Touch all .rs files AFTER copying
 # to ensure Cargo fingerprint detects them as newer than the cached stub
@@ -62,9 +65,10 @@ RUN mkdir -p game-event-scheduler/src slice-host/src \
 # the COPY'd files have OCI-layer timestamps that may pre-date the cached .d
 # fingerprints from the stub build.
 COPY game-event-scheduler/src ./game-event-scheduler/src/
+COPY lfg-matchmaker/src        ./lfg-matchmaker/src/
 COPY slice-host/src             ./slice-host/src/
 
-RUN find /build/game-event-scheduler/src /build/slice-host/src -name "*.rs" -exec touch {} \+
+RUN find /build/game-event-scheduler/src /build/lfg-matchmaker/src /build/slice-host/src -name "*.rs" -exec touch {} \+
 
 RUN cargo build --release -p slice-host
 
