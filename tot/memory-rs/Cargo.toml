@@ -25,6 +25,14 @@ serde_json  = "1"
 # SQLite (bundled = static; bundled enables FTS5 + bm25() + porter/unicode61
 # tokenisers and re-exports rusqlite::ffi so we can call sqlite3_auto_extension).
 rusqlite    = { version = "0.32", features = ["bundled"] }
+# Direct dep on the *same* libsqlite3-sys rusqlite resolves (0.30, bundled).
+# It carries `links = "sqlite3"`, so this DIRECT edge makes Cargo export
+# DEP_SQLITE3_INCLUDE to our build.rs — the path to the bundled `sqlite3.h`
+# the static lib is built from. build.rs feeds that to cc so the vendored
+# sqlite-vec amalgamation compiles against the *same* SQLite headers it links
+# against (critical for the musl/scratch container build, which has no system
+# sqlite3.h). Cargo unifies this with rusqlite's transitive edge — one copy.
+libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 
 # Error handling.
 thiserror   = "2"

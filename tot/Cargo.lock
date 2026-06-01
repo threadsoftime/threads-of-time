@@ -802,6 +802,7 @@ dependencies = [
  "anyhow",
  "axum",
  "cc",
+ "libsqlite3-sys",
  "reqwest",
  "rusqlite",
  "serde",
