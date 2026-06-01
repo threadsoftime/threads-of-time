@@ -84,6 +84,11 @@ pub fn is_self_scope(pattern: &str) -> bool {
 /// fnmatch-style glob constrained to single-segment `*` semantics.
 ///
 /// Port of `auth.py:_pattern_matches` EXACTLY.
+///
+/// NOTE: Python's `_pattern_matches` falls back to `fnmatch.fnmatch` for
+/// wildcard patterns not of the `<ns>.*` form; this port uses exact equality
+/// in that branch instead — parity-safe for all V1 scope patterns. Revisit if
+/// non-`.*` globs are ever introduced into token scopes.
 pub fn pattern_matches(pattern: &str, tool: &str) -> bool {
     if !pattern.contains('*') {
         return pattern == tool;
@@ -93,6 +98,10 @@ pub fn pattern_matches(pattern: &str, tool: &str) -> bool {
     let normalized: String = if is_self_scope(pattern) {
         let mut parts = pattern.splitn(3, '.');
         let ns = parts.next().unwrap_or("");
+        // Guard: an empty namespace can never match a real tool name.
+        if ns.is_empty() {
+            return false;
+        }
         let _self_seg = parts.next();
         let rest = parts.next().unwrap_or("*");
         format!("{ns}.{rest}")

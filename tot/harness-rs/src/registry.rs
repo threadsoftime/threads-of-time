@@ -103,7 +103,7 @@ impl Registry {
             .ok_or_else(|| ToolNotFound(name.to_string()))
     }
 
-    /// Returns sorted tool names (BTreeMap preserves insertion key order = sorted).
+    /// Returns tool names in lexicographic order (BTreeMap iterates keys sorted).
     pub fn names(&self) -> Vec<String> {
         self.by_name.keys().cloned().collect()
     }

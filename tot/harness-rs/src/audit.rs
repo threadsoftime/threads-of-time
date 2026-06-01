@@ -24,6 +24,11 @@ use sha2::{Digest, Sha256};
 ///
 /// serde_json's `Value::Object` uses BTreeMap (sorted keys); `to_string()` emits
 /// compact JSON with no spaces — identical to Python's `sort_keys=True, separators=(",",":")`.
+///
+/// NOTE: `body` must already be a `serde_json::Value`. Python's `json.dumps(default=str)`
+/// coerced non-JSON-native types (e.g. `datetime`) to strings before hashing, so callers
+/// must serialize such values to strings before constructing `args_body`, or the digest
+/// will diverge from Python.
 pub fn sha256_args(body: &Value) -> String {
     let canonical = body.to_string();
     let mut hasher = Sha256::new();
@@ -101,12 +106,16 @@ pub struct AuditLogger {
 
 impl AuditLogger {
     /// Create logger; mkdir-parents the containing directory.
-    pub fn new(path: impl AsRef<Path>) -> Self {
+    ///
+    /// Returns `Err` if the parent directory cannot be created — parity with
+    /// Python's `AuditLogger.__init__` which raises on `mkdir` failure rather
+    /// than silently swallowing the error (which would cause silent audit loss).
+    pub fn new(path: impl AsRef<Path>) -> std::io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok();
+            std::fs::create_dir_all(parent)?;
         }
-        Self { path }
+        Ok(Self { path })
     }
 
     /// Append ONE compact JSON line for the event.
@@ -125,7 +134,7 @@ impl AuditLogger {
             error_detail: &ev.error_detail,
         };
         let line = serde_json::to_string(&record)
-            .expect("AuditRecord must always serialize");
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -180,7 +189,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let p = dir.join("harness_rs_audit_test_ts.jsonl");
         let _ = std::fs::remove_file(&p);
-        let logger = AuditLogger::new(&p);
+        let logger = AuditLogger::new(&p).unwrap();
         logger.write(&AuditEvent {
             ts: 1.0,
             request_id: "req_ts".to_string(),
@@ -205,7 +214,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let p = dir.join("harness_rs_audit_test_null.jsonl");
         let _ = std::fs::remove_file(&p);
-        let logger = AuditLogger::new(&p);
+        let logger = AuditLogger::new(&p).unwrap();
         logger.write(&AuditEvent {
             ts: 1.0,
             request_id: "req_null".to_string(),
@@ -229,7 +238,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let p = dir.join("harness_rs_audit_test_ac.jsonl");
         let _ = std::fs::remove_file(&p);
-        let logger = AuditLogger::new(&p);
+        let logger = AuditLogger::new(&p).unwrap();
         logger.write(&AuditEvent {
             ts: 1.0,
             request_id: "req_ac".to_string(),
@@ -253,7 +262,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let p = dir.join("harness_rs_audit_test_noerr.jsonl");
         let _ = std::fs::remove_file(&p);
-        let logger = AuditLogger::new(&p);
+        let logger = AuditLogger::new(&p).unwrap();
         logger.write(&AuditEvent {
             ts: 1.0,
             request_id: "req_noerr".to_string(),
@@ -277,7 +286,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let p = dir.join("harness_rs_audit_test_err.jsonl");
         let _ = std::fs::remove_file(&p);
-        let logger = AuditLogger::new(&p);
+        let logger = AuditLogger::new(&p).unwrap();
         logger.write(&AuditEvent {
             ts: 1.0,
             request_id: "req_err".to_string(),
@@ -301,7 +310,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let p = dir.join("harness_rs_audit_test_fields.jsonl");
         let _ = std::fs::remove_file(&p);
-        let logger = AuditLogger::new(&p);
+        let logger = AuditLogger::new(&p).unwrap();
         logger.write(&AuditEvent {
             ts: 1779000000.123,
             request_id: "req_1".to_string(),
@@ -330,7 +339,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let p = dir.join("harness_rs_audit_test_hash.jsonl");
         let _ = std::fs::remove_file(&p);
-        let logger = AuditLogger::new(&p);
+        let logger = AuditLogger::new(&p).unwrap();
         logger.write(&AuditEvent {
             ts: 1.0,
             request_id: "req_2".to_string(),
