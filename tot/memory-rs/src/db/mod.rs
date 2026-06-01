@@ -145,6 +145,63 @@ mod tests {
         );
     }
 
+    /// open_bot_db creates the directory tree and the database file.
+    #[test]
+    fn creates_directory_and_file() {
+        register_vec0();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data_dir = tmp.path();
+        let bot_guid = "bot_12345";
+
+        let _conn = open_bot_db(data_dir, bot_guid).expect("open_bot_db");
+
+        let db_path = data_dir.join(bot_guid).join("memory.sqlite");
+        assert!(
+            db_path.exists(),
+            "memory.sqlite must exist at {db_path:?}"
+        );
+    }
+
+    /// open_bot_db sets journal_mode=WAL on the connection.
+    #[test]
+    fn pragma_journal_mode_wal() {
+        register_vec0();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let conn = open_bot_db(tmp.path(), "bot_wal_test").expect("open_bot_db");
+
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("PRAGMA journal_mode");
+        assert_eq!(
+            mode, "wal",
+            "journal_mode must be 'wal', got '{mode}'"
+        );
+    }
+
+    /// open_bot_db enables foreign-key enforcement.
+    #[test]
+    fn pragma_foreign_keys_on() {
+        register_vec0();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let conn = open_bot_db(tmp.path(), "bot_fk_test").expect("open_bot_db");
+
+        let fk: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .expect("PRAGMA foreign_keys");
+        assert_eq!(fk, 1, "foreign_keys must be ON (1), got {fk}");
+    }
+
+    /// Calling open_bot_db twice on the same bot_guid is idempotent
+    /// (the directory and file already exist — no error).
+    #[test]
+    fn idempotent_second_open() {
+        register_vec0();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data_dir = tmp.path();
+        open_bot_db(data_dir, "bot_idem").expect("first open");
+        open_bot_db(data_dir, "bot_idem").expect("second open must not error");
+    }
+
     /// open_bot_db creates the directory and opens a WAL-mode connection.
     #[test]
     fn open_bot_db_creates_dir_and_sets_wal() {
