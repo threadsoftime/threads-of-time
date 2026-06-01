@@ -75,6 +75,7 @@ fn unix_now_f64() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
+        // system clock before Unix epoch is impossible in production; 0.0 is a safe fallback
         .unwrap_or(0.0)
 }
 
@@ -139,12 +140,14 @@ impl HarnessMcp {
         let latency_ms = t0.elapsed().as_millis() as u64;
 
         // ── 5. audit (transport = "mcp") ──────────────────────────────────────
+        // `request_id` and `stripped` are moved here — neither is used after
+        // dispatch_tool returned (which took them by reference), so no clone needed.
         let _ = self.state.audit.write(&AuditEvent {
             ts:            unix_now_f64(),
-            request_id:    request_id.clone(),
+            request_id,
             identity:      auth.identity.clone(),
             tool:          tool_name.to_string(),
-            args_body:     stripped.clone(),
+            args_body:     stripped,
             outcome:       outcome.audit_outcome.clone(),
             status:        outcome.status,
             latency_ms,

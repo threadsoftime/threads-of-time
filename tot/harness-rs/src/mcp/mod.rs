@@ -238,7 +238,9 @@ mod tests {
     // ── test 5: HarnessMcp::new constructs with correct tool_router ───────────
 
     #[tokio::test]
-    async fn harness_mcp_tool_router_contains_46_tools() {
+    async fn registry_contains_46_tools() {
+        // TODO(Phase-12): also assert the MCP tools/list surface exposes all 46
+        // (needs a full streamable-HTTP session — done in the parity gate).
         use crate::mcp::handler::HarnessMcp;
         use crate::mcp::schemas;
         use rmcp::schemars::schema_for;

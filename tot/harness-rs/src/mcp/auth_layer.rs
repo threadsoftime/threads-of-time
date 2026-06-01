@@ -16,7 +16,7 @@
 //! (rmcp propagates `req.extensions` into `Parts.extensions` — finding (d) of
 //! the spike: `tot/harness-rs/examples/mcp_spike.rs`.)
 
-use std::{convert::Infallible, future::Future, pin::Pin, sync::Arc, task::Poll};
+use std::{convert::Infallible, future::Future, mem, pin::Pin, sync::Arc, task::Poll};
 
 use axum::body::Body;
 use bytes::Bytes;
@@ -108,7 +108,18 @@ where
             // rmcp will propagate req.extensions into http::request::Parts.extensions
             // (spike finding (d) — verified in mcp_spike.rs).
             req.extensions_mut().insert(record);
-            let mut inner = self.inner.clone();
+            // The inner service that poll_ready drove to readiness MUST be the one
+            // we call (Tower readiness contract: §tower::Service docs). We take the
+            // ready instance out of self and restock with a fresh clone for the next
+            // request cycle. The 401 short-circuit never touches inner, so this
+            // mem::replace only runs on the auth-success path.
+            //
+            // Two-step: clone first (immutable borrow), then replace (mutable borrow).
+            // The single-expression form mem::replace(&mut self.inner, self.inner.clone())
+            // is rejected by the borrow checker (E0502) because both borrows are live
+            // in the same expression.
+            let fresh = self.inner.clone();
+            let mut inner = mem::replace(&mut self.inner, fresh);
             Box::pin(async move { inner.call(req).await })
         } else {
             // Return 401 immediately — do NOT forward to inner service.
