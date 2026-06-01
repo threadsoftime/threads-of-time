@@ -27,12 +27,28 @@ pub struct QueueReq {
     pub real_player: bool,
 }
 
+/// Build the axum [`Router`] with `/healthz` + `/queue` routes.
+///
+/// Includes `/healthz`.  Used by the standalone binary entry point.  In the
+/// multi-slice `slice-host`, use [`routes`] instead and let the host own `/healthz`.
+///
+/// NOTE: path-param syntax here is axum 0.7 (`:guid`). When this crate moves to
+/// axum 0.8 the captures must become `{guid}` / `{name}` — the old `:`/`*` syntax
+/// is rejected at 0.8. Cargo.toml pins axum 0.7; verify before bumping.
 pub fn router(state: Arc<AppState>) -> Router {
-    // NOTE: path-param syntax here is axum 0.7 (`:guid`). When this crate moves to
-    // axum 0.8 the captures must become `{guid}` / `{name}` — the old `:`/`*` syntax
-    // is rejected at 0.8. Cargo.toml pins axum 0.7; verify before bumping.
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route("/queue", post(enqueue).get(list))
+        .route("/queue/:guid", delete(dequeue))
+        .with_state(state)
+}
+
+/// Build the slice-only axum [`Router`] — `/queue` only.
+///
+/// Does NOT include `/healthz`; the host binary (`slice-host`) owns that route
+/// and mounts this router under a prefix (e.g. `/lfg`).
+pub fn routes(state: Arc<AppState>) -> Router {
+    Router::new()
         .route("/queue", post(enqueue).get(list))
         .route("/queue/:guid", delete(dequeue))
         .with_state(state)

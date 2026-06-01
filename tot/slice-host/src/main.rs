@@ -2,26 +2,32 @@
 //!
 //! # Environment variables
 //!
-//! | Variable           | Required | Default           | Description                           |
-//! |--------------------|----------|-------------------|---------------------------------------|
-//! | `HARNESS_BASE_URL` | yes      | —                 | e.g. `http://192.168.1.3:8099`        |
-//! | `HARNESS_BEARER`   | yes      | —                 | Raw bearer token (no `Bearer ` prefix)|
-//! | `GES_TICK_SECS`    | no       | `15`              | Scheduler tick interval               |
-//! | `GES_DRIVE`        | no       | `false`           | Enable scheduler drive mode           |
-//! | `SLICE_HOST_LISTEN`| no       | `0.0.0.0:8092`    | Bind address for the host HTTP server |
+//! | Variable           | Required | Default           | Description                                   |
+//! |--------------------|----------|-------------------|-----------------------------------------------|
+//! | `HARNESS_BASE_URL` | yes      | —                 | e.g. `http://192.168.1.3:8099`                |
+//! | `HARNESS_BEARER`   | yes      | —                 | Raw bearer token (no `Bearer ` prefix)        |
+//! | `GES_TICK_SECS`    | no       | `15`              | Scheduler tick interval                       |
+//! | `GES_DRIVE`        | no       | `false`           | Enable scheduler drive mode                   |
+//! | `LFG_TICK_SECS`    | no       | `2`               | LFG matchmaker tick interval                  |
+//! | `LFG_ENABLED`      | no       | `false`           | Enable LFG mutating matchmaking actions       |
+//! | `SLICE_HOST_LISTEN`| no       | `0.0.0.0:8092`    | Bind address for the host HTTP server         |
 //!
 //! # Route layout
 //!
-//! - `GET  /healthz`                 — host liveness probe (always `"ok"`)
-//! - `GET  /game-events/report`      — latest scheduler [`ShadowReport`]
+//! - `GET  /healthz`                    — host liveness probe (always `"ok"`)
+//! - `GET  /game-events/report`         — latest scheduler [`ShadowReport`]
 //! - `GET  /game-events/report/history` — scheduler tick history
+//! - `GET  /lfg/queue`                  — list current LFG queue entries
+//! - `POST /lfg/queue`                  — enqueue a bot/player intent
+//! - `DELETE /lfg/queue/:guid`          — dequeue by guid
 //!
-//! # Adding a second slice (e.g. lfg-matchmaker)
+//! # Safety — LFG inert by default
 //!
-//! 1. Add `lfg-matchmaker = { path = "../lfg-matchmaker" }` to `Cargo.toml`.
-//! 2. In `build_app`: call `lfg_matchmaker::routes(lfg_state.clone())` and nest it under `/lfg`.
-//! 3. In `spawn_supervised_slices`: spawn `lfg_matchmaker::run(lfg_state, lfg_harness, lfg_cfg)`
-//!    the same way the scheduler task is spawned below.
+//! The LFG slice is always spawned (its HTTP routes are always live) but the
+//! mutating matchmaking actions (`lfg.form_group`, `bot.invite_to_group`,
+//! `bot.enter_instance`, etc.) are gated behind `LFG_ENABLED` (default `false`).
+//! The deployed service will NOT start performing live matchmaking just because
+//! the code is compiled in.  Set `LFG_ENABLED=true` to activate.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,6 +39,11 @@ use game_event_scheduler::api::AppState as GesAppState;
 use game_event_scheduler::config::Config as GesConfig;
 use game_event_scheduler::harness::Harness;
 use game_event_scheduler::{api as ges_api, tick as ges_tick};
+
+use lfg_matchmaker::api::AppState as LfgAppState;
+use lfg_matchmaker::config::Config as LfgConfig;
+use lfg_matchmaker::queue::Queue as LfgQueue;
+use lfg_matchmaker::{api as lfg_api, tick as lfg_tick};
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -115,26 +126,22 @@ where
 /// - `GET /healthz`                        — host liveness probe
 /// - `GET /game-events/report`             — scheduler latest report
 /// - `GET /game-events/report/history`     — scheduler tick history
-///
-/// # Adding a second slice
-/// Nest its routes under a new prefix, e.g.:
-/// ```rust,ignore
-/// .nest("/lfg", lfg_matchmaker::routes(lfg_state))
-/// ```
-fn build_app(ges_state: Arc<GesAppState>) -> Router {
-    // The scheduler's routes() returns /report and /report/history.
-    // We strip /healthz from the GES router by using ges_api::routes() (not ges_api::router())
-    // — routes() exposes only /report and /report/history; the host owns /healthz.
+/// - `GET /lfg/queue`                      — list LFG queue
+/// - `POST /lfg/queue`                     — enqueue intent
+/// - `DELETE /lfg/queue/:guid`             — dequeue by guid
+fn build_app(ges_state: Arc<GesAppState>, lfg_state: Arc<LfgAppState>) -> Router {
+    // The scheduler's routes() returns /report and /report/history (no /healthz).
     let ges_routes = ges_api::routes(ges_state);
+    // The LFG matchmaker's routes() returns /queue routes (no /healthz).
+    let lfg_routes = lfg_api::routes(lfg_state);
 
     Router::new()
         // Host-level liveness probe.
         .route("/healthz", get(|| async { "ok" }))
         // Scheduler slice, mounted under /game-events.
         .nest("/game-events", ges_routes)
-    // ── SEAM: add the next slice here ──────────────────────────────────────
-    // .nest("/lfg", lfg_matchmaker::routes(lfg_state))
-    // ───────────────────────────────────────────────────────────────────────
+        // LFG matchmaker slice, mounted under /lfg.
+        .nest("/lfg", lfg_routes)
 }
 
 // ── Shutdown signal ────────────────────────────────────────────────────────────
@@ -171,8 +178,8 @@ async fn main() {
 
     eprintln!("[slice-host] starting — listen={listen} harness={harness_base_url}");
 
-    // One shared Harness instance (connection pool shared across slices).
-    let harness = Harness::new(harness_base_url.clone(), harness_bearer.clone());
+    // Each slice has its own Harness type (independent reqwest client pools).
+    // Both point at the same harness base URL + bearer.
 
     // ── Game-event-scheduler slice ─────────────────────────────────────────────
     let ges_cfg = match GesConfig::from_env() {
@@ -186,7 +193,7 @@ async fn main() {
 
     // Capture clones for the supervisor factory (called on each restart).
     let ges_state_for_task = ges_state.clone();
-    let ges_harness = harness.clone();
+    let ges_harness = Harness::new(harness_base_url.clone(), harness_bearer.clone());
     let ges_cfg_for_task = ges_cfg.clone();
 
     // Spawn the scheduler tick loop under a supervisor.
@@ -203,13 +210,39 @@ async fn main() {
         },
         Duration::from_secs(5),
     );
-    // ── SEAM: add the next slice here ──────────────────────────────────────────
-    // let lfg_state = Arc::new(lfg_matchmaker::AppState::new());
-    // spawn_supervised("lfg-matchmaker", move || { ... }, Duration::from_secs(5));
-    // ──────────────────────────────────────────────────────────────────────────
+
+    // ── LFG matchmaker slice ────────────────────────────────────────────────────
+    //
+    // SAFETY: The LFG slice is always spawned so the /lfg HTTP routes are
+    // available, but mutating matchmaking actions are gated behind LFG_ENABLED
+    // (default false).  The deployed service will NOT perform live matchmaking
+    // until LFG_ENABLED=true is explicitly set.
+    let lfg_cfg = match LfgConfig::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[slice-host] lfg-matchmaker config error: {e}");
+            std::process::exit(2);
+        }
+    };
+    let lfg_state = Arc::new(LfgAppState { queue: LfgQueue::new() });
+
+    let lfg_state_for_task = lfg_state.clone();
+    let lfg_harness = lfg_matchmaker::harness::Harness::new(harness_base_url.clone(), harness_bearer.clone());
+    let lfg_cfg_for_task = lfg_cfg.clone();
+
+    spawn_supervised(
+        "lfg-matchmaker",
+        move || {
+            let state = lfg_state_for_task.clone();
+            let h = lfg_harness.clone();
+            let cfg = lfg_cfg_for_task.clone();
+            lfg_tick::run(state, h, cfg)
+        },
+        Duration::from_secs(5),
+    );
 
     // ── HTTP server ────────────────────────────────────────────────────────────
-    let app = build_app(ges_state);
+    let app = build_app(ges_state, lfg_state);
 
     let listener = match TcpListener::bind(&listen).await {
         Ok(l) => l,
@@ -238,11 +271,17 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt; // for `oneshot`
 
+    /// Build fresh state for both slices and return the composed router.
+    fn make_app() -> Router {
+        let ges_state = Arc::new(GesAppState::new());
+        let lfg_state = Arc::new(LfgAppState { queue: LfgQueue::new() });
+        build_app(ges_state, lfg_state)
+    }
+
     /// Build a test router with fresh state and call /healthz.
     #[tokio::test]
     async fn healthz_returns_ok() {
-        let state = Arc::new(GesAppState::new());
-        let app = build_app(state);
+        let app = make_app();
         let req = Request::builder()
             .uri("/healthz")
             .body(Body::empty())
@@ -256,8 +295,7 @@ mod tests {
     /// /game-events/report returns 404 before any tick has run.
     #[tokio::test]
     async fn game_events_report_404_before_tick() {
-        let state = Arc::new(GesAppState::new());
-        let app = build_app(state);
+        let app = make_app();
         let req = Request::builder()
             .uri("/game-events/report")
             .body(Body::empty())
@@ -269,14 +307,92 @@ mod tests {
     /// /game-events/report/history returns 200 with empty list.
     #[tokio::test]
     async fn game_events_history_200_empty() {
-        let state = Arc::new(GesAppState::new());
-        let app = build_app(state);
+        let app = make_app();
         let req = Request::builder()
             .uri("/game-events/report/history")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// /lfg/queue returns 200 with an empty array before any entries are added.
+    #[tokio::test]
+    async fn lfg_queue_get_returns_200_empty() {
+        let app = make_app();
+        let req = Request::builder()
+            .uri("/lfg/queue")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            parsed.as_array().unwrap().is_empty(),
+            "/lfg/queue must return empty array before any enqueue"
+        );
+    }
+
+    /// POST /lfg/queue enqueues a valid entry; GET confirms it is present.
+    #[tokio::test]
+    async fn lfg_queue_enqueue_and_list() {
+        let ges_state = Arc::new(GesAppState::new());
+        let lfg_state = Arc::new(LfgAppState { queue: LfgQueue::new() });
+        let app = build_app(ges_state, lfg_state.clone());
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/lfg/queue")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "guid": 42,
+                    "role": "tank",
+                    "dungeon_id": 36,
+                    "faction": "alliance"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Build a fresh router bound to the same state to query.
+        let app2 = build_app(Arc::new(GesAppState::new()), lfg_state.clone());
+        let req2 = Request::builder()
+            .uri("/lfg/queue")
+            .body(Body::empty())
+            .unwrap();
+        let resp2 = app2.oneshot(req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp2.into_body(), 4096).await.unwrap();
+        let entries: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let arr = entries.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "queue must contain the enqueued entry");
+        assert_eq!(arr[0]["guid"], 42);
+    }
+
+    /// POST /lfg/queue with a bad role returns 400.
+    #[tokio::test]
+    async fn lfg_queue_bad_role_returns_400() {
+        let app = make_app();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/lfg/queue")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "guid": 1,
+                    "role": "wizard",
+                    "dungeon_id": 4,
+                    "faction": "alliance"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     /// The supervisor loop restarts after a task that returns immediately.

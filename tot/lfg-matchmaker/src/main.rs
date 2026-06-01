@@ -1,17 +1,15 @@
-mod api;
-mod config;
-mod harness;
-mod matcher;
-mod orchestrator;
-mod queue;
-mod roster;
-mod tick;
-mod types;
+//! Standalone binary entry point for `lfg-matchmaker`.
+//!
+//! Thin wrapper around the library crate.  All logic lives in `lib.rs` and its
+//! submodules — the binary just reads config, wires the pieces, and serves.
+//!
+//! When running under `slice-host` this file is NOT used; `slice-host` composes
+//! the library directly via `lfg_matchmaker::tick::run` + `lfg_matchmaker::routes`.
 
-use crate::api::AppState;
-use crate::config::Config;
-use crate::harness::Harness;
-use crate::queue::Queue;
+use lfg_matchmaker::api::AppState;
+use lfg_matchmaker::config::Config;
+use lfg_matchmaker::harness::Harness;
+use lfg_matchmaker::queue::Queue;
 use std::sync::Arc;
 
 /// Completes on Ctrl-C (any OS) OR SIGTERM (unix). Used both for axum's graceful
@@ -53,10 +51,10 @@ async fn main() {
         let state = state.clone();
         let harness = harness.clone();
         let cfg = cfg.clone();
-        tokio::spawn(async move { tick::run(state, harness, cfg).await })
+        tokio::spawn(async move { lfg_matchmaker::tick::run(state, harness, cfg).await })
     };
 
-    let app = api::router(state);
+    let app = lfg_matchmaker::api::router(state);
     let listener = tokio::net::TcpListener::bind(&cfg.listen_addr).await.expect("bind");
     eprintln!("lfg-matchmaker listening on {} (tick {}s)", cfg.listen_addr, cfg.tick_secs);
 

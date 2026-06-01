@@ -42,6 +42,20 @@ pub async fn run(state: Arc<AppState>, harness: Harness, cfg: Config) {
             }
         }
 
+        // Steps 2 & 3 perform live game-object mutations (lfg.form_group,
+        // bot.invite_to_group, bot.enter_instance). They are gated behind
+        // cfg.enabled (env var LFG_ENABLED, default false) so that when
+        // slice-host compiles in this slice the deployed service starts inert —
+        // no matchmaking side-effects until LFG_ENABLED=true is explicitly set.
+        //
+        // The obs.lfg_pending drain in Step 1 above (a read-only side-effect:
+        // it clears the server-side intent queue) runs unconditionally so the
+        // local queue accurately reflects intent state even in shadow mode.
+        if !cfg.enabled {
+            eprintln!("[tick] LFG_ENABLED=false — skipping matchmaking actions (inert mode)");
+            continue;
+        }
+
         // Step 2: Real-player-priority matching — if there is at least one
         // real-player entry in the queue, try to build a bot-fill proposal first.
         let snapshot = state.queue.snapshot();
@@ -271,7 +285,12 @@ mod tests {
             harness_bearer: "tok".into(),
             tick_secs: 1,
             dungeon: Dungeon { id: 4, map_id: 389, x: 3.81, y: -14.82, z: -17.84, o: 4.39 },
+            enabled: true, // tests exercise the live path; default=false only matters for slice-host
         }
+    }
+
+    fn cfg_disabled(base: String) -> Config {
+        Config { enabled: false, ..cfg(base) }
     }
 
     // T5 (existing behaviour): one tick pass forms the matchable bot-only group,
@@ -396,5 +415,61 @@ mod tests {
 
         // The bot-only group should have formed even though lfg_pending failed.
         assert_eq!(state.queue.len(), 0, "bot-only group must still form despite pending failure");
+    }
+
+    // T8 (new): when LFG_ENABLED=false (cfg.enabled=false), the tick loop is inert —
+    // no mutating matchmaking actions are taken. A fully-matchable queue of 5 bots
+    // must remain intact after multiple ticks.
+    #[tokio::test]
+    async fn inert_mode_does_not_form_groups() {
+        let (base, calls) = spawn_ok_recording_mock().await;
+        let state = Arc::new(AppState { queue: crate::queue::Queue::new() });
+        // Pre-populate a full bot-only group.
+        for (g, r) in [
+            (1, Role::Tank),
+            (2, Role::Healer),
+            (3, Role::Dps),
+            (4, Role::Dps),
+            (5, Role::Dps),
+        ] {
+            state.queue.upsert(QueueEntry {
+                guid: g,
+                role: r,
+                dungeon_id: 4,
+                faction: Faction::Alliance,
+                is_real_player: false,
+            });
+        }
+
+        let h = crate::harness::Harness::new(base.clone(), "tok".into());
+        let conf = cfg_disabled(base);
+        let handle = {
+            let state = state.clone();
+            tokio::spawn(async move { run(state, h, conf).await })
+        };
+        // Let several tick intervals pass.
+        tokio::time::sleep(StdDuration::from_millis(300)).await;
+        handle.abort();
+
+        // Queue must be untouched — inert mode skips Steps 2 & 3 entirely.
+        assert_eq!(
+            state.queue.len(),
+            5,
+            "inert mode must not remove entries from the queue"
+        );
+        // No mutating harness calls should have been made (invite, enter_instance, form_group).
+        let seq = calls.lock().unwrap().clone();
+        let mutating: Vec<_> = seq
+            .iter()
+            .filter(|c| {
+                c.starts_with("bot.invite_to_group")
+                    || c.starts_with("bot.enter_instance")
+                    || c.starts_with("lfg.form_group")
+            })
+            .collect();
+        assert!(
+            mutating.is_empty(),
+            "inert mode must not call mutating harness tools: {mutating:?}"
+        );
     }
 }

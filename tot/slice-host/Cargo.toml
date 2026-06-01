@@ -10,13 +10,12 @@ path = "src/main.rs"
 [dependencies]
 # Strangler-fig slices hosted here.
 game-event-scheduler = { path = "../game-event-scheduler" }
+lfg-matchmaker = { path = "../lfg-matchmaker" }
 
 # Async runtime + HTTP server.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
 axum = "0.7"
 
-# ── To add a second slice later (e.g. lfg-matchmaker):
-# lfg-matchmaker = { path = "../lfg-matchmaker" }
-
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+serde_json = "1"

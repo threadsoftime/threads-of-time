@@ -15,6 +15,15 @@ pub struct Config {
     pub harness_bearer: String,
     pub tick_secs: u64,
     pub dungeon: Dungeon,
+    /// When `true`, the tick loop performs mutating matchmaking actions
+    /// (`lfg.form_group`, `bot.invite_to_group`, `bot.enter_instance`, etc.).
+    ///
+    /// **Default: `false` (inert/shadow mode).**  The slice is always spawned so
+    /// the `/lfg` HTTP routes are available and queue state can be observed, but
+    /// no live game-object mutations occur unless `LFG_ENABLED=true` is set.
+    ///
+    /// Mirror of `GES_DRIVE` in the game-event-scheduler.
+    pub enabled: bool,
 }
 
 impl Config {
@@ -36,12 +45,17 @@ impl Config {
             z: get("LFG_DUNGEON_Z").and_then(|s| s.parse().ok()).unwrap_or(-17.84),
             o: get("LFG_DUNGEON_O").and_then(|s| s.parse().ok()).unwrap_or(4.39),
         };
+        let enabled = get("LFG_ENABLED")
+            .map(|s| matches!(s.to_lowercase().as_str(), "true" | "1"))
+            .unwrap_or(false);
+
         Ok(Config {
             listen_addr: get("LFG_LISTEN_ADDR").unwrap_or_else(|| "0.0.0.0:8095".into()),
             harness_base_url: req("HARNESS_BASE_URL")?,
             harness_bearer: req("HARNESS_BEARER")?,
             tick_secs: get("LFG_TICK_SECS").and_then(|s| s.parse().ok()).unwrap_or(2),
             dungeon,
+            enabled,
         })
     }
 }
@@ -84,6 +98,34 @@ mod tests {
         assert!((cfg.dungeon.y - -14.82).abs() < 1e-6);
         assert!((cfg.dungeon.z - -17.84).abs() < 1e-6);
         assert!((cfg.dungeon.o - 4.39).abs() < 1e-6);
+        // LFG_ENABLED defaults to false (inert mode) when not set.
+        assert!(!cfg.enabled, "enabled must default to false when LFG_ENABLED is unset");
+    }
+
+    // LFG_ENABLED gates mutating matchmaking; must default false and parse true/1.
+    #[test]
+    fn lfg_enabled_defaults_false_and_parses_true() {
+        // Absent → false.
+        let cfg = Config::build(getter(required_map())).unwrap();
+        assert!(!cfg.enabled, "LFG_ENABLED absent → false");
+
+        // "true" → true.
+        let mut m = required_map();
+        m.insert("LFG_ENABLED", "true");
+        let cfg = Config::build(getter(m)).unwrap();
+        assert!(cfg.enabled, "LFG_ENABLED=true → true");
+
+        // "1" → true.
+        let mut m = required_map();
+        m.insert("LFG_ENABLED", "1");
+        let cfg = Config::build(getter(m)).unwrap();
+        assert!(cfg.enabled, "LFG_ENABLED=1 → true");
+
+        // "false" → false.
+        let mut m = required_map();
+        m.insert("LFG_ENABLED", "false");
+        let cfg = Config::build(getter(m)).unwrap();
+        assert!(!cfg.enabled, "LFG_ENABLED=false → false");
     }
 
     // When all env vars are explicitly set they override the defaults.
