@@ -539,6 +539,18 @@ async def run_mcp_battery(
 
     # ── tools/list: 46 tools + description equality ───────────────────────────
 
+    # ── Import brain's unwrap_fastmcp_args for envelope assertions ───────────
+    import sys as _sys
+    _brain_path = "/Users/tbrack/Documents/Projects/threads-of-time/tot/brain/brain_sidecar"
+    if _brain_path not in _sys.path:
+        _sys.path.insert(0, _brain_path)
+    try:
+        from schema_builder import unwrap_fastmcp_args as _unwrap_fastmcp_args
+        _unwrap_available = True
+    except ImportError as _e:
+        _unwrap_available = False
+        print(f"  [WARNING] could not import unwrap_fastmcp_args: {_e}", file=sys.stderr)
+
     async def list_tools_full(mcp_url: str, headers: dict) -> dict[str, Any]:
         """Returns {name: {'desc': str, 'schema': dict}} for all listed tools."""
         try:
@@ -584,16 +596,60 @@ async def run_mcp_battery(
     else:
         results.record("MCP tools/list → full {name:desc} equality", True)
 
-    # ── Schema semantic comparison ────────────────────────────────────────────
+    # ── HARD FAIL: every tool's inputSchema must have properties.args ─────────
+    # The brain client (schema_builder.py:73 unwrap_fastmcp_args) RAISES
+    # ValueError if properties.args is absent.  A daemon emitting flat schemas
+    # (no args envelope) causes the brain to fail to boot.
 
-    def unwrap_args_schema(schema: Any) -> dict:
-        """Extract the inner args object schema regardless of wrapper depth."""
-        if not isinstance(schema, dict):
-            return {}
-        props = schema.get("properties", {})
-        if "args" in props:
-            return props["args"]
-        return schema
+    def check_args_envelope(schemas_dict: dict, label: str) -> tuple[bool, str]:
+        """Assert every tool schema has properties.args; return (ok, msg)."""
+        missing = []
+        for name, schema in sorted(schemas_dict.items()):
+            if not isinstance(schema, dict):
+                missing.append(f"  {name}: schema is not a dict")
+                continue
+            props = schema.get("properties", {})
+            if "args" not in props:
+                missing.append(
+                    f"  {name}: properties.args MISSING (keys={sorted(props.keys())})"
+                )
+        if missing:
+            return False, f"{label} — {len(missing)} tools lack properties.args:\n" + "\n".join(missing)
+        return True, ""
+
+    py_env_ok, py_env_msg = check_args_envelope(py_schemas, "Python daemon")
+    rs_env_ok, rs_env_msg = check_args_envelope(rs_schemas, "Rust daemon")
+    results.record("MCP tools/list → Python daemon ALL tools have properties.args (brain contract)",
+                   py_env_ok, py_env_msg)
+    results.record("MCP tools/list → Rust daemon ALL tools have properties.args (brain contract)",
+                   rs_env_ok, rs_env_msg)
+
+    # ── brain's unwrap_fastmcp_args must not raise on any tool ────────────────
+    if _unwrap_available:
+        py_unwrap_failures = []
+        rs_unwrap_failures = []
+        for name, schema in sorted(py_schemas.items()):
+            try:
+                _unwrap_fastmcp_args(schema)
+            except Exception as exc:
+                py_unwrap_failures.append(f"  {name}: {exc}")
+        for name, schema in sorted(rs_schemas.items()):
+            try:
+                _unwrap_fastmcp_args(schema)
+            except Exception as exc:
+                rs_unwrap_failures.append(f"  {name}: {exc}")
+        results.record(
+            "MCP tools/list → Python daemon schemas pass brain unwrap_fastmcp_args",
+            len(py_unwrap_failures) == 0, "\n".join(py_unwrap_failures)
+        )
+        results.record(
+            "MCP tools/list → Rust daemon schemas pass brain unwrap_fastmcp_args",
+            len(rs_unwrap_failures) == 0, "\n".join(rs_unwrap_failures)
+        )
+    else:
+        print("  [SKIP] brain unwrap_fastmcp_args check skipped — module not importable", file=sys.stderr)
+
+    # ── Schema semantic comparison ────────────────────────────────────────────
 
     def resolve_refs(schema: dict, defs: dict) -> dict:
         if "$ref" in schema:
@@ -612,10 +668,13 @@ async def run_mcp_battery(
         return out
 
     def normalize_schema_for_compare(schema: Any) -> dict:
+        """Unwrap properties.args envelope, resolve $refs, strip 'format' annotations."""
         if not isinstance(schema, dict):
             return {}
         defs = schema.get("$defs", schema.get("definitions", {}))
-        inner = unwrap_args_schema(schema)
+        # Unwrap the {args: ...} envelope — both daemons MUST have it at this point
+        props = schema.get("properties", {})
+        inner = props.get("args", schema)
         resolved = resolve_refs(inner, defs)
 
         def strip_format(obj: Any) -> Any:
@@ -672,11 +731,11 @@ async def run_mcp_battery(
         except Exception as e:
             return {"error": str(e), "isError": True, "content_parsed": {}}
 
-    # Python FastMCP wraps args under {"args": {...}}; Rust rmcp uses flat args.
-    # This is an ACCEPTED CALL-SHAPE DEVIATION (documented).
-    # We compare RESULTS (not call shapes).
+    # Both daemons accept the {"args": {...}} envelope — this is the brain's
+    # real wire contract (mcp_clients.py:63 hardcodes arguments={"args": args}).
+    # Driving flat {} to either daemon would be WRONG.
     py_ping = await call_tool_raw(py_mcp, bearer_all, "obs.ping", {"args": {}})
-    rs_ping = await call_tool_raw(rs_mcp, bearer_all, "obs.ping", {})
+    rs_ping = await call_tool_raw(rs_mcp, bearer_all, "obs.ping", {"args": {}})
 
     ping_err_ok = (py_ping.get("isError") == rs_ping.get("isError") == False)
     py_content = py_ping.get("content_parsed", {})
@@ -702,12 +761,12 @@ async def run_mcp_battery(
 
     # ── scope_denied via MCP ──────────────────────────────────────────────────
 
-    # Python needs wrapped args; Rust needs flat args. Scope is denied before
-    # args are deserialized, so the response should be identical regardless.
+    # Both daemons use the {"args": {...}} envelope.  Scope is denied before
+    # args are deserialized, so the response is identical regardless.
     py_denied = await call_tool_raw(py_mcp, bearer_obs, "gm.teleport",
                                     {"args": {"target_guid": 1, "map": 0, "x": 0.0, "y": 0.0, "z": 0.0}})
     rs_denied = await call_tool_raw(rs_mcp, bearer_obs, "gm.teleport",
-                                    {"target_guid": 1, "map": 0, "x": 0.0, "y": 0.0, "z": 0.0})
+                                    {"args": {"target_guid": 1, "map": 0, "x": 0.0, "y": 0.0, "z": 0.0}})
     py_dc = py_denied.get("content_parsed", {})
     rs_dc = rs_denied.get("content_parsed", {})
     denied_ok = (
@@ -777,12 +836,12 @@ async def run_mcp_battery(
         rest_hash_msg = f"missing audit lines: py={py_rest_audit} rs={rs_rest_audit}"
     results.record("MCP P4/A2 REST audit hashes equal (same raw args)", rest_hash_match, rest_hash_msg)
 
-    # MCP calls — omit bot_state, should be filled to "all" by both
-    # Python: needs {"args": {...}}; Rust: flat args
+    # MCP calls — omit bot_state, should be filled to "all" by both.
+    # Both daemons use the {"args": {...}} envelope (brain wire contract).
     py_mcp_strat = await call_tool_raw(py_mcp, bearer_all, "bot.set_strategy",
                                        {"args": {"bot_guid": 1, "strategy": "+follow"}})
     rs_mcp_strat = await call_tool_raw(rs_mcp, bearer_all, "bot.set_strategy",
-                                       {"bot_guid": 1, "strategy": "+follow"})
+                                       {"args": {"bot_guid": 1, "strategy": "+follow"}})
     py_mcp_audit = read_last_audit_line(py_audit)
     rs_mcp_audit = read_last_audit_line(rs_audit)
 
