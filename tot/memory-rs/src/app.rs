@@ -13,12 +13,16 @@ use crate::state::AppState;
 use crate::routes::health::health;
 use crate::routes::write::write_episode;
 use crate::routes::read::read_episode;
+use crate::routes::list::list_episodes;
 
 /// Build the axum [`Router`] with [`AppState`] injected.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
-        .route("/v1/memory/:bot_guid/episodes", post(write_episode))
+        .route(
+            "/v1/memory/:bot_guid/episodes",
+            post(write_episode).get(list_episodes),
+        )
         .route("/v1/memory/:bot_guid/episodes/:episode_id", get(read_episode))
         .with_state(state)
 }
