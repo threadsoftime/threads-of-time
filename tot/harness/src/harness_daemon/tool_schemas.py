@@ -198,9 +198,10 @@ class BotQueueForDungeonArgs(BaseModel):
     dungeon_id: int = Field(..., description=(
         "LFGDungeonEntry ID. 0 = random level-appropriate dungeon."
     ))
-    roles_mask: int = Field(..., description=(
-        "PLAYER_ROLE_* bitmask. 0 = auto-detect from bot spec. "
-        "Actual constant values captured via probe P5."
+    roles_mask: int = Field(0, description=(
+        "LFG role bitmask: 0/absent → auto-detect from the bot's talent spec "
+        "(bySpec=true: tank=0x02, healer=0x04, dps=0x08). "
+        "Pass an explicit value only to override the spec-derived role."
     ))
 
 
