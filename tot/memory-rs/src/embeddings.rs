@@ -296,4 +296,150 @@ mod tests {
             );
         }
     }
+
+    // --- Error-mapping helpers ---
+
+    /// Spawn a mock that always responds with `status` and `body` on any POST
+    /// to /v1/embeddings. Used for non-2xx and malformed tests.
+    async fn spawn_status_mock(status: StatusCode, body: serde_json::Value) -> String {
+        let handler = move || {
+            let s = status;
+            let b = body.clone();
+            async move { (s, AxumJson(b)) }
+        };
+        let app = Router::new().route("/v1/embeddings", post(handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}/v1")
+    }
+
+    // E1: Non-2xx (e.g. 500 Internal Server Error) → EmbedError::Http.
+    //     This covers the graceful-degradation branch in write/recall.
+    #[tokio::test]
+    async fn error_non_2xx_maps_to_http() {
+        let base_url = spawn_status_mock(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error": "overloaded"}),
+        )
+        .await;
+
+        let client = EmbeddingsClient::new(&base_url, "model", "");
+        let err = client.embed("text").await.unwrap_err();
+
+        match err {
+            EmbedError::Http(_) => {} // correct
+            other => panic!("expected EmbedError::Http, got: {other}"),
+        }
+    }
+
+    // E2: 401 Unauthorized → EmbedError::Http (non-2xx, same branch as E1).
+    #[tokio::test]
+    async fn error_401_maps_to_http() {
+        let base_url = spawn_status_mock(
+            StatusCode::UNAUTHORIZED,
+            serde_json::json!({"error": "unauthorized"}),
+        )
+        .await;
+
+        let client = EmbeddingsClient::new(&base_url, "model", "wrong-key");
+        let err = client.embed("text").await.unwrap_err();
+
+        match err {
+            EmbedError::Http(_) => {}
+            other => panic!("expected EmbedError::Http on 401, got: {other}"),
+        }
+    }
+
+    // E3: Wrong dimension (5 instead of 768) → EmbedError::DimMismatch{got:5,expected:768}.
+    //     This is the variant that the search route treats as 503 (loud failure)
+    //     while the write route treats as graceful degradation (NULL vec).
+    #[tokio::test]
+    async fn error_wrong_dim_maps_to_dim_mismatch() {
+        // Reuse spawn_embed_mock with a 5-element vector.
+        let short_vec: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4, 0.5];
+        let (base_url, _) = spawn_embed_mock(short_vec).await;
+
+        let client = EmbeddingsClient::new(&base_url, "model", "");
+        let err = client.embed("text").await.unwrap_err();
+
+        match err {
+            EmbedError::DimMismatch { got, expected } => {
+                assert_eq!(got, 5, "got must reflect the actual short length");
+                assert_eq!(expected, EMBEDDING_DIM, "expected must be EMBEDDING_DIM={}", EMBEDDING_DIM);
+            }
+            other => panic!("expected EmbedError::DimMismatch, got: {other}"),
+        }
+    }
+
+    // E4: 2xx response but `data[0].embedding` is absent → EmbedError::Malformed.
+    #[tokio::test]
+    async fn error_missing_embedding_path_maps_to_malformed() {
+        // Well-formed HTTP 200 but wrong payload shape — no `data` key.
+        let base_url = spawn_status_mock(
+            StatusCode::OK,
+            serde_json::json!({"result": "ok"}),
+        )
+        .await;
+
+        let client = EmbeddingsClient::new(&base_url, "model", "");
+        let err = client.embed("text").await.unwrap_err();
+
+        match err {
+            EmbedError::Malformed => {}
+            other => panic!("expected EmbedError::Malformed on missing data[0].embedding, got: {other}"),
+        }
+    }
+
+    // E5: 2xx response where `data` exists but `data[0]` has no `embedding` key.
+    #[tokio::test]
+    async fn error_missing_embedding_key_maps_to_malformed() {
+        let base_url = spawn_status_mock(
+            StatusCode::OK,
+            serde_json::json!({"data": [{"object": "embedding"}]}), // embedding key absent
+        )
+        .await;
+
+        let client = EmbeddingsClient::new(&base_url, "model", "");
+        let err = client.embed("text").await.unwrap_err();
+
+        match err {
+            EmbedError::Malformed => {}
+            other => panic!("expected EmbedError::Malformed on absent embedding key, got: {other}"),
+        }
+    }
+
+    // E6: `data` is present but empty array — index 0 does not exist.
+    #[tokio::test]
+    async fn error_empty_data_array_maps_to_malformed() {
+        let base_url = spawn_status_mock(
+            StatusCode::OK,
+            serde_json::json!({"data": []}),
+        )
+        .await;
+
+        let client = EmbeddingsClient::new(&base_url, "model", "");
+        let err = client.embed("text").await.unwrap_err();
+
+        match err {
+            EmbedError::Malformed => {}
+            other => panic!("expected EmbedError::Malformed on empty data array, got: {other}"),
+        }
+    }
+
+    // E7: Connection refused (no server at that port) → EmbedError::Http.
+    //     Uses port 1 which is a privileged port — the OS will refuse the connect
+    //     immediately without a sleep.
+    #[tokio::test]
+    async fn error_connection_refused_maps_to_http() {
+        // Port 1 is privileged and unbound; the connect will be refused
+        // immediately (same pattern as lfg-matchmaker harness.rs T3).
+        let client = EmbeddingsClient::new("http://127.0.0.1:1/v1", "model", "");
+        let err = client.embed("text").await.unwrap_err();
+
+        match err {
+            EmbedError::Http(_) => {}
+            other => panic!("expected EmbedError::Http on connection refused, got: {other}"),
+        }
+    }
 }
