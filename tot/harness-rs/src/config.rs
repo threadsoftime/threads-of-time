@@ -19,6 +19,7 @@ pub struct TokenRecord {
     #[serde(default)]
     pub augmented: bool,
     pub bound_to_guid: Option<i64>,
+    #[allow(dead_code)] // parsed from tokens.yaml for operator docs; not used at runtime (matches Python)
     pub note: Option<String>,
 }
 

@@ -15,6 +15,7 @@ pub struct AuthResult {
     pub identity: String,
     pub scope: Vec<String>,
     pub bound_to_guid: Option<i64>,
+    #[allow(dead_code)] // mirrors Python AuthResult; augmented-bot cap is enforced at config load, not dispatch
     pub augmented: bool,
 }
 
@@ -125,6 +126,10 @@ pub fn pattern_matches(pattern: &str, tool: &str) -> bool {
 }
 
 /// True iff at least one pattern in `scope` matches `tool`.
+///
+/// Public helper mirroring Python `auth.py`'s `scope_allows`; dispatch uses
+/// `find_matching_pattern` instead (needs the matched pattern for self-binding).
+#[allow(dead_code)]
 pub fn scope_allows<'a>(scope: impl IntoIterator<Item = &'a str>, tool: &str) -> bool {
     scope.into_iter().any(|p| pattern_matches(p, tool))
 }

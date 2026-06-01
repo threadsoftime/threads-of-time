@@ -14,6 +14,7 @@ use thiserror::Error;
 #[derive(Debug, Clone)]
 pub struct ToolEntry {
     pub name: String,
+    #[allow(dead_code)] // part of registry data mirroring Python registry.py; dispatch matches via scope-glob, not this field
     pub required_scope: String,
     pub subject_guid_arg: Option<String>,
     pub forwards_to_ac: bool,
@@ -104,6 +105,9 @@ impl Registry {
     }
 
     /// Returns tool names in lexicographic order (BTreeMap iterates keys sorted).
+    ///
+    /// Used in tests and as a public API mirroring Python `registry.py:Registry.names`.
+    #[allow(dead_code)]
     pub fn names(&self) -> Vec<String> {
         self.by_name.keys().cloned().collect()
     }

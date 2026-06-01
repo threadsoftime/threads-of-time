@@ -153,6 +153,7 @@ fn install_sighup_handler() {
     // We spawn a tokio task that awaits the signal and then execs.
     // tokio::signal::unix requires a multi-thread runtime — `#[tokio::main]`
     // provides one.
+    #[allow(unreachable_code)] // execv replaces the process image on success; code after it is unreachable
     tokio::spawn(async move {
         let mut hup = tokio::signal::unix::signal(
             tokio::signal::unix::SignalKind::hangup(),

@@ -46,6 +46,7 @@ use crate::rest::SharedState;
 #[derive(Clone)]
 pub struct HarnessMcp {
     state:       SharedState,
+    #[allow(dead_code)] // read by the #[tool_handler]-generated ServerHandler impl
     tool_router: ToolRouter<Self>,
 }
 
