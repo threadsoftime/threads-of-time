@@ -88,6 +88,10 @@ pub struct GmAdditemArgs {
 
 fn default_count() -> i64 { 1 }
 
+fn default_false_opt() -> Option<bool> { Some(false) }
+
+fn default_empty_object() -> serde_json::Value { serde_json::json!({}) }
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GmAdditemWrapper {
     pub args: GmAdditemArgs,
@@ -176,10 +180,10 @@ pub struct GmStripGearArgs {
     /// Low-32 GUID of the online player or bot.
     pub target_guid: i64,
     /// If true, destroy equipped items the bag can't hold.
-    #[serde(default)]
+    #[serde(default = "default_false_opt")]
     pub destroy_if_full: Option<bool>,
     /// If true, AFTER stripping also DestroyItem every backpack slot.
-    #[serde(default)]
+    #[serde(default = "default_false_opt")]
     pub clear_bag: Option<bool>,
 }
 
@@ -282,7 +286,7 @@ pub struct BotStopArgs {
     /// Low-32 GUID of the bot.
     pub bot_guid: i64,
     /// If true, also call CombatStop(true).
-    #[serde(default)]
+    #[serde(default = "default_false_opt")]
     pub clear_combat: Option<bool>,
 }
 
@@ -590,7 +594,7 @@ pub struct ObsQueryDbArgs {
     /// Allowlisted query template name.
     pub template_name: String,
     /// Template params.
-    #[serde(default)]
+    #[serde(default = "default_empty_object")]
     pub params: Value,
 }
 
@@ -918,6 +922,37 @@ mod tests {
         assert!(has_args_envelope(&schema_for!(MemoryDeleteWrapper)), "memory.delete");
         // lfg (1)
         assert!(has_args_envelope(&schema_for!(LfgFormGroupWrapper)), "lfg.form_group");
+    }
+
+    // ── MCP default-fill parity tests ─────────────────────────────────────────
+
+    /// Python: `Optional[bool] = Field(False)` — absent field → `Some(false)`.
+    #[test]
+    fn gm_strip_gear_defaults_destroy_if_full_and_clear_bag_to_false() {
+        let w: GmStripGearWrapper =
+            serde_json::from_str(r#"{"args":{"target_guid":1}}"#).unwrap();
+        assert_eq!(w.args.destroy_if_full, Some(false), "destroy_if_full must default to Some(false)");
+        assert_eq!(w.args.clear_bag, Some(false), "clear_bag must default to Some(false)");
+    }
+
+    /// Python: `Optional[bool] = Field(False)` — absent field → `Some(false)`.
+    #[test]
+    fn bot_stop_defaults_clear_combat_to_false() {
+        let w: BotStopWrapper =
+            serde_json::from_str(r#"{"args":{"bot_guid":1}}"#).unwrap();
+        assert_eq!(w.args.clear_combat, Some(false), "clear_combat must default to Some(false)");
+    }
+
+    /// Python: `dict = Field(default_factory=dict)` — absent field → `{}`.
+    #[test]
+    fn obs_query_db_defaults_params_to_empty_object() {
+        let w: ObsQueryDbWrapper =
+            serde_json::from_str(r#"{"args":{"template_name":"x"}}"#).unwrap();
+        assert_eq!(
+            w.args.params,
+            serde_json::json!({}),
+            "params must default to empty object"
+        );
     }
 
     /// Enum-bearing wrappers must use $defs not $definitions (schemars 1.x).

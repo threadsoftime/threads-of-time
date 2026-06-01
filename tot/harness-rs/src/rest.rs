@@ -262,10 +262,7 @@ async fn audit_endpoint(
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter(|rec| {
-            rec.get("ts")
-                .and_then(|v| v.as_f64())
-                .map(|ts| ts >= params.since)
-                .unwrap_or(false)
+            rec.get("ts").and_then(|v| v.as_f64()).unwrap_or(0.0) >= params.since
         })
         .collect();
 
@@ -581,6 +578,50 @@ mod tests {
         let events = body["events"].as_array().unwrap();
         assert_eq!(events.len(), 1, "should return 1 event with ts>=1500");
         assert_eq!(events[0]["request_id"], "r2");
+    }
+
+    // ── 8b. /v1/audit record with no `ts` is included when since==0.0 ─────────
+    // Python: rec.get("ts", 0) >= since — a missing `ts` is treated as 0.
+
+    #[tokio::test]
+    async fn audit_missing_ts_included_when_since_zero() {
+        let audit_path = std::env::temp_dir()
+            .join(format!("harness_rs_audit_no_ts_{}.jsonl", uuid::Uuid::new_v4().simple()))
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        // One record with no `ts` field at all.
+        {
+            use std::fs::OpenOptions;
+            use std::io::Write;
+            let mut f = OpenOptions::new().create(true).append(true)
+                .open(&audit_path).unwrap();
+            writeln!(f, r#"{{"request_id":"r_no_ts","identity":"a","tool":"obs.ping","outcome":"ok","status":200,"latency_ms":1}}"#).unwrap();
+        }
+
+        let state = Arc::new(AppState {
+            token_store: TokenStore::new(vec![]),
+            registry:    build_v1_registry(),
+            ac_client:   ACClient::new("http://127.0.0.1:1", 0.5),
+            db_client:   None,
+            audit:       AuditLogger::new(&audit_path).unwrap(),
+            audit_path:  audit_path.clone(),
+        });
+        let app = build_router(state);
+
+        // since defaults to 0.0 when omitted; a missing ts (treated as 0.0) satisfies 0.0 >= 0.0
+        let req = Request::builder()
+            .method("GET")
+            .uri("/v1/audit")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let events = body["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1, "record with missing ts should be included when since==0.0");
+        assert_eq!(events[0]["request_id"], "r_no_ts");
     }
 
     // ── 8. /v1/audit missing file → empty events ─────────────────────────────
