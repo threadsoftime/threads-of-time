@@ -4,6 +4,7 @@ mod registry;
 mod audit;
 mod db_client;
 mod ac_client;
+mod dispatch;
 #[cfg(test)] mod test_support;
 
 fn main() {
