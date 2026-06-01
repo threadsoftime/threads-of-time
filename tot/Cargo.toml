@@ -4,6 +4,7 @@ resolver = "2"
 # applies to all members; individual crates must NOT define their own [profile.*].
 members = [
     "game-event-scheduler",
+    "harness-rs",
     "lfg-matchmaker",
     "memory-rs",
     "slice-host",
