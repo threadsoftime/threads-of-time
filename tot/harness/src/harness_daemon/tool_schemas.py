@@ -198,9 +198,10 @@ class BotQueueForDungeonArgs(BaseModel):
     dungeon_id: int = Field(..., description=(
         "LFGDungeonEntry ID. 0 = random level-appropriate dungeon."
     ))
-    roles_mask: int = Field(..., description=(
-        "PLAYER_ROLE_* bitmask. 0 = auto-detect from bot spec. "
-        "Actual constant values captured via probe P5."
+    roles_mask: int = Field(0, description=(
+        "LFG role bitmask: 0/absent → auto-detect from the bot's talent spec "
+        "(bySpec=true: tank=0x02, healer=0x04, dps=0x08). "
+        "Pass an explicit value only to override the spec-derived role."
     ))
 
 
@@ -277,6 +278,31 @@ class ObsGetGroupArgs(_TargetGuid):
 
 class ObsGetTalentsArgs(_TargetGuid):
     pass
+
+
+class ObsGameEventsArgs(BaseModel):
+    """No args — dumps the full game-event schedule + active set + sHolidaysStore.
+
+    C++ adapter field contract: none.  The adapter ignores args entirely and
+    returns the in-memory state from sGameEventMgr + sHolidaysStore.
+    """
+    pass
+
+
+# --- event.* (GES Inc-2 — slice-driven scheduler enactment primitives) ---
+
+class EventStartArgs(BaseModel):
+    event_id: int = Field(..., ge=1, description=(
+        "Game event ID (1..N). The adapter validates the ID is in-bounds and "
+        "refers to a valid (non-tombstone) event before calling StartEvent."
+    ))
+
+
+class EventStopArgs(BaseModel):
+    event_id: int = Field(..., ge=1, description=(
+        "Game event ID (1..N). The adapter validates the ID is in-bounds and "
+        "refers to a valid (non-tombstone) event before calling StopEvent."
+    ))
 
 
 # --- daemon-direct ---
@@ -401,6 +427,25 @@ class MemoryDeleteArgs(BaseModel):
     episode_id: int = Field(..., description="Primary-key ID of the episode to hard-delete")
 
 
+# --- obs.lfg_pending (Stage 3 pull-based intent seam) ---
+
+class ObsLfgPendingArgs(BaseModel):
+    max: int = Field(64, description="Max pending LFG intents to drain in this call.")
+
+
+# --- lfg.* (LFG force-form primitives — Inc 1) ---
+
+class LfgFormGroupMember(BaseModel):
+    guid:  int = Field(..., description="Player low GUID to force-add to the group.")
+    roles: int = Field(..., description="LFG role bitmask (TANK=2, HEALER=4, DAMAGE=8).")
+
+
+class LfgFormGroupArgs(BaseModel):
+    leader_guid: int                    = Field(..., description="Low GUID of the group leader; must also appear in members.")
+    members:     list[LfgFormGroupMember] = Field(..., description="All members incl. leader, 1-5 entries.")
+    dungeon_id:  int                    = Field(..., description="LFGDungeons.dbc id of the target dungeon (RFC = 36).")
+
+
 # --- registry: name -> (schema_class, one-line description) ---
 
 TOOL_SCHEMAS: dict[str, tuple[type[BaseModel], str]] = {
@@ -438,7 +483,12 @@ TOOL_SCHEMAS: dict[str, tuple[type[BaseModel], str]] = {
     "obs.get_position":        (ObsGetPositionArgs,         "Map/zone/area IDs + names + (x,y,z,o)."),
     "obs.get_group":           (ObsGetGroupArgs,            "Party/raid roster, HP/mana%, distances."),
     "obs.get_talents":         (ObsGetTalentsArgs,          "Active-spec talents: flat list with tab/row/col/rank."),
+    # GES Inc-1 — game-event schedule snapshot (C++ adapter reads sGameEventMgr + sHolidaysStore)
+    "obs.game_events":         (ObsGameEventsArgs,          "Full game-event schedule: active set, resolved start/end/next per event, and raw sHolidaysStore dump."),
     "obs.query_db":            (ObsQueryDbArgs,             "Run an allowlisted MySQL template against the auth/char DBs."),
+    # GES Inc-2 — event control primitives (slice-driven scheduler enactment)
+    "event.start":             (EventStartArgs,             "Start a game event by id (slice-driven scheduler enactment primitive)."),
+    "event.stop":              (EventStopArgs,              "Stop a game event by id (slice-driven scheduler enactment primitive)."),
     # Memory subsystem (Phase 6B — V1 memory.* tools)
     "memory.write":            (MemoryWriteArgs,            "Write a new episode to a bot's episodic memory store."),
     "memory.read":             (MemoryReadArgs,             "Fetch a single episode by primary-key ID."),
@@ -447,4 +497,8 @@ TOOL_SCHEMAS: dict[str, tuple[type[BaseModel], str]] = {
     "memory.list":             (MemoryListArgs,             "Paginated episode listing with optional type/entity/time filters."),
     "memory.update":           (MemoryUpdateArgs,           "Patch content, salience, or metadata on an existing episode."),
     "memory.delete":           (MemoryDeleteArgs,           "Hard-delete an episode (cascades to entities + embeddings)."),
+    # LFG force-form primitives (Inc 1)
+    "lfg.form_group":          (LfgFormGroupArgs,           "Force-create a server-side LFG group and teleport all members into the dungeon."),
+    # Stage 3: pull-based intent seam — drain real-player + bot LFG join intents
+    "obs.lfg_pending":         (ObsLfgPendingArgs,          "Drain pending real-player + bot LFG join intents recorded by the veto hook / bot-queue."),
 }

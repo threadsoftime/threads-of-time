@@ -629,8 +629,9 @@ void World::SetInitialWorldSettings()
     sPoolMgr->LoadFromDB();
 
     LOG_INFO("server.loading", "Loading Game Event Data...");               // must be after loading pools fully
-    sGameEventMgr->LoadHolidayDates();                           // Must be after loading DBC
-    sGameEventMgr->LoadFromDB();                                 // Must be after loading holiday dates
+    // GES Inc-3: LoadHolidayDates() removed (used HolidayDateCalculator, deleted with the scheduler).
+    // Holiday date computation is now done by the Rust game-event-scheduler slice.
+    sGameEventMgr->LoadFromDB();
 
     LOG_INFO("server.loading", "Loading UNIT_NPC_FLAG_SPELLCLICK Data..."); // must be after LoadQuests
     sObjectMgr->LoadNPCSpellClickSpells();
@@ -918,8 +919,10 @@ void World::SetInitialWorldSettings()
 
     LOG_INFO("server.loading", "Starting Game Event system...");
     LOG_INFO("server.loading", " ");
-    uint32 nextGameEvent = sGameEventMgr->StartSystem();
-    _timers[WUPDATE_EVENTS].SetInterval(nextGameEvent);    //depend on next event
+    sGameEventMgr->StartSystem();
+    // GES Inc-3: native date-scheduler removed; WUPDATE_EVENTS timer is now unused.
+    // The Rust game-event-scheduler slice drives transitions via event.start/event.stop.
+    _timers[WUPDATE_EVENTS].SetInterval(max_ge_check_delay * IN_MILLISECONDS); // dormant
 
     LOG_INFO("server.loading", "Loading WorldState...");
     sWorldState->Load(); // must be called after loading game events
@@ -1281,16 +1284,6 @@ void World::Update(uint32 diff)
         LoginDatabase.Execute(stmt);
     }
 
-    ///- Process Game events when necessary
-    if (_timers[WUPDATE_EVENTS].Passed())
-    {
-        METRIC_TIMER("world_update_time", METRIC_TAG("type", "Update game events"));
-        _timers[WUPDATE_EVENTS].Reset();                   // to give time for Update() to be processed
-        uint32 nextGameEvent = sGameEventMgr->Update();
-        _timers[WUPDATE_EVENTS].SetInterval(nextGameEvent);
-        _timers[WUPDATE_EVENTS].Reset();
-    }
-
     ///- Ping to keep MySQL connections alive
     if (_timers[WUPDATE_PINGDB].Passed())
     {
@@ -1382,10 +1375,10 @@ std::string_view World::getStringConfig(ServerConfigs index) const
 
 void World::ForceGameEventUpdate()
 {
-    _timers[WUPDATE_EVENTS].Reset();                   // to give time for Update() to be processed
-    uint32 nextGameEvent = sGameEventMgr->Update();
-    _timers[WUPDATE_EVENTS].SetInterval(nextGameEvent);
-    _timers[WUPDATE_EVENTS].Reset();
+    // GES Inc-3: native date-scheduler removed. This was called to kick off
+    // GAMEEVENT_WORLD_CONDITIONS/NEXTPHASE state-machine transitions — those are dead
+    // code on this server (0 world-state events). Kept as no-op to satisfy the IWorld
+    // interface; callers in StartEvent/HandleQuestComplete compile cleanly.
 }
 
 namespace Acore

@@ -1,0 +1,20 @@
+[package]
+name = "game-event-scheduler"
+version = "0.1.0"
+edition = "2021"
+
+# Both a lib (consumed by slice-host) and a thin bin (for standalone / Inc-1/2 deploy).
+[lib]
+name = "game_event_scheduler"
+path = "src/lib.rs"
+
+[[bin]]
+name = "game-event-scheduler"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
+axum = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

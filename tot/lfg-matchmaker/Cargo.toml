@@ -1,0 +1,24 @@
+[package]
+name = "lfg-matchmaker"
+version = "0.1.0"
+edition = "2021"
+
+# Both a lib (consumed by slice-host) and a thin bin (for standalone deploy).
+[lib]
+name = "lfg_matchmaker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lfg-matchmaker"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
+axum = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# [profile.release] removed — workspace root tot/Cargo.toml owns the shared release
+# profile (opt-level="z", lto, codegen-units=1, strip, panic=abort). Members cannot
+# define their own profiles.

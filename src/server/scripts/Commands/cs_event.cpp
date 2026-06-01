@@ -99,9 +99,10 @@ public:
         std::string startTimeStr = Acore::Time::TimeToTimestampStr(Seconds(eventData.Start));
         std::string endTimeStr = Acore::Time::TimeToTimestampStr(Seconds(eventData.End));
 
-        uint32 delay = sGameEventMgr->NextCheck(eventId);
-        time_t nextTime = GameTime::GetGameTime().count() + delay;
-        std::string nextStr = nextTime >= eventData.Start && nextTime < eventData.End ? Acore::Time::TimeToTimestampStr(Seconds(nextTime)) : "-";
+        // GES Inc-3: NextCheck removed with the native date-scheduler.
+        // The Rust game-event-scheduler slice drives transitions; next-transition time
+        // is not available from the C++ side.
+        std::string nextStr = "-";
 
         std::string occurenceStr = secsToTimeString(eventData.Occurence * MINUTE, true);
         std::string lengthStr = secsToTimeString(eventData.Length * MINUTE, true);

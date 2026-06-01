@@ -94,6 +94,29 @@ V1_TEMPLATES: dict[str, QueryTemplate] = {
         ),
         params=["class_id"],
     ),
+    # Raw game_event rows for the Rust GES shadow-verify slice.
+    # Schema verified 2026-05-30 via DESCRIBE acore_world.game_event:
+    #   eventEntry, start_time, end_time, occurence (AC misspelling), length,
+    #   holiday, holidayStage, description, world_event, announce.
+    # Columns state / nextstart do NOT exist in this fork — they are C++
+    # runtime-only values produced by GameEventMgr, not stored in the DB.
+    # UNIX_TIMESTAMP converts the timestamp columns to integers so the Rust
+    # deserializer can treat them as u64 epoch-seconds without tzinfo drift.
+    # Parameter-free: always returns all 181 rows (152 periodic + 29 holiday).
+    "game_event_all": QueryTemplate(
+        name="game_event_all",
+        db="acore_world",
+        sql=(
+            "SELECT eventEntry, "
+            "       UNIX_TIMESTAMP(start_time) AS start_time, "
+            "       UNIX_TIMESTAMP(end_time) AS end_time, "
+            "       occurence, length, holiday, holidayStage, "
+            "       description, world_event, announce "
+            "FROM game_event "
+            "ORDER BY eventEntry"
+        ),
+        params=[],
+    ),
 }
 
 

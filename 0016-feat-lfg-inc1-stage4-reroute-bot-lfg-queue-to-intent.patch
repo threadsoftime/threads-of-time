@@ -1,0 +1,69 @@
+Subject: [LFG Inc 1 / Stage 4] reroute bot LFG force-queue to the intent store
+
+mod-playerbots is an EXTERNAL build-time dependency, NOT vendored in this repo.
+This patch is the canonical record of the Stage-4 reroute applied to the
+mod-playerbots source tree the build compiles from (on Heimdal:
+/opt/containers/wow/source/modules/mod-playerbots/).
+
+Apply from the mod-playerbots repo root:
+    git apply -p1 0016-feat-lfg-inc1-stage4-reroute-bot-lfg-queue-to-intent.patch
+(or `patch -p1 < ...`). Regenerated 2026-05-30 from the live Heimdal edit
+(diff of LfgActions.cpp.bak-stage4-reroute vs LfgActions.cpp).
+
+What it does: in LfgJoinAction::JoinLFG(), replace the CMSG_LFG_JOIN WorldPacket
+submission (native LFGMgr force-queue) with HarnessBridge::RecordLfgIntent(
+is_bot=true) so the Rust LFG slice owns bot matchmaking. The dungeon selection +
+role computation above the change are preserved exactly; only the SINK changes.
+After this (plus the Stage-3 real-player veto + the bot.queue_for_dungeon reroute
+in mod-harness-bridge) native LFGMgr::JoinLfg / LFGQueue matching process an
+always-empty queue — the precondition for Inc-3 deletion.
+
+--- a/src/Ai/Base/Actions/LfgActions.cpp
++++ b/src/Ai/Base/Actions/LfgActions.cpp
+@@ -13,6 +13,7 @@
+ #include "World.h"
+ #include "WorldPacket.h"
+ #include "RandomPlayerbotMgr.h"
++#include "LfgIntentStore.h"
+
+ using namespace lfg;
+
+@@ -151,21 +152,23 @@
+     // Set RbotAId Browser comment
+     std::string const _gs = std::to_string(botAI->GetEquipGearScore(bot/*, false, false*/));
+
+-    // JoinLfg is not threadsafe, so make packet and queue into session
+-    // sLFGMgr->JoinLfg(bot, roleMask, list, _gs);
+-
+-    WorldPacket* data = new WorldPacket(CMSG_LFG_JOIN);
+-    *data << (uint32)roleMask;
+-    *data << (bool)false;
+-    *data << (bool)false;
+-    // Slots
+-    *data << (uint8)(list.size());
+-    for (uint32 dungeon : list)
+-        *data << (uint32)dungeon;
+-    // Needs
+-    *data << (uint8)3 << (uint8)0 << (uint8)0 << (uint8)0;
+-    *data << _gs;
+-    bot->GetSession()->QueuePacket(data);
++    // Stage-4 strangler-fig reroute: enqueue bot's LFG intent into the
++    // intent store (world-thread-only, no mutex) so the Rust LFG slice owns
++    // matchmaking.  The dungeon selection and role computation above are kept
++    // intact — only the SINK changes (intent store instead of native LFGMgr).
++    // The native CMSG_LFG_JOIN path below is intentionally replaced; native
++    // LFGMgr matching processes an always-empty queue from this point forward.
++    {
++        std::vector<uint32_t> dungeon_id_vec(list.begin(), list.end());
++        HarnessBridge::RecordLfgIntent({
++            static_cast<uint64_t>(bot->GetGUID().GetCounter()),
++            static_cast<uint8_t>(bot->GetTeamId()),
++            static_cast<uint32_t>(roleMask),
++            std::move(dungeon_id_vec),
++            /*comment=*/ "",
++            /*is_bot=*/true
++        });
++    }
+
+     return true;
+ }

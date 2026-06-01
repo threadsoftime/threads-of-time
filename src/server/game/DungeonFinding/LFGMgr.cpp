@@ -2220,6 +2220,24 @@ namespace lfg
     }
 
     /**
+       Set group and all tracked members to LFG_STATE_DUNGEON.
+
+       Called by the harness lfg.form_group adapter after force-creating a group via
+       the MakeNewGroup-faithful path.  Mirrors the SetState calls at the bottom of
+       MakeNewGroup that could not be reached through a public path before this
+       method was added.
+
+       @param[in]     gguid Group GUID
+    */
+    void LFGMgr::InitGroupForDungeon(ObjectGuid gguid)
+    {
+        SetState(gguid, LFG_STATE_DUNGEON);
+        LfgGuidSet const& players = GetPlayers(gguid);
+        for (LfgGuidSet::const_iterator it = players.begin(); it != players.end(); ++it)
+            SetState(*it, LFG_STATE_DUNGEON);
+    }
+
+    /**
        Teleports the player in or out the dungeon
 
        @param[in]     player Player to teleport

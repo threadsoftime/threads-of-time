@@ -589,6 +589,9 @@ namespace lfg
 
         void SetDungeon(ObjectGuid guid, uint32 dungeon);
         LFGDungeonData const* GetLFGDungeon(uint32 id);
+        /// Set group and all tracked members to LFG_STATE_DUNGEON.
+        /// Called by harness lfg.form_group after force-creating a group.
+        void InitGroupForDungeon(ObjectGuid gguid);
 
     private:
         TeamId GetTeam(ObjectGuid guid);

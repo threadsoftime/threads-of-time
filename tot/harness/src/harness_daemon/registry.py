@@ -108,6 +108,11 @@ def build_v1_registry() -> Registry:
         ToolEntry("obs.get_group",             "obs.get_group",             "target_guid", True),
         # Observation (V1.4)
         ToolEntry("obs.get_talents",           "obs.get_talents",           "target_guid", True),
+        # GES Inc-1 — game-event schedule snapshot (no subject guid, read-only)
+        ToolEntry("obs.game_events",           "obs.game_events",           None,          True),
+        # GES Inc-2 — event control primitives (subject is event_id, not a player/bot guid)
+        ToolEntry("event.start",               "event.start",               None,          True),
+        ToolEntry("event.stop",                "event.stop",                None,          True),
         # Daemon-direct
         ToolEntry("obs.query_db",              "obs.query_db",              None,          False),
         # Memory subsystem (Phase 6B — V1 memory.* tools)
@@ -118,4 +123,8 @@ def build_v1_registry() -> Registry:
         ToolEntry("memory.list",               "memory.list",               "bot_guid",    True),
         ToolEntry("memory.update",             "memory.update",             "bot_guid",    True),
         ToolEntry("memory.delete",             "memory.delete",             "bot_guid",    True),
+        # LFG force-form primitives (Inc 1)
+        ToolEntry("lfg.form_group",            "lfg.form_group",            None,          True),
+        # Stage 3: pull-based intent drain — no subject_guid (world-level drain)
+        ToolEntry("obs.lfg_pending",           "obs.lfg_pending",           None,          True),
     ])

@@ -66,6 +66,14 @@ DAEMON_INJECTED_FIELDS = {
 # the required-field assertion here.  Pydantic correctly marks them
 # Optional; the adapter silently skips absent fields rather than rejecting.
 SCHEMA_OR_REQUIRED_FIELDS: dict[str, set[str]] = {
+    # bot.queue_for_dungeon: hard-required = bot_guid, dungeon_id.
+    # roles_mask uses the ternary presence-guard pattern:
+    #   args.contains("roles_mask") ? args["roles_mask"].get<int>() : 0
+    # The _extract_required() regex matches args.contains() regardless of
+    # whether it is a hard-required gate or a defaulted presence check, so
+    # roles_mask appears in adapter_required even though the adapter falls
+    # back to 0 (auto-detect from talent spec) when it is absent.
+    "bot.queue_for_dungeon": {"roles_mask"},
     # memory.write: hard-required = bot_guid, content_text, episode_type, timestamp.
     # Everything else is body-building (optional).
     "memory.write": {"salience_hint", "entities", "metadata", "source"},
