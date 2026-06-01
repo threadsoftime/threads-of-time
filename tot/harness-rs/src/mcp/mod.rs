@@ -279,27 +279,15 @@ mod tests {
             "registry must have 46 tools matching the 46 #[tool] methods"
         );
 
-        // Also verify that all 46 wrapper types have args schemas (belt+suspenders
-        // on the derive(Serialize) change we made to schemas.rs).
-        macro_rules! check_serializes {
-            ($T:ty, $name:expr) => {{
-                let schema_val = serde_json::to_value(schema_for!($T)).unwrap();
-                assert!(
-                    schema_val.get("properties").and_then(|p| p.get("args")).is_some(),
-                    "{}: inputSchema must have properties.args after Serialize derive", $name
-                );
-            }};
-        }
-
-        check_serializes!(schemas::ObsPingWrapper,            "obs.ping");
-        check_serializes!(schemas::GmAdditemWrapper,          "gm.additem");
-        check_serializes!(schemas::BotSetStrategyWrapper,     "bot.set_strategy");
-        check_serializes!(schemas::LfgFormGroupWrapper,       "lfg.form_group");
-        check_serializes!(schemas::MemoryRecallWrapper,       "memory.recall");
-        // spot-check: also verify serialize works (to_value of an instance)
-        let w = schemas::ObsPingWrapper { args: schemas::ObsPingArgs {} };
-        let v = serde_json::to_value(&w.args).unwrap();
+        // Verify that the flat Args types (no wrapper) serialize correctly.
+        // Phase 12: tools now use Args types directly (not Wrapper types) so
+        // the inputSchema is flat — no `properties.args` nesting.
+        let v = serde_json::to_value(&schemas::ObsPingArgs {}).unwrap();
         assert!(v.is_object(), "ObsPingArgs must serialize to a JSON object");
+        let v = serde_json::to_value(&schemas::GmAdditemArgs {
+            target_guid: 1, item_entry: 100, count: 1,
+        }).unwrap();
+        assert!(v.get("target_guid").is_some(), "GmAdditemArgs must have target_guid");
 
         // suppress unused warning for handler
         let _ = handler;
