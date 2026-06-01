@@ -118,3 +118,182 @@ impl EmbeddingsClient {
         Ok(vec)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        extract::Json as AxumJson,
+        http::{HeaderMap as AxumHeaderMap, StatusCode},
+        routing::post,
+        Router,
+    };
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    /// Captured request data from the mock handler.
+    #[derive(Default, Clone)]
+    struct Captured {
+        body: serde_json::Value,
+        auth_header: Option<String>,
+    }
+
+    /// Spin up a mock `/v1/embeddings` endpoint on an ephemeral port.
+    ///
+    /// `captured` is written by the handler so tests can assert on it after
+    /// the client call returns.
+    ///
+    /// Returns `(base_url, Arc<Mutex<Captured>>)`.
+    async fn spawn_embed_mock(
+        response_vec: Vec<f32>,
+    ) -> (String, Arc<Mutex<Captured>>) {
+        let captured = Arc::new(Mutex::new(Captured::default()));
+        let captured_clone = captured.clone();
+
+        let handler = move |
+            headers: AxumHeaderMap,
+            AxumJson(body): AxumJson<serde_json::Value>,
+        | {
+            let captured = captured_clone.clone();
+            let vec = response_vec.clone();
+            async move {
+                // Store what the client sent so the test can assert on it.
+                let auth = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_owned());
+                {
+                    let mut c = captured.lock().await;
+                    c.body = body;
+                    c.auth_header = auth;
+                }
+
+                // Return the OpenAI-compatible shape the client expects.
+                let embedding_json: Vec<serde_json::Value> = vec
+                    .iter()
+                    .map(|&x| serde_json::json!(x))
+                    .collect();
+                (
+                    StatusCode::OK,
+                    AxumJson(serde_json::json!({
+                        "object": "list",
+                        "data": [{ "object": "embedding", "embedding": embedding_json, "index": 0 }],
+                        "model": "test-model",
+                    })),
+                )
+            }
+        };
+
+        let app = Router::new().route("/v1/embeddings", post(handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        (format!("http://{addr}/v1"), captured)
+    }
+
+    // --- Happy-path tests ---
+
+    // H1: embed() returns Vec<f32> of exactly EMBEDDING_DIM length.
+    #[tokio::test]
+    async fn happy_returns_vec_len_768() {
+        let response_vec: Vec<f32> = (0..EMBEDDING_DIM).map(|i| i as f32 * 0.001).collect();
+        let (base_url, _captured) = spawn_embed_mock(response_vec.clone()).await;
+
+        let client = EmbeddingsClient::new(&base_url, "nomic-embed-text", "");
+        let result = client.embed("hello world").await.unwrap();
+
+        assert_eq!(result.len(), EMBEDDING_DIM, "returned vec must be exactly EMBEDDING_DIM={}", EMBEDDING_DIM);
+    }
+
+    // H2: embed() sends {"model": <model>, "input": <text>} in the request body.
+    #[tokio::test]
+    async fn happy_sends_correct_body() {
+        let response_vec: Vec<f32> = vec![0.0_f32; EMBEDDING_DIM];
+        let (base_url, captured) = spawn_embed_mock(response_vec).await;
+
+        let client = EmbeddingsClient::new(&base_url, "nomic-embed-text", "");
+        client.embed("test input text").await.unwrap();
+
+        let c = captured.lock().await;
+        assert_eq!(
+            c.body.get("model").and_then(|v| v.as_str()),
+            Some("nomic-embed-text"),
+            "body must include model field"
+        );
+        assert_eq!(
+            c.body.get("input").and_then(|v| v.as_str()),
+            Some("test input text"),
+            "body must include input field"
+        );
+    }
+
+    // H3: Authorization: Bearer header is present when api_key is non-empty.
+    #[tokio::test]
+    async fn happy_sends_bearer_when_api_key_set() {
+        let response_vec: Vec<f32> = vec![0.0_f32; EMBEDDING_DIM];
+        let (base_url, captured) = spawn_embed_mock(response_vec).await;
+
+        let client = EmbeddingsClient::new(&base_url, "nomic-embed-text", "secret-key");
+        client.embed("text").await.unwrap();
+
+        let c = captured.lock().await;
+        assert_eq!(
+            c.auth_header.as_deref(),
+            Some("Bearer secret-key"),
+            "Authorization header must be 'Bearer <api_key>'"
+        );
+    }
+
+    // H4: No Authorization header is sent when api_key is empty.
+    #[tokio::test]
+    async fn happy_no_auth_header_when_api_key_empty() {
+        let response_vec: Vec<f32> = vec![0.0_f32; EMBEDDING_DIM];
+        let (base_url, captured) = spawn_embed_mock(response_vec).await;
+
+        let client = EmbeddingsClient::new(&base_url, "nomic-embed-text", "");
+        client.embed("text").await.unwrap();
+
+        let c = captured.lock().await;
+        assert!(
+            c.auth_header.is_none(),
+            "no Authorization header must be sent when api_key is empty, got: {:?}",
+            c.auth_header
+        );
+    }
+
+    // H5: Trailing slashes in base_url are stripped — the URL hit is
+    //     exactly {base}/embeddings, not {base}//embeddings.
+    //     The mock only routes /v1/embeddings; double-slash would 404.
+    #[tokio::test]
+    async fn happy_trailing_slash_stripped() {
+        let response_vec: Vec<f32> = vec![0.0_f32; EMBEDDING_DIM];
+        // spawn_embed_mock returns a /v1 base; add trailing slashes.
+        let (base_url, _) = spawn_embed_mock(response_vec).await;
+        let base_url_with_slashes = format!("{}/", base_url); // e.g. http://addr/v1/
+
+        let client = EmbeddingsClient::new(&base_url_with_slashes, "model", "");
+        // Would return 404 (not 200) if the slash were not trimmed.
+        client.embed("text").await.expect("trailing slash must be stripped before appending /embeddings");
+    }
+
+    // H6: Returned Vec<f32> values match the mock's output (f64→f32 round-trip).
+    #[tokio::test]
+    async fn happy_vec_values_match() {
+        // Use a recognisable pattern so the assertion is not vacuous.
+        let expected: Vec<f32> = (0..EMBEDDING_DIM).map(|i| (i as f32) / (EMBEDDING_DIM as f32)).collect();
+        let (base_url, _) = spawn_embed_mock(expected.clone()).await;
+
+        let client = EmbeddingsClient::new(&base_url, "model", "");
+        let got = client.embed("text").await.unwrap();
+
+        // The JSON round-trip (f32 → JSON f64 → as_f64() as f32) introduces
+        // at most 1 ULP of error on values in [0, 1]. Use approximate equality.
+        for (i, (&e, &g)) in expected.iter().zip(got.iter()).enumerate() {
+            assert!(
+                (e - g).abs() < 1e-5,
+                "index {i}: expected {e}, got {g}"
+            );
+        }
+    }
+}
