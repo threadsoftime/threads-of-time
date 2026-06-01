@@ -40,7 +40,7 @@ use game_event_scheduler::config::Config as GesConfig;
 use game_event_scheduler::harness::Harness;
 use game_event_scheduler::{api as ges_api, tick as ges_tick};
 
-use lfg_matchmaker::api::AppState as LfgAppState;
+use lfg_matchmaker::api::{AppState as LfgAppState, PendingPlacements as LfgPendingPlacements};
 use lfg_matchmaker::config::Config as LfgConfig;
 use lfg_matchmaker::queue::Queue as LfgQueue;
 use lfg_matchmaker::{api as lfg_api, tick as lfg_tick};
@@ -224,7 +224,7 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let lfg_state = Arc::new(LfgAppState { queue: LfgQueue::new() });
+    let lfg_state = Arc::new(LfgAppState { queue: LfgQueue::new(), pending_placements: LfgPendingPlacements::new() });
 
     let lfg_state_for_task = lfg_state.clone();
     let lfg_harness = lfg_matchmaker::harness::Harness::new(harness_base_url.clone(), harness_bearer.clone());
@@ -274,7 +274,7 @@ mod tests {
     /// Build fresh state for both slices and return the composed router.
     fn make_app() -> Router {
         let ges_state = Arc::new(GesAppState::new());
-        let lfg_state = Arc::new(LfgAppState { queue: LfgQueue::new() });
+        let lfg_state = Arc::new(LfgAppState { queue: LfgQueue::new(), pending_placements: LfgPendingPlacements::new() });
         build_app(ges_state, lfg_state)
     }
 
@@ -338,7 +338,7 @@ mod tests {
     #[tokio::test]
     async fn lfg_queue_enqueue_and_list() {
         let ges_state = Arc::new(GesAppState::new());
-        let lfg_state = Arc::new(LfgAppState { queue: LfgQueue::new() });
+        let lfg_state = Arc::new(LfgAppState { queue: LfgQueue::new(), pending_placements: LfgPendingPlacements::new() });
         let app = build_app(ges_state, lfg_state.clone());
 
         let req = Request::builder()

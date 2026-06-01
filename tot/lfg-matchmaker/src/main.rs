@@ -6,7 +6,7 @@
 //! When running under `slice-host` this file is NOT used; `slice-host` composes
 //! the library directly via `lfg_matchmaker::tick::run` + `lfg_matchmaker::routes`.
 
-use lfg_matchmaker::api::AppState;
+use lfg_matchmaker::api::{AppState, PendingPlacements};
 use lfg_matchmaker::config::Config;
 use lfg_matchmaker::harness::Harness;
 use lfg_matchmaker::queue::Queue;
@@ -43,7 +43,7 @@ async fn main() {
     });
 
     let harness = Harness::new(cfg.harness_base_url.clone(), cfg.harness_bearer.clone());
-    let state = Arc::new(AppState { queue: Queue::new() });
+    let state = Arc::new(AppState { queue: Queue::new(), pending_placements: PendingPlacements::new() });
 
     // Keep the tick JoinHandle so a tick exit/panic ends the process (the container
     // restarts it) instead of zombifying the matcher while /healthz still returns ok.

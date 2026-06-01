@@ -18,6 +18,12 @@ pub struct FormResult {
     /// adapter is atomic/pre-validated — no single member is to blame), and on
     /// placement-only failures (group formed, `formed:true` — no eviction needed).
     pub failed_guid: Option<u64>,
+    /// Guids of members for whom `bot.enter_instance` failed (group DID form,
+    /// `formed:true`). The tick loop records these into the pending-placements
+    /// store so they are retried on subsequent ticks. Empty on clean groups.
+    /// Never populated when `formed:false` (group failed to form — no placement
+    /// was attempted so no partial placement occurred).
+    pub unplaced: Vec<u64>,
 }
 
 /// Form the group (leader invites each other member, each accepts), then
@@ -43,6 +49,7 @@ pub async fn fulfill(h: &Harness, p: &MatchProposal, dungeon: &Dungeon) -> FormR
                 dungeon_id: p.dungeon_id, leader, members, formed: false, placed: 0,
                 note: format!("invite {leader}->{m} failed: {e}; rolled back {joined:?}{rb}"),
                 failed_guid: Some(*m),
+                unplaced: Vec::new(),
             };
         }
         if let Err(e) = h.accept_invite(*m).await {
@@ -51,6 +58,7 @@ pub async fn fulfill(h: &Harness, p: &MatchProposal, dungeon: &Dungeon) -> FormR
                 dungeon_id: p.dungeon_id, leader, members, formed: false, placed: 0,
                 note: format!("accept {m} failed: {e}; rolled back {joined:?}{rb}"),
                 failed_guid: Some(*m),
+                unplaced: Vec::new(),
             };
         }
         joined.push(*m);
@@ -58,17 +66,22 @@ pub async fn fulfill(h: &Harness, p: &MatchProposal, dungeon: &Dungeon) -> FormR
 
     let mut placed = 0usize;
     let mut errors: Vec<String> = Vec::new();
+    let mut unplaced: Vec<u64> = Vec::new();
     for m in &members {
         match h.enter_instance_direct(*m, dungeon).await {
             Ok(_) => placed += 1,
-            Err(e) => errors.push(format!("place {m}: {e}")),
+            Err(e) => {
+                errors.push(format!("place {m}: {e}"));
+                unplaced.push(*m);
+            }
         }
     }
     let note = if errors.is_empty() { "formed+placed".to_string() } else { errors.join("; ") };
 
     // Placement-only failures keep formed:true and must NOT evict any member —
     // the group DID form, so failed_guid is None regardless of placement errors.
-    FormResult { dungeon_id: p.dungeon_id, leader, members, formed: true, placed, note, failed_guid: None }
+    // Unplaced members are returned so the tick loop can schedule retries.
+    FormResult { dungeon_id: p.dungeon_id, leader, members, formed: true, placed, note, failed_guid: None, unplaced }
 }
 
 /// Form a group that contains a real human player via `lfg.form_group`, then
@@ -107,6 +120,7 @@ pub async fn form_via_lfg(h: &Harness, p: &MatchProposal, dungeon: &Dungeon) -> 
             // blame for the failure, so the real player is re-queued as normal
             // and no eviction occurs.
             failed_guid: None,
+            unplaced: Vec::new(),
         },
         Ok(_) => {
             // Place each bot member. The real human player (real_player_guid)
@@ -114,6 +128,7 @@ pub async fn form_via_lfg(h: &Harness, p: &MatchProposal, dungeon: &Dungeon) -> 
             let real_guid = p.real_player_guid;
             let mut placed = 0usize;
             let mut errors: Vec<String> = Vec::new();
+            let mut unplaced: Vec<u64> = Vec::new();
 
             for &m in &members {
                 if Some(m) == real_guid {
@@ -126,7 +141,10 @@ pub async fn form_via_lfg(h: &Harness, p: &MatchProposal, dungeon: &Dungeon) -> 
                 }
                 match h.enter_instance_direct(m, dungeon).await {
                     Ok(_) => placed += 1,
-                    Err(e) => errors.push(format!("place {m}: {e}")),
+                    Err(e) => {
+                        errors.push(format!("place {m}: {e}"));
+                        unplaced.push(m);
+                    }
                 }
             }
 
@@ -135,7 +153,7 @@ pub async fn form_via_lfg(h: &Harness, p: &MatchProposal, dungeon: &Dungeon) -> 
             } else {
                 errors.join("; ")
             };
-            FormResult { dungeon_id: p.dungeon_id, leader, members, formed: true, placed, note, failed_guid: None }
+            FormResult { dungeon_id: p.dungeon_id, leader, members, formed: true, placed, note, failed_guid: None, unplaced }
         }
     }
 }
@@ -347,6 +365,58 @@ mod tests {
             res.failed_guid, None,
             "placement-only failure must not set failed_guid (no eviction): {:?}",
             res.failed_guid
+        );
+    }
+
+    // T-unplaced(a): when one bot.enter_instance fails (guid 4), fulfill must report
+    // formed:true, placed:4, unplaced == [4] (the straggler guid for next-tick retry).
+    #[tokio::test]
+    async fn fulfill_one_placement_failure_populates_unplaced() {
+        let (base, _calls) =
+            spawn_recording_mock_with_fail(Some(("bot.enter_instance".into(), 4))).await;
+        let h = Harness::new(base, "tok".into());
+
+        let res = fulfill(&h, &proposal(), &dungeon()).await;
+        assert!(res.formed, "group must form: {}", res.note);
+        assert_eq!(res.placed, 4, "four of five placed: {}", res.note);
+        assert_eq!(
+            res.unplaced,
+            vec![4u64],
+            "unplaced must contain only the failing guid: {:?}",
+            res.unplaced
+        );
+    }
+
+    // T-unplaced(b): when all five placements succeed, unplaced is empty.
+    #[tokio::test]
+    async fn fulfill_clean_group_has_empty_unplaced() {
+        let (base, _calls) = spawn_recording_mock().await;
+        let h = Harness::new(base, "tok".into());
+
+        let res = fulfill(&h, &proposal(), &dungeon()).await;
+        assert!(res.formed);
+        assert_eq!(res.placed, 5);
+        assert!(
+            res.unplaced.is_empty(),
+            "clean group must have no unplaced members: {:?}",
+            res.unplaced
+        );
+    }
+
+    // T-unplaced(c): when form fails (invite rejected), unplaced is empty — no
+    // placement was attempted, so no partial placement record.
+    #[tokio::test]
+    async fn form_failure_has_empty_unplaced() {
+        let (base, _calls) =
+            spawn_recording_mock_with_fail(Some(("bot.invite_to_group".into(), 3))).await;
+        let h = Harness::new(base, "tok".into());
+
+        let res = fulfill(&h, &proposal(), &dungeon()).await;
+        assert!(!res.formed);
+        assert!(
+            res.unplaced.is_empty(),
+            "form failure must have no unplaced (no placement attempted): {:?}",
+            res.unplaced
         );
     }
 
