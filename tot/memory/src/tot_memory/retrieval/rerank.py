@@ -173,5 +173,11 @@ def recall(
             )
         )
 
-    results.sort(key=lambda r: r.score, reverse=True)
+    # Total order: descending score, ascending episode_id as the tiebreak.
+    # The episode_id secondary key disambiguates exact float ties so the
+    # ordering is deterministic and matches the Rust recall sort
+    # (`b.score.partial_cmp(&a.score).then(a.episode_id.cmp(&b.episode_id))`).
+    # Behaviour-identical on distinct scores — this only resolves equal-score
+    # ties — and is required for the cross-implementation parity gate.
+    results.sort(key=lambda r: (-r.score, r.episode_id))
     return results[:top_k]
