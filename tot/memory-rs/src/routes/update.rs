@@ -292,7 +292,7 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["episode_id"].as_i64().unwrap(), ep_id);
-        assert_eq!(v["reembedded"].as_bool().unwrap(), false);
+        assert!(!v["reembedded"].as_bool().unwrap());
         let updated_fields = v["updated_fields"].as_array().unwrap();
         assert!(updated_fields
             .iter()
@@ -340,7 +340,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["reembedded"].as_bool().unwrap(), false);
+        assert!(!v["reembedded"].as_bool().unwrap());
         let fields = v["updated_fields"].as_array().unwrap();
         assert!(fields.iter().any(|f| f.as_str().unwrap() == "metadata"));
 
@@ -401,7 +401,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["reembedded"].as_bool().unwrap(), true);
+        assert!(v["reembedded"].as_bool().unwrap());
         let fields = v["updated_fields"].as_array().unwrap();
         assert!(fields.iter().any(|f| f.as_str().unwrap() == "content_text"));
 

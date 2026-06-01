@@ -4,6 +4,7 @@
 //!
 //! `register_vec0()` MUST be called exactly once at process startup, before any
 //! [`rusqlite::Connection`] is opened. It registers `sqlite3_vec_init` as a
+//! SQLite auto-extension.
 //! `register_vec0()` is idempotent — it uses a `std::sync::Once` guard so
 //! it is safe to call from every `open_bot_db` invocation (production and
 //! tests). The underlying `sqlite3_auto_extension` call only fires on the

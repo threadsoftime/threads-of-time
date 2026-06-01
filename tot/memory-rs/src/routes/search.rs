@@ -70,7 +70,7 @@ pub async fn search_handler(
     }
 
     let top_k = body.top_k.unwrap_or(10);
-    if top_k < 1 || top_k > 100 {
+    if !(1..=100).contains(&top_k) {
         return Err(AppError::BadRequest("top_k must be 1..100".to_string()));
     }
 

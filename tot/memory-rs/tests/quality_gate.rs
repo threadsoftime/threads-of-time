@@ -263,6 +263,9 @@ fn seed_db(conn: &Connection, eps: &[EpisodeFixture]) {
 ///
 /// This mirrors `retrieval.rerank.recall` without involving the HTTP layer.
 /// Uses the same `candidate_multiplier = 5` the Python gate uses.
+///
+/// NOTE: duplicates the recall pipeline inline (no HTTP layer). If
+/// retrieval::rerank::recall changes, update this to match.
 fn run_recall(
     conn: &Connection,
     query_text: &str,
@@ -475,7 +478,7 @@ fn quality_gate() {
 
         // Resolve entity filter.
         let entity_filter_ids: Option<HashSet<i64>> = if !entity_names.is_empty() {
-            let ids = entity_filter(&conn, &entity_names.to_vec()).expect("entity_filter");
+            let ids = entity_filter(&conn, entity_names).expect("entity_filter");
             assert!(
                 !ids.is_empty(),
                 "entity_filter {:?} returned empty set for query {:?}; corpus drift?",
