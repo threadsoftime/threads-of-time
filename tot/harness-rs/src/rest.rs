@@ -55,6 +55,7 @@ fn unix_now_f64() -> f64 {
 /// Mirrors Python: `f"req_{uuid.uuid4().hex[:12]}"`.
 fn gen_request_id() -> String {
     let id = Uuid::new_v4().simple().to_string();
+    // uuid simple() = 32 lowercase hex ASCII chars; [..12] is always in-bounds + char-safe
     format!("req_{}", &id[..12])
 }
 
@@ -183,6 +184,8 @@ async fn handle_tool_call(
                 Some(v) => json!(v),
                 None    => Value::Null,
             });
+        } else {
+            tracing::warn!(tool = %name, "dispatch body is not a JSON object; meta fields omitted");
         }
         return (http_status, Json(body_val)).into_response();
     }
@@ -210,7 +213,13 @@ async fn tools_endpoint(
 ) -> Response {
     let body = match req.into_body().collect().await {
         Ok(collected) => collected.to_bytes(),
-        Err(_) => bytes::Bytes::new(),
+        Err(_) => {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "body read error",
+            );
+        }
     };
     handle_tool_call(&state, &headers, &name, body).await
 }
@@ -223,7 +232,13 @@ async fn observations_endpoint(
 ) -> Response {
     let body = match req.into_body().collect().await {
         Ok(collected) => collected.to_bytes(),
-        Err(_) => bytes::Bytes::new(),
+        Err(_) => {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "body read error",
+            );
+        }
     };
     handle_tool_call(&state, &headers, &name, body).await
 }
@@ -241,21 +256,24 @@ struct AuditQuery {
     since: f64,
 }
 
+/// Intentionally unauthenticated — matches the Python daemon (`app.py:343`
+/// `audit_replay` has no bearer check); access is gated by the pod-local network.
 async fn audit_endpoint(
     State(state): State<SharedState>,
     Query(params): Query<AuditQuery>,
 ) -> impl IntoResponse {
-    use std::fs;
-    use std::path::Path as FsPath;
+    let path = state.audit_path.clone();
 
-    let p = FsPath::new(&state.audit_path);
-    if !p.exists() {
-        return Json(json!({"events": []}));
-    }
-
-    let contents = match fs::read_to_string(p) {
-        Ok(c)  => c,
-        Err(_) => return Json(json!({"events": []})),
+    // Read the JSONL on a blocking thread — std::fs I/O must not run on the
+    // tokio executor.  A read error or NotFound → treat as "no events".
+    let contents: String = match tokio::task::spawn_blocking(move || {
+        std::fs::read_to_string(&path)
+    })
+    .await
+    {
+        Ok(Ok(c))  => c,
+        // File not found, permission error, or spawn_blocking JoinError → empty.
+        _ => return Json(json!({"events": []})),
     };
 
     let events: Vec<Value> = contents
@@ -622,6 +640,40 @@ mod tests {
         let events = body["events"].as_array().unwrap();
         assert_eq!(events.len(), 1, "record with missing ts should be included when since==0.0");
         assert_eq!(events[0]["request_id"], "r_no_ts");
+    }
+
+    // ── 9. empty request body → valid dispatch (I3: empty-body Ok path unchanged) ──
+    //
+    // Simulating a mid-stream body-read failure via oneshot is impractical, so
+    // this test covers the other half of the I3 contract: an Ok response with 0
+    // bytes must still reach dispatch as `{}` args (not be rejected as a 400).
+
+    #[tokio::test]
+    async fn empty_body_dispatches_with_empty_args() {
+        let (state, _mock) = make_state(MockConfig {
+            dispatch_status: 200,
+            dispatch_body:   json!({"ok": true, "result": {"pong": true}}),
+            health_status:   200,
+        })
+        .await;
+
+        let app = build_router(state);
+        // No body at all — Body::empty() → Ok(0 bytes) in collect().
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/tools/obs.ping")
+            .header("Authorization", "Bearer dev-all")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        // Must succeed — NOT a 400.
+        assert_eq!(resp.status(), StatusCode::OK, "empty body must not be rejected as bad_request");
+        let body = body_json(resp).await;
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["result"]["pong"], true);
+        // Meta fields should be injected (confirms we reached dispatch, not an early error return).
+        assert!(body["identity"].as_str().is_some(), "identity meta must be present");
     }
 
     // ── 8. /v1/audit missing file → empty events ─────────────────────────────
