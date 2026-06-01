@@ -5,3 +5,4 @@ pub mod read;
 pub mod list;
 pub mod recall;
 pub mod search;
+pub mod update;
