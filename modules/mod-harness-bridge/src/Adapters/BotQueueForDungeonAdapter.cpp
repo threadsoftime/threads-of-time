@@ -62,6 +62,13 @@ namespace HarnessBridge::Adapters
             return res;
         }
 
+        if (p->GetGroup())
+        {
+            res.outcome = DispatchResult::Outcome::ExecutorFailed;
+            res.error_message = "bot.queue_for_dungeon: bot is already in a group";
+            return res;
+        }
+
         // Auto-detect role if roles_mask == 0 (absent or explicitly 0).
         //
         // Use bySpec=true to derive the role from the bot's dominant talent tree
