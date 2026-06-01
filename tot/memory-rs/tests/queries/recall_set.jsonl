@@ -1,0 +1,50 @@
+{"query_text":"Alice taught me how to aoe pull","expected_episode_ids":[2],"top_k":5}
+{"query_text":"Bob fishing spot Westfall pond","expected_episode_ids":[6],"top_k":5}
+{"query_text":"Carol dungeon healing run","expected_episode_ids":[10],"top_k":5}
+{"query_text":"fall damage Stormwind bridge","expected_episode_ids":[4],"top_k":5}
+{"query_text":"Mor'Ladim rare elite kill","expected_episode_ids":[42],"top_k":5}
+{"query_text":"Edwin VanCleef Deadmines wipe","expected_episode_ids":[43],"top_k":5}
+{"query_text":"Hogger solo kill elite","expected_episode_ids":[47],"top_k":5}
+{"query_text":"Defias Brotherhood quest chain","expected_episode_ids":[102],"top_k":5}
+{"query_text":"People's Militia turn-in green cloak","expected_episode_ids":[113],"top_k":5}
+{"query_text":"VanCleef head turn-in Captain Velt","expected_episode_ids":[121],"top_k":5}
+{"query_text":"Stormwind harbor district discovery","expected_episode_ids":[126],"top_k":5}
+{"query_text":"Defias Strip Miner rare blue weapon drop","expected_episode_ids":[135],"top_k":5}
+{"query_text":"level 25 goal next weekend","expected_episode_ids":[151],"top_k":5}
+{"query_text":"tanking is my preferred role reflection","expected_episode_ids":[185],"top_k":5}
+{"query_text":"level 60 black war steed Stormwind","expected_episode_ids":[190],"top_k":5}
+{"query_text":"Alice complimented gear upgrades","expected_episode_ids":[3],"top_k":5}
+{"query_text":"Bob auction house deposit fees complaint","expected_episode_ids":[8],"top_k":5}
+{"query_text":"Carol rare cloak Deadmines drop mention","expected_episode_ids":[11],"top_k":5}
+{"query_text":"Sneed lumber mill wipe Deadmines","expected_episode_ids":[45],"top_k":5}
+{"query_text":"Stockades Dave pulled too many","expected_episode_ids":[62],"top_k":5}
+{"query_text":"Westfall escort quest gnolls failure","expected_episode_ids":[103],"top_k":5}
+{"query_text":"cooking quest from Ord the Merchant","expected_episode_ids":[124],"top_k":5}
+{"query_text":"hidden fishing spot behind windmill","expected_episode_ids":[127],"top_k":5}
+{"query_text":"stop pulling extra mobs solo reflection","expected_episode_ids":[176],"top_k":5}
+{"query_text":"Heidi left dungeon group after wipe","expected_episode_ids":[195],"top_k":5}
+{"query_text":"what did Alice teach me","expected_episode_ids":[1,2,3,4,27,28,54,71,81,93,171,175,180,186],"entity_filter":["Alice"],"top_k":5}
+{"query_text":"Bob conversations and interactions","expected_episode_ids":[5,6,7,8,29,55,72,82,175,187],"entity_filter":["Bob"],"top_k":5}
+{"query_text":"Captain Velt Defias updates","expected_episode_ids":[37,38,91,104,105,111,113,121],"entity_filter":["Captain Velt"],"top_k":5}
+{"query_text":"everything related to Carol","expected_episode_ids":[9,10,11,30,53,73,81,94,115,172,175,183,189],"entity_filter":["Carol"],"top_k":5}
+{"query_text":"Mor'Ladim encounters","expected_episode_ids":[42,194],"entity_filter":["Mor'Ladim"],"top_k":5}
+{"query_text":"Innkeeper Lin offerings","expected_episode_ids":[33,34,89,101,114,118,198],"entity_filter":["Innkeeper Lin"],"top_k":5}
+{"query_text":"Westfall area memories","expected_episode_ids":[6,15,29,41,42,44,50,52,58,60,64,65,66,69,75,83,101,102,103,106,110,120,127,131,133,136,140,144,147,148,188,191],"entity_filter":["Westfall"],"top_k":5}
+{"query_text":"Deadmines events overview","expected_episode_ids":[43,45,46,48,51,53,54,55,56,57,61,63,67,68,71,107,108,192],"entity_filter":["The Deadmines"],"top_k":5}
+{"query_text":"Stormwind city interactions","expected_episode_ids":[4,13,17,33,34,39,40,47,49,59,62,70,74,80,89,92,114,126,129,130,134,138,143,146,147,190,193,196,199],"entity_filter":["Stormwind"],"top_k":5}
+{"query_text":"Frank duel and challenges","expected_episode_ids":[17,18,52,66,76,82,97,196],"entity_filter":["Frank"],"top_k":5}
+{"query_text":"recent observation in Stormwind","expected_episode_ids":[126,190,193,196,199],"entity_filter":["Stormwind"],"episode_types":["observation","discovery"],"top_k":5}
+{"query_text":"recent observation in Westfall","expected_episode_ids":[188,191,130,127,144],"entity_filter":["Westfall"],"episode_types":["observation","discovery"],"top_k":5}
+{"query_text":"recent observation in Deadmines","expected_episode_ids":[192,128,134,141,150],"entity_filter":["The Deadmines"],"episode_types":["observation","discovery"],"top_k":5}
+{"query_text":"recent reflection about my play","expected_episode_ids":[171,172,173,174,175],"episode_types":["reflection"],"top_k":5}
+{"query_text":"recent goal I adopted or completed","expected_episode_ids":[151,152,153,154,155],"episode_types":["goal"],"top_k":5}
+{"query_text":"Alice tanking advice changed everything reflection","expected_episode_ids":[171],"episode_types":["reflection"],"top_k":5}
+{"query_text":"biggest mistake learning a profession","expected_episode_ids":[181],"episode_types":["reflection"],"top_k":5}
+{"query_text":"Mor'Ladim defining fight kite elites lesson","expected_episode_ids":[179],"episode_types":["reflection"],"top_k":5}
+{"query_text":"Deadmines wipe taught me manage threat","expected_episode_ids":[173],"episode_types":["reflection"],"top_k":5}
+{"query_text":"VanCleef cleanly second attempt killed","expected_episode_ids":[56],"top_k":5}
+{"query_text":"Mr. Smite Deadmines finished after three tries","expected_episode_ids":[63],"top_k":5}
+{"query_text":"befriend Alice guild Bright Hand goal adopted","expected_episode_ids":[163],"top_k":5}
+{"query_text":"Captain Velt VanCleef head turn-in quest","expected_episode_ids":[121],"top_k":5}
+{"query_text":"Defias hideout southern hills discovery","expected_episode_ids":[144],"top_k":5}
+{"query_text":"stockpile twenty health potions emergencies goal","expected_episode_ids":[169],"top_k":5}
