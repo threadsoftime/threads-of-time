@@ -43,7 +43,10 @@ RUN rustup target add x86_64-unknown-linux-musl \
     && apt-get install -y --no-install-recommends musl-tools clang \
     && rm -rf /var/lib/apt/lists/*
 
-ENV CARGO_BUILD_TARGET=x86_64-unknown-linux-musl
+ENV CARGO_BUILD_TARGET=x86_64-unknown-linux-musl \
+    # Heimdal -j4 discipline: cap cargo's parallelism to 4 jobs so the build
+    # never saturates the always-on baseline (worldserver + 100 bots + llama).
+    CARGO_BUILD_JOBS=4
 
 WORKDIR /build
 
