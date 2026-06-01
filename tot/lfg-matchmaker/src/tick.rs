@@ -131,8 +131,24 @@ pub async fn run(state: Arc<AppState>, harness: Harness, cfg: Config) {
             let taken = state.queue.take_many(&p.members());
             let res = fulfill(&harness, &p, &cfg.dungeon).await;
             if !res.formed {
-                for entry in taken {
-                    state.queue.upsert(entry);
+                // Re-queue innocent members; evict the poison-pill bot that
+                // caused the failure. If `failed_guid` is None (no attributable
+                // member), re-queue everyone — this preserves the old behaviour
+                // for unexpected error shapes.
+                if let Some(evicted) = res.failed_guid {
+                    eprintln!(
+                        "[match] evicted {} after form failure: {}",
+                        evicted, res.note
+                    );
+                    for entry in taken {
+                        if entry.guid != evicted {
+                            state.queue.upsert(entry);
+                        }
+                    }
+                } else {
+                    for entry in taken {
+                        state.queue.upsert(entry);
+                    }
                 }
             }
             eprintln!(
@@ -291,6 +307,48 @@ mod tests {
 
     fn cfg_disabled(base: String) -> Config {
         Config { enabled: false, ..cfg(base) }
+    }
+
+    /// Like `spawn_ok_recording_mock` but the mock returns a 422 executor failure
+    /// for (tool=`fail_tool`, target_guid=`fail_target`) — allowing the tick loop's
+    /// eviction logic to be exercised. All other calls succeed.
+    async fn spawn_ok_mock_with_fail(
+        fail_tool: &'static str,
+        fail_target: u64,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
+        let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_h = calls.clone();
+        let handler = move |Path(name): Path<String>, Json(args): Json<serde_json::Value>| {
+            let calls = calls_h.clone();
+            async move {
+                let bot = args.get("bot_guid").and_then(|v| v.as_u64()).unwrap_or(0);
+                let target = args.get("target_guid").and_then(|v| v.as_u64());
+                let id = if bot != 0 { bot } else { target.unwrap_or(0) };
+                calls.lock().unwrap().push(format!("{name}:{id}"));
+
+                if name == "obs.lfg_pending" {
+                    return Json(
+                        serde_json::json!({ "ok": true, "result": { "pending": [] } }),
+                    );
+                }
+
+                // Reject the specific (tool, target) we want to fail.
+                if name == fail_tool && (bot == fail_target || target == Some(fail_target)) {
+                    return Json(serde_json::json!({
+                        "ok": false,
+                        "error": "executor_failed",
+                        "detail": "simulated failure (poison pill)",
+                    }));
+                }
+
+                Json(serde_json::json!({ "ok": true, "result": {} }))
+            }
+        };
+        let app = Router::new().route("/v1/tools/:name", post(handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        (format!("http://{addr}"), calls)
     }
 
     // T5 (existing behaviour): one tick pass forms the matchable bot-only group,
@@ -470,6 +528,136 @@ mod tests {
         assert!(
             mutating.is_empty(),
             "inert mode must not call mutating harness tools: {mutating:?}"
+        );
+    }
+
+    // T9: when a bot-only match fails because one invite is rejected (poison-pill),
+    // the tick loop must evict ONLY that bot and re-queue the innocent members.
+    // Queue before: 1T 2H 3D 4D 5D (all bot-only, all Alliance).
+    // Bot 3 (first DPS in sorted order) is the poison pill — its invite always fails.
+    // After one tick:
+    //   - guid 3 must be absent from the queue (evicted).
+    //   - All other members (1,2,4,5) must be back in the queue (innocents re-queued).
+    #[tokio::test]
+    async fn bot_match_fail_evicts_poison_pill_and_requeues_innocents() {
+        // Bot guid 3 (DPS) is the poison pill: invite_to_group targeting it fails.
+        // The mock matches `target_guid == 3` for the invite call.
+        let (base, _calls) =
+            spawn_ok_mock_with_fail("bot.invite_to_group", 3).await;
+
+        let state = Arc::new(AppState { queue: crate::queue::Queue::new() });
+        for (g, r) in [
+            (1, Role::Tank),
+            (2, Role::Healer),
+            (3, Role::Dps),
+            (4, Role::Dps),
+            (5, Role::Dps),
+        ] {
+            state.queue.upsert(QueueEntry {
+                guid: g,
+                role: r,
+                dungeon_id: 4,
+                faction: Faction::Alliance,
+                is_real_player: false,
+            });
+        }
+
+        let h = crate::harness::Harness::new(base.clone(), "tok".into());
+        let conf = cfg(base);
+        let handle = {
+            let state = state.clone();
+            tokio::spawn(async move { run(state, h, conf).await })
+        };
+        // One tick interval is sufficient — the tick loop fires immediately.
+        tokio::time::sleep(StdDuration::from_millis(150)).await;
+        handle.abort();
+
+        let remaining: Vec<u64> = {
+            let mut v: Vec<u64> = state.queue.snapshot().iter().map(|e| e.guid).collect();
+            v.sort();
+            v
+        };
+        // Poison-pill (guid=3) must be gone.
+        assert!(
+            !remaining.contains(&3),
+            "poison-pill bot 3 must be evicted from the queue: {remaining:?}"
+        );
+        // Innocent members (1, 2, 4, 5) must be re-queued.
+        for innocent in [1u64, 2, 4, 5] {
+            assert!(
+                remaining.contains(&innocent),
+                "innocent bot {innocent} must be back in the queue: {remaining:?}"
+            );
+        }
+        assert_eq!(
+            remaining.len(),
+            4,
+            "exactly 4 innocents remain (poison-pill evicted): {remaining:?}"
+        );
+    }
+
+    // T10: progress guarantee — two ticks where the first fails on a poison-pill and
+    // the second forms cleanly. Demonstrates that the queue never deadlocks.
+    //
+    // Tick 1 queue: 1T 2H 3D(poison) 4D 5D  →  fail on guid 3 invite
+    //   After tick 1: queue = {1T, 2H, 4D, 5D} (guid 3 evicted)
+    //   Not enough for a 1T/1H/3D match — queue len = 4, Step 3 skips.
+    // Tick 2: we manually add guid 6 (DPS) to complete a new matchable set.
+    //   Queue becomes {1T, 2H, 4D, 5D, 6D} — matcher finds [1,2,4,5,6], all invites succeed.
+    //   After tick 2: queue empty (group formed).
+    //
+    // We drive this by: pre-populate 5 bots (guid 3 is poison), let one tick run,
+    // add guid 6, let another tick run, assert queue is empty.
+    #[tokio::test]
+    async fn two_tick_progress_after_poison_pill_eviction() {
+        let (base, _calls) =
+            spawn_ok_mock_with_fail("bot.invite_to_group", 3).await;
+
+        let state = Arc::new(AppState { queue: crate::queue::Queue::new() });
+        for (g, r) in [
+            (1, Role::Tank),
+            (2, Role::Healer),
+            (3, Role::Dps),
+            (4, Role::Dps),
+            (5, Role::Dps),
+        ] {
+            state.queue.upsert(QueueEntry {
+                guid: g,
+                role: r,
+                dungeon_id: 4,
+                faction: Faction::Alliance,
+                is_real_player: false,
+            });
+        }
+
+        let h = crate::harness::Harness::new(base.clone(), "tok".into());
+        let conf = cfg(base);
+        let handle = {
+            let state = state.clone();
+            tokio::spawn(async move { run(state, h, conf).await })
+        };
+
+        // Let tick 1 fire and settle (poison pill evicted, 4 innocents re-queued).
+        tokio::time::sleep(StdDuration::from_millis(150)).await;
+
+        // Inject the 5th DPS to complete a new matchable set.
+        state.queue.upsert(QueueEntry {
+            guid: 6,
+            role: Role::Dps,
+            dungeon_id: 4,
+            faction: Faction::Alliance,
+            is_real_player: false,
+        });
+
+        // Let tick 2 fire — the clean set {1T,2H,4D,5D,6D} should form.
+        tokio::time::sleep(StdDuration::from_millis(1200)).await;
+        handle.abort();
+
+        let remaining: Vec<u64> = state.queue.snapshot().iter().map(|e| e.guid).collect();
+        assert_eq!(
+            remaining.len(),
+            0,
+            "queue must be empty after second tick forms the clean group: {remaining:?}"
         );
     }
 }

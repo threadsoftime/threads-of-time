@@ -10,6 +10,14 @@ pub struct FormResult {
     pub formed: bool,
     pub placed: usize,
     pub note: String,
+    /// The guid of the bot that caused the form failure, if attributable to a
+    /// specific member. Set to `Some(m)` when an invite or accept call for `m`
+    /// fails — that bot is the "poison pill" and should be evicted from the
+    /// queue rather than re-added (which would reproduce an identical failure on
+    /// the next tick). `None` on success, on `form_via_lfg` failures (where the
+    /// adapter is atomic/pre-validated — no single member is to blame), and on
+    /// placement-only failures (group formed, `formed:true` — no eviction needed).
+    pub failed_guid: Option<u64>,
 }
 
 /// Form the group (leader invites each other member, each accepts), then
@@ -34,6 +42,7 @@ pub async fn fulfill(h: &Harness, p: &MatchProposal, dungeon: &Dungeon) -> FormR
             return FormResult {
                 dungeon_id: p.dungeon_id, leader, members, formed: false, placed: 0,
                 note: format!("invite {leader}->{m} failed: {e}; rolled back {joined:?}{rb}"),
+                failed_guid: Some(*m),
             };
         }
         if let Err(e) = h.accept_invite(*m).await {
@@ -41,6 +50,7 @@ pub async fn fulfill(h: &Harness, p: &MatchProposal, dungeon: &Dungeon) -> FormR
             return FormResult {
                 dungeon_id: p.dungeon_id, leader, members, formed: false, placed: 0,
                 note: format!("accept {m} failed: {e}; rolled back {joined:?}{rb}"),
+                failed_guid: Some(*m),
             };
         }
         joined.push(*m);
@@ -56,7 +66,9 @@ pub async fn fulfill(h: &Harness, p: &MatchProposal, dungeon: &Dungeon) -> FormR
     }
     let note = if errors.is_empty() { "formed+placed".to_string() } else { errors.join("; ") };
 
-    FormResult { dungeon_id: p.dungeon_id, leader, members, formed: true, placed, note }
+    // Placement-only failures keep formed:true and must NOT evict any member —
+    // the group DID form, so failed_guid is None regardless of placement errors.
+    FormResult { dungeon_id: p.dungeon_id, leader, members, formed: true, placed, note, failed_guid: None }
 }
 
 /// Form a group that contains a real human player via `lfg.form_group`, then
@@ -91,6 +103,10 @@ pub async fn form_via_lfg(h: &Harness, p: &MatchProposal, dungeon: &Dungeon) -> 
             formed: false,
             placed: 0,
             note: format!("lfg.form_group failed: {e}"),
+            // lfg.form_group is atomic/pre-validated — no single member is to
+            // blame for the failure, so the real player is re-queued as normal
+            // and no eviction occurs.
+            failed_guid: None,
         },
         Ok(_) => {
             // Place each bot member. The real human player (real_player_guid)
@@ -119,7 +135,7 @@ pub async fn form_via_lfg(h: &Harness, p: &MatchProposal, dungeon: &Dungeon) -> 
             } else {
                 errors.join("; ")
             };
-            FormResult { dungeon_id: p.dungeon_id, leader, members, formed: true, placed, note }
+            FormResult { dungeon_id: p.dungeon_id, leader, members, formed: true, placed, note, failed_guid: None }
         }
     }
 }
@@ -239,6 +255,42 @@ mod tests {
         assert!(seq[8..13].iter().all(|c| c.starts_with("bot.enter_instance:")));
     }
 
+    // T2-new(a): when the 2nd invite (leader -> dps 3) fails, failed_guid == Some(3).
+    // The poison-pill bot is identifiable so the caller can evict it without touching
+    // the innocent members.
+    #[tokio::test]
+    async fn fulfill_second_invite_failure_returns_failed_guid() {
+        let (base, _calls) =
+            spawn_recording_mock_with_fail(Some(("bot.invite_to_group".into(), 3))).await;
+        let h = Harness::new(base, "tok".into());
+
+        let res = fulfill(&h, &proposal(), &dungeon()).await;
+        assert!(!res.formed, "group must not form on invite failure");
+        assert_eq!(
+            res.failed_guid,
+            Some(3),
+            "failed_guid must name the bot whose invite was rejected: {:?}",
+            res.failed_guid
+        );
+    }
+
+    // T2-new(b): accept for dps 4 fails → failed_guid == Some(4).
+    #[tokio::test]
+    async fn fulfill_accept_failure_returns_failed_guid() {
+        let (base, _calls) =
+            spawn_recording_mock_with_fail(Some(("bot.accept_invite".into(), 4))).await;
+        let h = Harness::new(base, "tok".into());
+
+        let res = fulfill(&h, &proposal(), &dungeon()).await;
+        assert!(!res.formed, "group must not form on accept failure");
+        assert_eq!(
+            res.failed_guid,
+            Some(4),
+            "failed_guid must name the bot whose accept was rejected: {:?}",
+            res.failed_guid
+        );
+    }
+
     // T2(a): the 2nd invite fails (leader -> dps 3). The mock matches the failure
     // against the invite's target_guid (3). The group never forms, nothing is placed,
     // and the partially formed group (leader 1 + already-joined member 2) is torn down
@@ -278,6 +330,24 @@ mod tests {
         assert!(res.formed, "group formed; only placement degraded");
         assert_eq!(res.placed, 4, "one of five placements failed");
         assert!(res.note.contains("place 4"), "note must be the joined error list: {}", res.note);
+    }
+
+    // T2-new(c): placement-only failure (group formed, one enter_instance fails) must
+    // NOT set failed_guid — the group formed successfully and no member is to be evicted
+    // from the queue. formed:true, failed_guid:None.
+    #[tokio::test]
+    async fn placement_only_failure_does_not_set_failed_guid() {
+        let (base, _calls) =
+            spawn_recording_mock_with_fail(Some(("bot.enter_instance".into(), 5))).await;
+        let h = Harness::new(base, "tok".into());
+
+        let res = fulfill(&h, &proposal(), &dungeon()).await;
+        assert!(res.formed, "group must be formed despite placement degradation");
+        assert_eq!(
+            res.failed_guid, None,
+            "placement-only failure must not set failed_guid (no eviction): {:?}",
+            res.failed_guid
+        );
     }
 
     // form_via_lfg tests.
