@@ -8,6 +8,12 @@ use crate::types::QueueEntry;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Maximum number of `bot.enter_instance` attempts (initial + retries) for a
+/// straggler before we give up and drop the pending entry. A bot that resists
+/// five consecutive teleports is either dead, in combat, or in a broken state —
+/// further retries are unlikely to succeed and would accumulate indefinitely.
+const MAX_PLACEMENT_ATTEMPTS: u32 = 5;
+
 pub async fn run(state: Arc<AppState>, harness: Harness, cfg: Config) {
     let mut ticker = tokio::time::interval(Duration::from_secs(cfg.tick_secs.max(1)));
     loop {
@@ -54,6 +60,42 @@ pub async fn run(state: Arc<AppState>, harness: Harness, cfg: Config) {
         if !cfg.enabled {
             eprintln!("[tick] LFG_ENABLED=false — skipping matchmaking actions (inert mode)");
             continue;
+        }
+
+        // Re-placement pass: retry any members whose initial bot.enter_instance
+        // failed (TeleportTo returned false). Runs every enabled tick so stragglers
+        // get ~tick_secs to become teleportable between attempts (non-blocking —
+        // no sleep inside; the next tick IS the retry delay). Drained atomically
+        // (no lock held across await), updated, then re-inserted.
+        {
+            let pending = state.pending_placements.drain_all();
+            if !pending.is_empty() {
+                let mut keep = Vec::with_capacity(pending.len());
+                for mut entry in pending {
+                    match harness.enter_instance_direct(entry.guid, &entry.dungeon).await {
+                        Ok(_) => {
+                            eprintln!(
+                                "[place] late-placed {} on attempt {}",
+                                entry.guid, entry.attempts + 1
+                            );
+                            // Successfully placed — do not re-insert.
+                        }
+                        Err(e) => {
+                            entry.attempts += 1;
+                            if entry.attempts >= MAX_PLACEMENT_ATTEMPTS {
+                                eprintln!(
+                                    "[place] gave up on {} after {} attempts: {}",
+                                    entry.guid, entry.attempts, e
+                                );
+                                // Drop the entry — do not re-insert.
+                            } else {
+                                keep.push(entry);
+                            }
+                        }
+                    }
+                }
+                state.pending_placements.extend(keep);
+            }
         }
 
         // Step 2: Real-player-priority matching — if there is at least one
@@ -108,6 +150,13 @@ pub async fn run(state: Arc<AppState>, harness: Harness, cfg: Config) {
                         for entry in taken {
                             state.queue.upsert(entry);
                         }
+                    } else {
+                        // Group formed — record any members whose placement failed for
+                        // next-tick retry. The real player is never in unplaced (they
+                        // were placed by the lfg.form_group adapter itself).
+                        for &guid in &res.unplaced {
+                            state.pending_placements.push(guid, cfg.dungeon.clone());
+                        }
                     }
                     eprintln!(
                         "[match/lfg] dungeon={} leader={} formed={} placed={}/{} note={}",
@@ -149,6 +198,12 @@ pub async fn run(state: Arc<AppState>, harness: Harness, cfg: Config) {
                     for entry in taken {
                         state.queue.upsert(entry);
                     }
+                }
+            } else {
+                // Group formed — record any members whose placement failed for
+                // next-tick retry (TeleportTo returned false on first attempt).
+                for &guid in &res.unplaced {
+                    state.pending_placements.push(guid, cfg.dungeon.clone());
                 }
             }
             eprintln!(
@@ -356,7 +411,7 @@ mod tests {
     #[tokio::test]
     async fn one_tick_removes_matched_and_keeps_unmatched() {
         let (base, _) = spawn_ok_recording_mock().await;
-        let state = Arc::new(AppState { queue: crate::queue::Queue::new() });
+        let state = Arc::new(AppState { queue: crate::queue::Queue::new(), pending_placements: crate::api::PendingPlacements::new() });
         for (g, r) in [
             (1, Role::Tank),
             (2, Role::Healer),
@@ -397,7 +452,7 @@ mod tests {
     async fn tick_drains_lfg_pending_and_forms_real_player_group() {
         let real_guid = 99u64;
         let (base, calls) = spawn_lfg_pending_mock(real_guid, "human").await;
-        let state = Arc::new(AppState { queue: crate::queue::Queue::new() });
+        let state = Arc::new(AppState { queue: crate::queue::Queue::new(), pending_placements: crate::api::PendingPlacements::new() });
 
         let h = crate::harness::Harness::new(base.clone(), "tok".into());
         let conf = cfg(base);
@@ -450,7 +505,7 @@ mod tests {
         }
 
         let base = spawn_fail_pending_mock().await;
-        let state = Arc::new(AppState { queue: crate::queue::Queue::new() });
+        let state = Arc::new(AppState { queue: crate::queue::Queue::new(), pending_placements: crate::api::PendingPlacements::new() });
         // Pre-populate a full bot-only group so we can verify the bot path still runs.
         for (g, r) in [(1, Role::Tank), (2, Role::Healer), (3, Role::Dps), (4, Role::Dps), (5, Role::Dps)] {
             state.queue.upsert(QueueEntry {
@@ -481,7 +536,7 @@ mod tests {
     #[tokio::test]
     async fn inert_mode_does_not_form_groups() {
         let (base, calls) = spawn_ok_recording_mock().await;
-        let state = Arc::new(AppState { queue: crate::queue::Queue::new() });
+        let state = Arc::new(AppState { queue: crate::queue::Queue::new(), pending_placements: crate::api::PendingPlacements::new() });
         // Pre-populate a full bot-only group.
         for (g, r) in [
             (1, Role::Tank),
@@ -545,7 +600,7 @@ mod tests {
         let (base, _calls) =
             spawn_ok_mock_with_fail("bot.invite_to_group", 3).await;
 
-        let state = Arc::new(AppState { queue: crate::queue::Queue::new() });
+        let state = Arc::new(AppState { queue: crate::queue::Queue::new(), pending_placements: crate::api::PendingPlacements::new() });
         for (g, r) in [
             (1, Role::Tank),
             (2, Role::Healer),
@@ -613,7 +668,7 @@ mod tests {
         let (base, _calls) =
             spawn_ok_mock_with_fail("bot.invite_to_group", 3).await;
 
-        let state = Arc::new(AppState { queue: crate::queue::Queue::new() });
+        let state = Arc::new(AppState { queue: crate::queue::Queue::new(), pending_placements: crate::api::PendingPlacements::new() });
         for (g, r) in [
             (1, Role::Tank),
             (2, Role::Healer),
@@ -658,6 +713,236 @@ mod tests {
             remaining.len(),
             0,
             "queue must be empty after second tick forms the clean group: {remaining:?}"
+        );
+    }
+
+    // T11: placement failure on tick 1 records a pending placement; the following
+    // tick where enter_instance now succeeds clears it from pending_placements.
+    //
+    // Setup: 5 bots form a group (all invites succeed), but bot.enter_instance for
+    // guid 5 fails on the FIRST call and succeeds on all subsequent calls.
+    // After tick 1: group formed, placed=4, pending_placements has guid 5.
+    // After tick 2: enter_instance for guid 5 succeeds → pending_placements is empty.
+    #[tokio::test]
+    async fn placement_failure_records_pending_then_clears_on_retry() {
+        // Mock that fails bot.enter_instance for guid 5 on the first call only.
+        let enter_fail_count: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+        let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        {
+            let calls_h = calls.clone();
+            let fail_count = enter_fail_count.clone();
+            let handler = move |Path(name): Path<String>, Json(args): Json<serde_json::Value>| {
+                let calls = calls_h.clone();
+                let fail_count = fail_count.clone();
+                async move {
+                    let bot = args.get("bot_guid").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let target = args.get("target_guid").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let id = if bot != 0 { bot } else { target };
+                    calls.lock().unwrap().push(format!("{name}:{id}"));
+
+                    if name == "obs.lfg_pending" {
+                        return Json(
+                            serde_json::json!({ "ok": true, "result": { "pending": [] } }),
+                        );
+                    }
+
+                    // Fail bot.enter_instance for guid 5 on its first invocation.
+                    if name == "bot.enter_instance" && bot == 5 {
+                        let mut count = fail_count.lock().unwrap();
+                        if *count == 0 {
+                            *count += 1;
+                            return Json(serde_json::json!({
+                                "ok": false,
+                                "error": "executor_failed",
+                                "detail": "TeleportTo returned false",
+                            }));
+                        }
+                    }
+                    Json(serde_json::json!({ "ok": true, "result": {} }))
+                }
+            };
+            let app = Router::new().route("/v1/tools/:name", post(handler));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let base = format!("http://{addr}");
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+
+            let state = Arc::new(AppState {
+                queue: crate::queue::Queue::new(),
+                pending_placements: crate::api::PendingPlacements::new(),
+            });
+            for (g, r) in [
+                (1, Role::Tank),
+                (2, Role::Healer),
+                (3, Role::Dps),
+                (4, Role::Dps),
+                (5, Role::Dps),
+            ] {
+                state.queue.upsert(QueueEntry {
+                    guid: g,
+                    role: r,
+                    dungeon_id: 4,
+                    faction: Faction::Alliance,
+                    is_real_player: false,
+                });
+            }
+
+            let h = crate::harness::Harness::new(base.clone(), "tok".into());
+            let conf = cfg(base);
+            let handle = {
+                let state = state.clone();
+                tokio::spawn(async move { run(state, h, conf).await })
+            };
+
+            // Tick 1: group forms, enter_instance for guid 5 fails, recorded as pending.
+            tokio::time::sleep(StdDuration::from_millis(150)).await;
+            assert_eq!(
+                state.pending_placements.len(),
+                1,
+                "guid 5 must be in pending_placements after tick 1"
+            );
+            let snap = state.pending_placements.snapshot();
+            assert_eq!(snap[0].guid, 5, "the pending guid must be 5: {:?}", snap);
+            assert_eq!(snap[0].attempts, 1, "attempts starts at 1 (initial attempt)");
+
+            // Tick 2: re-placement pass runs, enter_instance for guid 5 now succeeds.
+            tokio::time::sleep(StdDuration::from_millis(1200)).await;
+            handle.abort();
+
+            assert_eq!(
+                state.pending_placements.len(),
+                0,
+                "pending_placements must be empty after successful retry"
+            );
+        }
+    }
+
+    // T12: a persistently failing placement is dropped after MAX_PLACEMENT_ATTEMPTS.
+    // The pending store must not grow indefinitely.
+    //
+    // Setup: 5 bots form (all invites ok), but bot.enter_instance for guid 5 always
+    // fails. After MAX_PLACEMENT_ATTEMPTS ticks the entry must be gone from pending.
+    #[tokio::test]
+    async fn persistent_placement_failure_dropped_after_max_attempts() {
+        use super::MAX_PLACEMENT_ATTEMPTS;
+
+        let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        {
+            let calls_h = calls.clone();
+            let handler = move |Path(name): Path<String>, Json(args): Json<serde_json::Value>| {
+                let calls = calls_h.clone();
+                async move {
+                    let bot = args.get("bot_guid").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let target = args.get("target_guid").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let id = if bot != 0 { bot } else { target };
+                    calls.lock().unwrap().push(format!("{name}:{id}"));
+
+                    if name == "obs.lfg_pending" {
+                        return Json(
+                            serde_json::json!({ "ok": true, "result": { "pending": [] } }),
+                        );
+                    }
+
+                    // Always fail bot.enter_instance for guid 5.
+                    if name == "bot.enter_instance" && bot == 5 {
+                        return Json(serde_json::json!({
+                            "ok": false,
+                            "error": "executor_failed",
+                            "detail": "TeleportTo returned false",
+                        }));
+                    }
+                    Json(serde_json::json!({ "ok": true, "result": {} }))
+                }
+            };
+            let app = Router::new().route("/v1/tools/:name", post(handler));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            // Use tick_secs=1 so that MAX_PLACEMENT_ATTEMPTS ticks pass in a short wall time.
+            let base = format!("http://{addr}");
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+
+            let state = Arc::new(AppState {
+                queue: crate::queue::Queue::new(),
+                pending_placements: crate::api::PendingPlacements::new(),
+            });
+            for (g, r) in [
+                (1, Role::Tank),
+                (2, Role::Healer),
+                (3, Role::Dps),
+                (4, Role::Dps),
+                (5, Role::Dps),
+            ] {
+                state.queue.upsert(QueueEntry {
+                    guid: g,
+                    role: r,
+                    dungeon_id: 4,
+                    faction: Faction::Alliance,
+                    is_real_player: false,
+                });
+            }
+
+            // tick_secs=1 so MAX_PLACEMENT_ATTEMPTS ticks pass within ~6s.
+            let mut conf = cfg(base.clone());
+            conf.tick_secs = 1;
+            let h = crate::harness::Harness::new(base.clone(), "tok".into());
+            let handle = {
+                let state = state.clone();
+                tokio::spawn(async move { run(state, h, conf).await })
+            };
+
+            // Wait enough time for the group to form on tick 1 and then for
+            // MAX_PLACEMENT_ATTEMPTS total ticks to pass (each tick = 1s).
+            // Add a comfortable buffer so the last give-up tick definitely completes.
+            let wait_ms = (MAX_PLACEMENT_ATTEMPTS as u64 + 2) * 1200;
+            tokio::time::sleep(StdDuration::from_millis(wait_ms)).await;
+            handle.abort();
+
+            assert_eq!(
+                state.pending_placements.len(),
+                0,
+                "persistent failure must be dropped after {} attempts; store must be empty",
+                MAX_PLACEMENT_ATTEMPTS
+            );
+        }
+    }
+
+    // T13: a clean group (all members placed) records nothing in pending_placements.
+    #[tokio::test]
+    async fn clean_group_records_nothing_pending() {
+        let (base, _calls) = spawn_ok_recording_mock().await;
+        let state = Arc::new(AppState {
+            queue: crate::queue::Queue::new(),
+            pending_placements: crate::api::PendingPlacements::new(),
+        });
+        for (g, r) in [
+            (1, Role::Tank),
+            (2, Role::Healer),
+            (3, Role::Dps),
+            (4, Role::Dps),
+            (5, Role::Dps),
+        ] {
+            state.queue.upsert(QueueEntry {
+                guid: g,
+                role: r,
+                dungeon_id: 4,
+                faction: Faction::Alliance,
+                is_real_player: false,
+            });
+        }
+
+        let h = crate::harness::Harness::new(base.clone(), "tok".into());
+        let conf = cfg(base);
+        let handle = {
+            let state = state.clone();
+            tokio::spawn(async move { run(state, h, conf).await })
+        };
+        tokio::time::sleep(StdDuration::from_millis(150)).await;
+        handle.abort();
+
+        assert_eq!(
+            state.pending_placements.len(),
+            0,
+            "clean group (all placed) must record nothing in pending_placements"
         );
     }
 }

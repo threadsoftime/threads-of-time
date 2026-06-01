@@ -1,3 +1,4 @@
+use crate::config::Dungeon;
 use crate::queue::Queue;
 use crate::types::{Faction, QueueEntry, Role};
 use axum::{
@@ -7,10 +8,72 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+/// A member whose initial `bot.enter_instance` failed (group formed, but they
+/// resisted the teleport). The tick loop retries placement on every tick until
+/// success or `MAX_PLACEMENT_ATTEMPTS` is reached.
+#[derive(Debug, Clone)]
+pub struct PendingPlacement {
+    pub guid: u64,
+    pub dungeon: Dungeon,
+    /// Number of attempts so far (1 = the initial attempt in `fulfill` /
+    /// `form_via_lfg`; incremented on each subsequent tick retry).
+    pub attempts: u32,
+}
+
+/// Thread-safe store for pending placements. Mirrors the `Queue` concurrency
+/// style: `Mutex<Vec<_>>`, no lock held across `.await`, owned data on return.
+#[derive(Default)]
+pub struct PendingPlacements {
+    inner: Mutex<Vec<PendingPlacement>>,
+}
+
+impl PendingPlacements {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a new pending placement (the initial attempt already happened, so
+    /// `attempts` starts at 1).
+    pub fn push(&self, guid: u64, dungeon: Dungeon) {
+        let mut g = self.inner.lock().unwrap();
+        // Deduplicate: if already pending (e.g. a tick raced), just ignore.
+        if g.iter().any(|p| p.guid == guid) {
+            return;
+        }
+        g.push(PendingPlacement { guid, dungeon, attempts: 1 });
+    }
+
+    /// Drain all entries for processing by the tick loop.  Returns owned `Vec`
+    /// so the lock is released before any `.await` — no lock held across I/O.
+    pub fn drain_all(&self) -> Vec<PendingPlacement> {
+        let mut g = self.inner.lock().unwrap();
+        std::mem::take(&mut *g)
+    }
+
+    /// Re-insert entries that still need retrying (those that failed again or
+    /// whose `attempts` was incremented). Called after the tick loop has
+    /// processed the drained batch and determined which to keep.
+    pub fn extend(&self, entries: Vec<PendingPlacement>) {
+        let mut g = self.inner.lock().unwrap();
+        g.extend(entries);
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.inner.lock().unwrap().len()
+    }
+
+    #[cfg(test)]
+    pub fn snapshot(&self) -> Vec<PendingPlacement> {
+        self.inner.lock().unwrap().clone()
+    }
+}
 
 pub struct AppState {
     pub queue: Queue,
+    pub pending_placements: PendingPlacements,
 }
 
 #[derive(Deserialize)]
@@ -84,7 +147,7 @@ mod tests {
     use super::*;
 
     fn test_state() -> Arc<AppState> {
-        Arc::new(AppState { queue: Queue::new() })
+        Arc::new(AppState { queue: Queue::new(), pending_placements: PendingPlacements::new() })
     }
 
     async fn spawn(state: Arc<AppState>) -> String {
