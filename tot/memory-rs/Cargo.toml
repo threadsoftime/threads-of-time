@@ -1,0 +1,47 @@
+[package]
+name = "memory-rs"
+version = "0.1.0"
+edition = "2021"
+
+# Both a lib (testable via unit tests) and a standalone binary.
+[lib]
+name = "memory_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "memory-rs"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime + HTTP server — match workspace pinned majors.
+tokio       = { version = "1", features = ["full"] }
+axum        = "0.7"
+reqwest     = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Serialisation.
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+
+# SQLite (bundled = static; bundled enables FTS5 + bm25() + porter/unicode61
+# tokenisers and re-exports rusqlite::ffi so we can call sqlite3_auto_extension).
+rusqlite    = { version = "0.32", features = ["bundled"] }
+
+# Error handling.
+thiserror   = "2"
+anyhow      = "1"
+
+# Structured logging.
+tracing             = "0.1"
+tracing-subscriber  = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[build-dependencies]
+# Compiles the vendored sqlite-vec 0.1.6 amalgamation into the binary.
+cc = "1"
+
+[dev-dependencies]
+tempfile    = "3"
+sha2        = "0.10"
+wiremock    = "0.6"
+tower       = { version = "0.5", features = ["util"] }
+serde_json  = "1"
+tokio       = { version = "1", features = ["full", "test-util"] }
