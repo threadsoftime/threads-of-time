@@ -4,3 +4,4 @@ pub mod write;
 pub mod read;
 pub mod list;
 pub mod recall;
+pub mod search;

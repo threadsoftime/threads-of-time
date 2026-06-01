@@ -8,6 +8,7 @@
 //! - `POST /v1/memory/:bot_guid/episodes`                   — write an episode (Phase 4)
 //! - `GET  /v1/memory/:bot_guid/episodes/:episode_id`       — read an episode (Phase 4)
 //! - `POST /v1/memory/:bot_guid/recall`                     — hybrid recall (Phase 5)
+//! - `POST /v1/memory/:bot_guid/search`                     — dense-only search (Phase 5)
 
 use axum::{Router, routing::{get, post}};
 use crate::state::AppState;
@@ -16,6 +17,7 @@ use crate::routes::write::write_episode;
 use crate::routes::read::read_episode;
 use crate::routes::list::list_episodes;
 use crate::routes::recall::recall_handler;
+use crate::routes::search::search_handler;
 
 /// Build the axum [`Router`] with [`AppState`] injected.
 pub fn build_router(state: AppState) -> Router {
@@ -27,5 +29,6 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/v1/memory/:bot_guid/episodes/:episode_id", get(read_episode))
         .route("/v1/memory/:bot_guid/recall", post(recall_handler))
+        .route("/v1/memory/:bot_guid/search", post(search_handler))
         .with_state(state)
 }
