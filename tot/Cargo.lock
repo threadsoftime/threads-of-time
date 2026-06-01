@@ -870,6 +870,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
+ "base64 0.22.1",
  "bytes",
  "clap",
  "http",
@@ -877,6 +878,7 @@ dependencies = [
  "http-body-util",
  "mysql_async",
  "nix",
+ "rand 0.9.4",
  "reqwest",
  "rmcp",
  "schemars",

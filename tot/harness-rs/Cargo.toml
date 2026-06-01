@@ -37,6 +37,10 @@ clap = { version = "4", features = ["derive", "env"] }
 uuid = { version = "1", features = ["v4"] }
 tower = "0.5"
 http = "1"
+# 24-byte random token generation for `mint-token` — already resolved in Cargo.lock (C3)
+rand = "0.9"
+# URL-safe base64 for `mint-token` output — already in lock via reqwest/rmcp (C3)
+base64 = "0.22"
 # Needed by auth_layer.rs (BoxBody body type matching StreamableHttpService).
 # Already pulled transitively by rmcp/axum — made explicit to use in src/ code.
 bytes = "1"
