@@ -100,6 +100,87 @@ async fn embeddings(body: Bytes) -> Response {
     .into_response()
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use memory_rs::EMBEDDING_DIM;
+
+    // T0: EMBEDDING_DIM must be exactly 384 in the stub binary (parity contract).
+    //
+    // This test FAILS if the dim constant has not been updated from 768.
+    #[test]
+    fn stub_dim_is_384() {
+        assert_eq!(
+            EMBEDDING_DIM,
+            384,
+            "stub EMBEDDING_DIM must be 384 (bge-small-en-v1.5); got {}",
+            EMBEDDING_DIM
+        );
+    }
+
+    // T1: stub_embed returns a vector of exactly 384 elements.
+    #[test]
+    fn stub_vector_len_is_384() {
+        let v = stub_embed("alice");
+        assert_eq!(v.len(), 384, "stub_embed must return exactly 384 floats");
+    }
+
+    // T2: stub_embed is deterministic — same input always yields the same output.
+    #[test]
+    fn stub_vector_is_deterministic() {
+        let v1 = stub_embed("alice");
+        let v2 = stub_embed("alice");
+        assert_eq!(v1, v2, "stub_embed(\"alice\") must be deterministic");
+    }
+
+    // T3: stub_embed is discriminating — different inputs yield different outputs.
+    #[test]
+    fn stub_vector_differs_by_input() {
+        let v_alice = stub_embed("alice");
+        let v_bob = stub_embed("bob");
+        assert_ne!(
+            v_alice, v_bob,
+            "stub_embed(\"alice\") and stub_embed(\"bob\") must differ"
+        );
+    }
+
+    // T4: The output vector is L2-normalized — ||v||₂ ≈ 1.0 within 1e-5.
+    //
+    // The algorithm: SHA-256 → cycle bytes → map to f64 → L2-normalize → cast f32.
+    // The f32 cast introduces at most 1 ULP of error; 1e-5 is a safe tolerance.
+    #[test]
+    fn stub_vector_is_l2_normalized() {
+        let v = stub_embed("alice");
+        let norm_sq: f64 = v.iter().map(|&x| (x as f64) * (x as f64)).sum();
+        let norm = norm_sq.sqrt();
+        assert!(
+            (norm - 1.0_f64).abs() < 1e-5,
+            "L2 norm of stub_embed(\"alice\") must be ≈1.0; got {norm:.8}"
+        );
+    }
+
+    // T5: The zero-length input edge case: stub_embed("") must not panic and must
+    //     still return a 384-element L2-normalized vector.
+    //
+    //     SHA-256("") is a non-zero digest, so the norm will be > 0 and
+    //     normalization proceeds normally.
+    #[test]
+    fn stub_vector_empty_string_is_valid() {
+        let v = stub_embed("");
+        assert_eq!(v.len(), 384, "stub_embed(\"\") must return 384 floats");
+        let norm_sq: f64 = v.iter().map(|&x| (x as f64) * (x as f64)).sum();
+        let norm = norm_sq.sqrt();
+        assert!(
+            (norm - 1.0_f64).abs() < 1e-5,
+            "stub_embed(\"\") must be L2-normalized; norm={norm:.8}"
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let bind = std::env::var("EMBED_STUB_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
