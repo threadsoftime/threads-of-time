@@ -308,6 +308,132 @@ pub struct RecallAboutResp {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
+// Task 5.2 — goals types
+// ---------------------------------------------------------------------------
+
+/// A goal row returned by `goal_read` and `goal_list`.
+///
+/// Matches Python `GoalRow` pydantic model in `routes_goals.py`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GoalRow {
+    pub id: String,
+    pub bot_id: String,
+    pub text: String,
+    pub status: String,
+    pub source: Option<String>,
+    pub priority: i64,
+    pub origin_memory: Option<String>,
+    pub created_ts: i64,
+    pub updated_ts: i64,
+    pub completed_ts: Option<i64>,
+}
+
+/// Request for [`MemoryService::goal_create`].
+///
+/// Matches Python `GoalCreateRequest`.
+#[derive(Debug, Clone)]
+pub struct GoalCreateReq {
+    pub bot_id: String,
+    pub text: String,
+    pub source: Option<String>,
+    /// Default 0 (matches Python `priority: int = 0`).
+    pub priority: i64,
+    pub origin_memory: Option<String>,
+}
+
+/// Response from [`MemoryService::goal_create`].
+///
+/// Matches Python `GoalCreateResponse`.
+#[derive(Debug, Clone)]
+pub struct GoalCreateResp {
+    pub goal_id: String,
+    pub status: String,
+}
+
+/// Request for [`MemoryService::goal_update`].
+///
+/// Matches Python `GoalUpdateRequest`.
+#[derive(Debug, Clone)]
+pub struct GoalUpdateReq {
+    pub bot_id: String,
+    pub goal_id: String,
+    pub text: Option<String>,
+    pub status: Option<String>,
+    pub priority: Option<i64>,
+    pub origin_memory: Option<String>,
+}
+
+/// Response from [`MemoryService::goal_update`].
+///
+/// Matches Python `GoalUpdateResponse`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GoalUpdateResp {
+    pub updated: bool,
+}
+
+/// Request for [`MemoryService::goal_list`].
+///
+/// Matches Python `GET /goals/list` query parameters.
+#[derive(Debug, Clone)]
+pub struct GoalListReq {
+    pub bot_id: String,
+    /// Optional comma-separated status filter (matches Python's comma-split behavior).
+    pub status: Option<String>,
+    /// Default 50, clamped to [1, 500].
+    pub limit: i64,
+    /// Default 0, clamped to ≥ 0.
+    pub offset: i64,
+}
+
+/// Response from [`MemoryService::goal_list`].
+///
+/// Matches Python `GoalListResponse`.
+#[derive(Debug, Clone)]
+pub struct GoalListResp {
+    pub items: Vec<GoalRow>,
+    pub total: i64,
+}
+
+/// Outcome for [`MemoryService::goal_complete`].
+///
+/// Matches Python `Literal["completed", "abandoned"]`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GoalOutcome {
+    Completed,
+    Abandoned,
+}
+
+impl GoalOutcome {
+    fn as_str(&self) -> &'static str {
+        match self {
+            GoalOutcome::Completed => "completed",
+            GoalOutcome::Abandoned => "abandoned",
+        }
+    }
+}
+
+/// Request for [`MemoryService::goal_complete`].
+///
+/// Matches Python `GoalCompleteRequest`.
+#[derive(Debug, Clone)]
+pub struct GoalCompleteReq {
+    pub bot_id: String,
+    pub goal_id: String,
+    pub outcome: GoalOutcome,
+    /// When `true` (default), writes a `goal_link` memory via `self.write()`.
+    pub also_record_memory: bool,
+}
+
+/// Response from [`MemoryService::goal_complete`].
+///
+/// Matches Python `GoalCompleteResponse`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GoalCompleteResp {
+    pub updated: bool,
+    pub memory_id: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // MemoryService
 // ---------------------------------------------------------------------------
 
@@ -1673,6 +1799,446 @@ impl MemoryService {
         })
         .await
         .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!("spawn_blocking panicked: {e}")))?
+    }
+
+    // -----------------------------------------------------------------------
+    // goal_create
+    // -----------------------------------------------------------------------
+
+    /// Create a new goal in status `"pending"`.
+    ///
+    /// Mirrors Python `POST /goals/create`:
+    /// - Generates a `g_*` ID via `generate_goal_id()`.
+    /// - `created_ts = updated_ts = now()`, `completed_ts = NULL`.
+    /// - Returns `GoalCreateResp { goal_id, status: "pending" }`.
+    pub async fn goal_create(
+        &self,
+        req: GoalCreateReq,
+    ) -> Result<GoalCreateResp, crate::error::AppError> {
+        let db_path = self.db_path.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<GoalCreateResp, crate::error::AppError> {
+            let conn = db::open_db(&db_path)?;
+            let gid = crate::ids::generate_goal_id();
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+
+            conn.execute(
+                "INSERT INTO goals \
+                 (id, bot_id, text, status, source, priority, origin_memory, created_ts, updated_ts) \
+                 VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?6, ?7, ?7)",
+                rusqlite::params![
+                    gid,
+                    req.bot_id,
+                    req.text,
+                    req.source,
+                    req.priority,
+                    req.origin_memory,
+                    now,
+                ],
+            )?;
+
+            Ok(GoalCreateResp { goal_id: gid, status: "pending".to_owned() })
+        })
+        .await
+        .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!("spawn_blocking panicked: {e}")))?
+    }
+
+    // -----------------------------------------------------------------------
+    // goal_read
+    // -----------------------------------------------------------------------
+
+    /// Read a single goal by `goal_id` scoped to `bot_id`.
+    ///
+    /// Returns `None` when no matching row exists — REST layer maps to 404.
+    pub async fn goal_read(
+        &self,
+        bot_id: &str,
+        goal_id: &str,
+    ) -> Result<Option<GoalRow>, crate::error::AppError> {
+        let db_path = self.db_path.clone();
+        let bot_id = bot_id.to_owned();
+        let goal_id = goal_id.to_owned();
+
+        tokio::task::spawn_blocking(move || -> Result<Option<GoalRow>, crate::error::AppError> {
+            let conn = db::open_db(&db_path)?;
+            use rusqlite::OptionalExtension;
+            let row = conn
+                .query_row(
+                    "SELECT id, bot_id, text, status, source, priority, origin_memory, \
+                            created_ts, updated_ts, completed_ts \
+                     FROM goals WHERE id=?1 AND bot_id=?2",
+                    rusqlite::params![goal_id, bot_id],
+                    |r| {
+                        Ok(GoalRow {
+                            id:            r.get(0)?,
+                            bot_id:        r.get(1)?,
+                            text:          r.get(2)?,
+                            status:        r.get(3)?,
+                            source:        r.get(4)?,
+                            priority:      r.get(5)?,
+                            origin_memory: r.get(6)?,
+                            created_ts:    r.get(7)?,
+                            updated_ts:    r.get(8)?,
+                            completed_ts:  r.get(9)?,
+                        })
+                    },
+                )
+                .optional()?;
+            Ok(row)
+        })
+        .await
+        .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!("spawn_blocking panicked: {e}")))?
+    }
+
+    // -----------------------------------------------------------------------
+    // goal_update
+    // -----------------------------------------------------------------------
+
+    /// Patch a goal row.
+    ///
+    /// Mirrors Python `PUT /goals/update` including `VALID_TRANSITIONS` enforcement
+    /// and `VALID_STATUSES` check:
+    ///
+    /// `VALID_TRANSITIONS`:
+    /// - `pending`   → `{active, abandoned}`
+    /// - `active`    → `{completed, abandoned}`
+    /// - `completed` → `{}` (terminal)
+    /// - `abandoned` → `{}` (terminal)
+    ///
+    /// Error cases (matching Python's HTTP 400):
+    /// - `req.status` is not a valid status string → `BadRequest("invalid status: {s}")`.
+    /// - `req.status` is valid but not reachable from `current_status` →
+    ///   `BadRequest("invalid transition {current} → {new}")`.
+    /// - No updatable field provided (all options are None) →
+    ///   `BadRequest("no updatable field provided")`.
+    /// - Goal not found → `GoalUpdateResp { updated: false }`.
+    ///
+    /// Sets `completed_ts = now` when the new status is terminal.
+    /// Always bumps `updated_ts`.
+    pub async fn goal_update(
+        &self,
+        req: GoalUpdateReq,
+    ) -> Result<GoalUpdateResp, crate::error::AppError> {
+        const VALID_STATUSES: &[&str] = &["pending", "active", "completed", "abandoned"];
+        const TERMINAL_STATUSES: &[&str] = &["completed", "abandoned"];
+
+        // Validate status field before touching the DB.
+        if let Some(ref new_status) = req.status {
+            if !VALID_STATUSES.contains(&new_status.as_str()) {
+                return Err(crate::error::AppError::BadRequest(format!(
+                    "invalid status: {new_status}"
+                )));
+            }
+        }
+
+        // No fields to update check (mirrors Python "no updatable field provided").
+        if req.text.is_none()
+            && req.status.is_none()
+            && req.priority.is_none()
+            && req.origin_memory.is_none()
+        {
+            return Err(crate::error::AppError::BadRequest(
+                "no updatable field provided".to_owned(),
+            ));
+        }
+
+        let db_path = self.db_path.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<GoalUpdateResp, crate::error::AppError> {
+            let conn = db::open_db(&db_path)?;
+
+            // Fetch current row (existence + current status).
+            use rusqlite::OptionalExtension;
+            let row: Option<(String,)> = conn
+                .query_row(
+                    "SELECT status FROM goals WHERE id=?1 AND bot_id=?2",
+                    rusqlite::params![req.goal_id, req.bot_id],
+                    |r| Ok((r.get::<_, String>(0)?,)),
+                )
+                .optional()?;
+
+            let current_status = match row {
+                Some((s,)) => s,
+                None => return Ok(GoalUpdateResp { updated: false }),
+            };
+
+            // Validate transition.
+            if let Some(ref new_status) = req.status {
+                if new_status != &current_status {
+                    let allowed: &[&str] = match current_status.as_str() {
+                        "pending"   => &["active", "abandoned"],
+                        "active"    => &["completed", "abandoned"],
+                        "completed" => &[],
+                        "abandoned" => &[],
+                        _           => &[],
+                    };
+                    if !allowed.contains(&new_status.as_str()) {
+                        return Err(crate::error::AppError::BadRequest(format!(
+                            "invalid transition {current_status} \u{2192} {new_status}"
+                        )));
+                    }
+                }
+            }
+
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+
+            // Build SET clause dynamically.
+            use rusqlite::types::Value as SqlValue;
+            let mut sets: Vec<&str> = Vec::new();
+            let mut params: Vec<SqlValue> = Vec::new();
+
+            if let Some(ref text) = req.text {
+                sets.push("text=?");
+                params.push(SqlValue::Text(text.clone()));
+            }
+            if let Some(ref prio) = req.priority {
+                sets.push("priority=?");
+                params.push(SqlValue::Integer(*prio));
+            }
+            if let Some(ref om) = req.origin_memory {
+                sets.push("origin_memory=?");
+                params.push(SqlValue::Text(om.clone()));
+            }
+            if let Some(ref new_status) = req.status {
+                sets.push("status=?");
+                params.push(SqlValue::Text(new_status.clone()));
+                if TERMINAL_STATUSES.contains(&new_status.as_str()) {
+                    sets.push("completed_ts=?");
+                    params.push(SqlValue::Integer(now));
+                }
+            }
+
+            sets.push("updated_ts=?");
+            params.push(SqlValue::Integer(now));
+            params.push(SqlValue::Text(req.goal_id.clone()));
+
+            let sql = format!("UPDATE goals SET {} WHERE id=?", sets.join(", "));
+            conn.execute(&sql, rusqlite::params_from_iter(params.iter()))?;
+
+            Ok(GoalUpdateResp { updated: true })
+        })
+        .await
+        .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!("spawn_blocking panicked: {e}")))?
+    }
+
+    // -----------------------------------------------------------------------
+    // goal_list
+    // -----------------------------------------------------------------------
+
+    /// List goals for a bot with optional status filter and pagination.
+    ///
+    /// Mirrors Python `GET /goals/list`:
+    /// - `status` can be a comma-separated list of valid statuses (e.g. `"pending,active"`).
+    /// - Invalid status values → `BadRequest("invalid status filter")`.
+    /// - `ORDER BY priority DESC, created_ts DESC LIMIT ? OFFSET ?`.
+    /// - `total` = full filtered count.
+    /// - `limit` clamped to `[1, 500]`; `offset` clamped to `≥ 0`.
+    pub async fn goal_list(
+        &self,
+        req: GoalListReq,
+    ) -> Result<GoalListResp, crate::error::AppError> {
+        const VALID_STATUSES: &[&str] = &["pending", "active", "completed", "abandoned"];
+
+        // Validate status filter before touching DB.
+        let statuses: Option<Vec<String>> = if let Some(ref s) = req.status {
+            let parts: Vec<String> = s
+                .split(',')
+                .map(|x| x.trim().to_owned())
+                .filter(|x| !x.is_empty())
+                .collect();
+            for part in &parts {
+                if !VALID_STATUSES.contains(&part.as_str()) {
+                    return Err(crate::error::AppError::BadRequest(
+                        "invalid status filter".to_owned(),
+                    ));
+                }
+            }
+            if parts.is_empty() { None } else { Some(parts) }
+        } else {
+            None
+        };
+
+        let db_path = self.db_path.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<GoalListResp, crate::error::AppError> {
+            let conn = db::open_db(&db_path)?;
+
+            let limit  = req.limit.clamp(1, 500);
+            let offset = req.offset.max(0);
+
+            use rusqlite::types::Value as SqlValue;
+            let mut where_parts: Vec<String> = vec!["bot_id=?".to_owned()];
+            let mut base_params: Vec<SqlValue> = vec![SqlValue::Text(req.bot_id.clone())];
+
+            if let Some(ref sts) = statuses {
+                let placeholders = sts.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                where_parts.push(format!("status IN ({placeholders})"));
+                for st in sts {
+                    base_params.push(SqlValue::Text(st.clone()));
+                }
+            }
+
+            let where_sql = where_parts.join(" AND ");
+
+            // COUNT(*) for total.
+            let count_sql = format!("SELECT COUNT(*) FROM goals WHERE {where_sql}");
+            let total: i64 = conn.query_row(
+                &count_sql,
+                rusqlite::params_from_iter(base_params.iter()),
+                |r| r.get(0),
+            )?;
+
+            // Main SELECT.
+            let mut list_params = base_params.clone();
+            list_params.push(SqlValue::Integer(limit));
+            list_params.push(SqlValue::Integer(offset));
+
+            let list_sql = format!(
+                "SELECT id, bot_id, text, status, source, priority, origin_memory, \
+                        created_ts, updated_ts, completed_ts \
+                 FROM goals WHERE {where_sql} \
+                 ORDER BY priority DESC, created_ts DESC LIMIT ? OFFSET ?"
+            );
+            let mut stmt = conn.prepare(&list_sql)?;
+            let items: Vec<GoalRow> = stmt
+                .query_map(rusqlite::params_from_iter(list_params.iter()), |r| {
+                    Ok(GoalRow {
+                        id:            r.get(0)?,
+                        bot_id:        r.get(1)?,
+                        text:          r.get(2)?,
+                        status:        r.get(3)?,
+                        source:        r.get(4)?,
+                        priority:      r.get(5)?,
+                        origin_memory: r.get(6)?,
+                        created_ts:    r.get(7)?,
+                        updated_ts:    r.get(8)?,
+                        completed_ts:  r.get(9)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+
+            Ok(GoalListResp { items, total })
+        })
+        .await
+        .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!("spawn_blocking panicked: {e}")))?
+    }
+
+    // -----------------------------------------------------------------------
+    // goal_complete
+    // -----------------------------------------------------------------------
+
+    /// Transition a goal to a terminal outcome and optionally record a memory.
+    ///
+    /// Mirrors Python `POST /goals/complete`:
+    ///
+    /// 1. Fetch the goal.  Not found → `NotFound`.
+    /// 2. If already terminal → `BadRequest("goal is already terminal ({current})")`.
+    /// 3. Validate `outcome` is reachable from `current_status` via `VALID_TRANSITIONS`.
+    /// 4. `UPDATE goals SET status=?, completed_ts=now, updated_ts=now WHERE id=?`.
+    /// 5. If `also_record_memory` (default `true`):
+    ///    - `text = format!("Goal {outcome}: {goal_text}")` — matches Python
+    ///      `f"Goal {req.outcome}: {row[2]}"` where `row[2]` is the goal text.
+    ///    - Call `self.write(WriteReq { salience: 0.6, memory_type: "goal_link",
+    ///      source: "goals:{goal_id}", entities: [], relations: [] })`.
+    ///    - Return `memory_id` from the `WriteResp`.
+    /// 6. Return `GoalCompleteResp { updated: true, memory_id }`.
+    pub async fn goal_complete(
+        &self,
+        req: GoalCompleteReq,
+    ) -> Result<GoalCompleteResp, crate::error::AppError> {
+        let db_path = self.db_path.clone();
+        let bot_id = req.bot_id.clone();
+        let goal_id = req.goal_id.clone();
+        let outcome_str = req.outcome.as_str();
+
+        // Step 1–4: DB work (fetch + validate + update) in spawn_blocking.
+        let goal_text: String = {
+            let db_path2 = db_path.clone();
+            let bot_id2 = bot_id.clone();
+            let goal_id2 = goal_id.clone();
+
+            tokio::task::spawn_blocking(move || -> Result<String, crate::error::AppError> {
+                let conn = db::open_db(&db_path2)?;
+                use rusqlite::OptionalExtension;
+
+                let row: Option<(String, String)> = conn
+                    .query_row(
+                        "SELECT text, status FROM goals WHERE id=?1 AND bot_id=?2",
+                        rusqlite::params![goal_id2, bot_id2],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                    )
+                    .optional()?;
+
+                let (goal_text, current_status) = match row {
+                    None => return Err(crate::error::AppError::NotFound("goal not found")),
+                    Some(r) => r,
+                };
+
+                // Already terminal.
+                const TERMINAL_STATUSES: &[&str] = &["completed", "abandoned"];
+                if TERMINAL_STATUSES.contains(&current_status.as_str()) {
+                    return Err(crate::error::AppError::BadRequest(format!(
+                        "goal is already terminal ({current_status})"
+                    )));
+                }
+
+                // Validate transition.
+                let allowed: &[&str] = match current_status.as_str() {
+                    "pending" => &["active", "abandoned"],
+                    "active"  => &["completed", "abandoned"],
+                    _         => &[],
+                };
+                if !allowed.contains(&outcome_str) {
+                    return Err(crate::error::AppError::BadRequest(format!(
+                        "invalid transition {current_status} \u{2192} {outcome_str}"
+                    )));
+                }
+
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+
+                conn.execute(
+                    "UPDATE goals SET status=?1, completed_ts=?2, updated_ts=?2 WHERE id=?3",
+                    rusqlite::params![outcome_str, now, goal_id2],
+                )?;
+
+                Ok(goal_text)
+            })
+            .await
+            .map_err(|e| {
+                crate::error::AppError::Internal(anyhow::anyhow!("spawn_blocking panicked: {e}"))
+            })??
+        };
+
+        // Step 5: write auto-memory (async — calls embed + DB).
+        let memory_id = if req.also_record_memory {
+            // Python: f"Goal {req.outcome}: {row[2]}"
+            let text = format!("Goal {outcome_str}: {goal_text}");
+            let write_resp = self
+                .write(WriteReq {
+                    bot_id: bot_id.clone(),
+                    text,
+                    salience: 0.6,
+                    entities: vec![],
+                    relations: vec![],
+                    memory_type: Some("goal_link".to_owned()),
+                    source: Some(format!("goals:{goal_id}")),
+                })
+                .await?;
+            Some(write_resp.memory_id)
+        } else {
+            None
+        };
+
+        Ok(GoalCompleteResp { updated: true, memory_id })
     }
 }
 
@@ -3451,5 +4017,595 @@ mod tests {
         svc.personality_set("bot_pers4", persona.clone()).await.expect("4000 chars must succeed");
         let result = svc.personality_get("bot_pers4").await.expect("get").unwrap();
         assert_eq!(result.len(), 4000, "4000-char persona must be stored intact");
+    }
+
+    // =======================================================================
+    // Task 5.2 — goals tests
+    // =======================================================================
+
+    // Helper: insert a bot row and goal directly into the DB (bypasses service).
+    fn insert_raw_goal(
+        conn: &rusqlite::Connection,
+        id: &str,
+        bot_id: &str,
+        text: &str,
+        status: &str,
+        priority: i64,
+        created_ts: i64,
+    ) {
+        conn.execute(
+            "INSERT OR IGNORE INTO bots (bot_id, created_ts) VALUES (?1, ?2)",
+            rusqlite::params![bot_id, created_ts],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO goals \
+             (id, bot_id, text, status, source, priority, origin_memory, created_ts, updated_ts) \
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5, NULL, ?6, ?6)",
+            rusqlite::params![id, bot_id, text, status, priority, created_ts],
+        )
+        .unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // G1: create returns goal_id with prefix g_ and status "pending".
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn goal_create_returns_pending_with_g_prefix() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        open_and_migrate(tmp.path());
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .goal_create(GoalCreateReq {
+                bot_id: "bot_g1".to_owned(),
+                text: "Defeat the Lich King".to_owned(),
+                source: None,
+                priority: 0,
+                origin_memory: None,
+            })
+            .await
+            .expect("goal_create must succeed");
+
+        assert!(resp.goal_id.starts_with("g_"), "goal_id must start with 'g_'");
+        assert_eq!(resp.status, "pending", "new goal must be pending");
+    }
+
+    // -----------------------------------------------------------------------
+    // G2: create → read round-trip.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn goal_create_then_read() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        open_and_migrate(tmp.path());
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let cr = svc
+            .goal_create(GoalCreateReq {
+                bot_id: "bot_g2".to_owned(),
+                text: "Find the artifact".to_owned(),
+                source: Some("quest:123".to_owned()),
+                priority: 5,
+                origin_memory: None,
+            })
+            .await
+            .expect("create");
+
+        let row = svc
+            .goal_read("bot_g2", &cr.goal_id)
+            .await
+            .expect("read")
+            .expect("must be Some");
+
+        assert_eq!(row.id, cr.goal_id);
+        assert_eq!(row.bot_id, "bot_g2");
+        assert_eq!(row.text, "Find the artifact");
+        assert_eq!(row.status, "pending");
+        assert_eq!(row.source.as_deref(), Some("quest:123"));
+        assert_eq!(row.priority, 5);
+        assert!(row.completed_ts.is_none(), "completed_ts must be NULL for pending");
+    }
+
+    // -----------------------------------------------------------------------
+    // G3: read unknown goal → None.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn goal_read_unknown_returns_none() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        open_and_migrate(tmp.path());
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let result = svc.goal_read("bot_g3", "g_nosuchgoal").await.expect("no error");
+        assert!(result.is_none(), "unknown goal → None");
+    }
+
+    // -----------------------------------------------------------------------
+    // G4: legal transition pending → active succeeds; updated_ts bumped.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn goal_update_legal_transition_pending_to_active() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+        insert_raw_goal(&conn, "g_upd001", "bot_g4", "test goal", "pending", 0, 0);
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .goal_update(GoalUpdateReq {
+                bot_id: "bot_g4".to_owned(),
+                goal_id: "g_upd001".to_owned(),
+                text: None,
+                status: Some("active".to_owned()),
+                priority: None,
+                origin_memory: None,
+            })
+            .await
+            .expect("update");
+
+        assert!(resp.updated, "legal transition must return updated=true");
+
+        let row = svc.goal_read("bot_g4", "g_upd001").await.expect("read").unwrap();
+        assert_eq!(row.status, "active");
+        assert!(row.updated_ts > 0, "updated_ts must be bumped");
+        assert!(row.completed_ts.is_none(), "active is not terminal; completed_ts must be None");
+    }
+
+    // -----------------------------------------------------------------------
+    // G5: illegal transition pending → completed → BadRequest.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn goal_update_illegal_transition_returns_bad_request() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+        insert_raw_goal(&conn, "g_upd002", "bot_g5", "test goal", "pending", 0, 0);
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let err = svc
+            .goal_update(GoalUpdateReq {
+                bot_id: "bot_g5".to_owned(),
+                goal_id: "g_upd002".to_owned(),
+                text: None,
+                status: Some("completed".to_owned()),
+                priority: None,
+                origin_memory: None,
+            })
+            .await;
+
+        assert!(
+            matches!(err, Err(crate::error::AppError::BadRequest(_))),
+            "illegal transition must be BadRequest, got {:?}", err
+        );
+        // Status must not have changed.
+        let row = svc.goal_read("bot_g5", "g_upd002").await.expect("read").unwrap();
+        assert_eq!(row.status, "pending", "status must not change on rejected transition");
+    }
+
+    // -----------------------------------------------------------------------
+    // G6: transition to terminal status sets completed_ts.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn goal_update_terminal_transition_sets_completed_ts() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+        insert_raw_goal(&conn, "g_upd003", "bot_g6", "test goal", "active", 0, 0);
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        svc.goal_update(GoalUpdateReq {
+            bot_id: "bot_g6".to_owned(),
+            goal_id: "g_upd003".to_owned(),
+            text: None,
+            status: Some("completed".to_owned()),
+            priority: None,
+            origin_memory: None,
+        })
+        .await
+        .expect("update");
+
+        let row = svc.goal_read("bot_g6", "g_upd003").await.expect("read").unwrap();
+        assert_eq!(row.status, "completed");
+        assert!(row.completed_ts.is_some(), "completed_ts must be set when transitioning to terminal");
+    }
+
+    // -----------------------------------------------------------------------
+    // G7: update with no fields → BadRequest.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn goal_update_no_fields_returns_bad_request() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+        insert_raw_goal(&conn, "g_upd004", "bot_g7", "test goal", "pending", 0, 0);
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let err = svc
+            .goal_update(GoalUpdateReq {
+                bot_id: "bot_g7".to_owned(),
+                goal_id: "g_upd004".to_owned(),
+                text: None,
+                status: None,
+                priority: None,
+                origin_memory: None,
+            })
+            .await;
+
+        assert!(
+            matches!(err, Err(crate::error::AppError::BadRequest(_))),
+            "no fields → BadRequest"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // G8: update missing goal → updated: false.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn goal_update_missing_goal_returns_updated_false() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        open_and_migrate(tmp.path());
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .goal_update(GoalUpdateReq {
+                bot_id: "bot_g8".to_owned(),
+                goal_id: "g_nosuchgoal".to_owned(),
+                text: Some("new text".to_owned()),
+                status: None,
+                priority: None,
+                origin_memory: None,
+            })
+            .await
+            .expect("must not error");
+
+        assert!(!resp.updated, "missing goal → updated=false");
+    }
+
+    // -----------------------------------------------------------------------
+    // G9: invalid status string → BadRequest.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn goal_update_invalid_status_string_returns_bad_request() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+        insert_raw_goal(&conn, "g_upd005", "bot_g9", "test goal", "pending", 0, 0);
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let err = svc
+            .goal_update(GoalUpdateReq {
+                bot_id: "bot_g9".to_owned(),
+                goal_id: "g_upd005".to_owned(),
+                text: None,
+                status: Some("flying".to_owned()),
+                priority: None,
+                origin_memory: None,
+            })
+            .await;
+
+        assert!(
+            matches!(err, Err(crate::error::AppError::BadRequest(_))),
+            "invalid status string → BadRequest"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // G10: list filter by status.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn goal_list_filter_by_status() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+
+        insert_raw_goal(&conn, "g_lst001", "bot_gl", "task 1", "pending",   0, 1_000);
+        insert_raw_goal(&conn, "g_lst002", "bot_gl", "task 2", "active",    0, 1_001);
+        insert_raw_goal(&conn, "g_lst003", "bot_gl", "task 3", "pending",   0, 1_002);
+        insert_raw_goal(&conn, "g_lst004", "bot_gl", "task 4", "abandoned", 0, 1_003);
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .goal_list(GoalListReq {
+                bot_id: "bot_gl".to_owned(),
+                status: Some("pending".to_owned()),
+                limit: 50,
+                offset: 0,
+            })
+            .await
+            .expect("list");
+
+        assert_eq!(resp.total, 2, "filter pending → total=2");
+        assert_eq!(resp.items.len(), 2);
+        for item in &resp.items {
+            assert_eq!(item.status, "pending");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // G11: list ordering: priority DESC, then created_ts DESC.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn goal_list_ordering_priority_then_created_ts() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+
+        insert_raw_goal(&conn, "g_ord001", "bot_go", "low prio old",  "pending", 0,  1_000);
+        insert_raw_goal(&conn, "g_ord002", "bot_go", "low prio new",  "pending", 0,  2_000);
+        insert_raw_goal(&conn, "g_ord003", "bot_go", "high prio",     "pending", 20, 1_500);
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .goal_list(GoalListReq {
+                bot_id: "bot_go".to_owned(),
+                status: None,
+                limit: 50,
+                offset: 0,
+            })
+            .await
+            .expect("list");
+
+        assert_eq!(resp.total, 3);
+        assert_eq!(resp.items.len(), 3);
+        assert_eq!(resp.items[0].id, "g_ord003", "highest priority must come first");
+        assert_eq!(resp.items[1].id, "g_ord002", "among same-priority, newer created_ts first");
+        assert_eq!(resp.items[2].id, "g_ord001");
+    }
+
+    // -----------------------------------------------------------------------
+    // G12: list pagination (limit/offset).
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn goal_list_pagination() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+
+        for i in 0..5u32 {
+            let id = format!("g_pag{i:03}");
+            insert_raw_goal(&conn, &id, "bot_gp", &format!("goal {i}"), "pending", 0, i as i64);
+        }
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let page1 = svc
+            .goal_list(GoalListReq { bot_id: "bot_gp".to_owned(), status: None, limit: 2, offset: 0 })
+            .await
+            .expect("page1");
+
+        assert_eq!(page1.total, 5, "total must always reflect full count");
+        assert_eq!(page1.items.len(), 2, "page 1 must have 2 items");
+
+        let page2 = svc
+            .goal_list(GoalListReq { bot_id: "bot_gp".to_owned(), status: None, limit: 2, offset: 2 })
+            .await
+            .expect("page2");
+
+        assert_eq!(page2.total, 5);
+        assert_eq!(page2.items.len(), 2);
+        for item in &page2.items {
+            assert!(!page1.items.iter().any(|i| i.id == item.id), "page 2 items must not overlap page 1");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // G13: list with invalid status filter → BadRequest.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn goal_list_invalid_status_filter_bad_request() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        open_and_migrate(tmp.path());
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let err = svc
+            .goal_list(GoalListReq {
+                bot_id: "bot_gx".to_owned(),
+                status: Some("flying".to_owned()),
+                limit: 50,
+                offset: 0,
+            })
+            .await;
+
+        assert!(matches!(err, Err(crate::error::AppError::BadRequest(_))), "invalid status → BadRequest");
+    }
+
+    // -----------------------------------------------------------------------
+    // G14: complete sets terminal status + completed_ts + records memory.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn goal_complete_sets_terminal_and_records_memory() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+        insert_raw_goal(&conn, "g_cmp001", "bot_gc", "Slay the dragon", "active", 0, 1_000);
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .goal_complete(GoalCompleteReq {
+                bot_id: "bot_gc".to_owned(),
+                goal_id: "g_cmp001".to_owned(),
+                outcome: GoalOutcome::Completed,
+                also_record_memory: true,
+            })
+            .await
+            .expect("goal_complete must succeed");
+
+        assert!(resp.updated, "updated must be true");
+        assert!(resp.memory_id.is_some(), "also_record_memory=true → memory_id must be Some");
+
+        let row = svc.goal_read("bot_gc", "g_cmp001").await.expect("read").unwrap();
+        assert_eq!(row.status, "completed");
+        assert!(row.completed_ts.is_some(), "completed_ts must be set");
+
+        let mem_id = resp.memory_id.unwrap();
+        let mem = svc.read("bot_gc", &mem_id).await.expect("read memory").expect("memory must exist");
+        assert_eq!(mem.memory_type, "goal_link");
+        assert_eq!(mem.source.as_deref(), Some("goals:g_cmp001"));
+        assert!((mem.salience - 0.6_f32).abs() < 1e-5, "salience must be 0.6");
+        assert_eq!(mem.text, "Goal completed: Slay the dragon");
+    }
+
+    // -----------------------------------------------------------------------
+    // G15: complete with also_record_memory=false → memory_id is None.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn goal_complete_no_memory_returns_none_memory_id() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+        insert_raw_goal(&conn, "g_cmp002", "bot_gc2", "another goal", "active", 0, 1_000);
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .goal_complete(GoalCompleteReq {
+                bot_id: "bot_gc2".to_owned(),
+                goal_id: "g_cmp002".to_owned(),
+                outcome: GoalOutcome::Abandoned,
+                also_record_memory: false,
+            })
+            .await
+            .expect("goal_complete");
+
+        assert!(resp.updated);
+        assert!(resp.memory_id.is_none(), "also_record_memory=false → memory_id must be None");
+
+        let row = svc.goal_read("bot_gc2", "g_cmp002").await.expect("read").unwrap();
+        assert_eq!(row.status, "abandoned");
+        assert!(row.completed_ts.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // G16: complete already-terminal goal → BadRequest.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn goal_complete_already_terminal_bad_request() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+        insert_raw_goal(&conn, "g_cmp003", "bot_gc3", "done goal", "completed", 0, 1_000);
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let err = svc
+            .goal_complete(GoalCompleteReq {
+                bot_id: "bot_gc3".to_owned(),
+                goal_id: "g_cmp003".to_owned(),
+                outcome: GoalOutcome::Completed,
+                also_record_memory: false,
+            })
+            .await;
+
+        assert!(
+            matches!(err, Err(crate::error::AppError::BadRequest(_))),
+            "completing a terminal goal must be BadRequest"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // G17: complete a pending goal with outcome "abandoned" — valid (pending→abandoned).
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn goal_complete_pending_to_abandoned_via_complete() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+        insert_raw_goal(&conn, "g_cmp004", "bot_gc4", "pending goal", "pending", 0, 1_000);
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .goal_complete(GoalCompleteReq {
+                bot_id: "bot_gc4".to_owned(),
+                goal_id: "g_cmp004".to_owned(),
+                outcome: GoalOutcome::Abandoned,
+                also_record_memory: false,
+            })
+            .await
+            .expect("pending→abandoned must succeed");
+
+        assert!(resp.updated);
+        let row = svc.goal_read("bot_gc4", "g_cmp004").await.expect("read").unwrap();
+        assert_eq!(row.status, "abandoned");
+    }
+
+    // -----------------------------------------------------------------------
+    // G18: complete a pending goal with outcome "completed" → BadRequest
+    //      (pending→completed is not a valid direct transition).
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn goal_complete_pending_to_completed_is_invalid() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+        insert_raw_goal(&conn, "g_cmp005", "bot_gc5", "pending goal", "pending", 0, 1_000);
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let err = svc
+            .goal_complete(GoalCompleteReq {
+                bot_id: "bot_gc5".to_owned(),
+                goal_id: "g_cmp005".to_owned(),
+                outcome: GoalOutcome::Completed,
+                also_record_memory: false,
+            })
+            .await;
+
+        assert!(
+            matches!(err, Err(crate::error::AppError::BadRequest(_))),
+            "pending→completed is not a valid transition via complete"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // G19: list comma-separated status filter.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn goal_list_comma_separated_status_filter() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+
+        insert_raw_goal(&conn, "g_csv001", "bot_gcsv", "t1", "pending",   0, 1_000);
+        insert_raw_goal(&conn, "g_csv002", "bot_gcsv", "t2", "active",    0, 1_001);
+        insert_raw_goal(&conn, "g_csv003", "bot_gcsv", "t3", "completed", 0, 1_002);
+        insert_raw_goal(&conn, "g_csv004", "bot_gcsv", "t4", "abandoned", 0, 1_003);
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .goal_list(GoalListReq {
+                bot_id: "bot_gcsv".to_owned(),
+                status: Some("pending,active".to_owned()),
+                limit: 50,
+                offset: 0,
+            })
+            .await
+            .expect("list");
+
+        assert_eq!(resp.total, 2, "pending,active filter → 2 goals");
+        for item in &resp.items {
+            assert!(
+                item.status == "pending" || item.status == "active",
+                "only pending/active must be returned, got {}", item.status
+            );
+        }
     }
 }
