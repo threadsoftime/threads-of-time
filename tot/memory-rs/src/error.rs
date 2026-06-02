@@ -28,8 +28,9 @@ pub enum AppError {
     #[error("bad request: {0}")]
     BadRequest(String),
 
-    /// 503 — the embedding service is unavailable (only raised by search and
-    /// update which are "loud"; the write and recall routes degrade gracefully).
+    /// 503 — the embedding service is unavailable. Raised by write, update
+    /// (text change), recall, recall_about, and search — all paths that
+    /// require a live embedder. Matches Python: no try/except around embed().
     #[error("embedding service unavailable")]
     EmbeddingUnavailable,
 

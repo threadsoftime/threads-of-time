@@ -473,6 +473,10 @@ impl MemoryService {
 
     /// Write a new memory for `req.bot_id`.
     ///
+    /// Returns `Err(AppError::EmbeddingUnavailable)` when the embed HTTP call
+    /// fails — matching Python `routes_memory.py::remember` which propagates
+    /// the `httpx` exception (no try/except). No row is inserted on failure.
+    ///
     /// Exact insert order (ports `routes_memory.py::remember`):
     ///
     /// 1. `embed.embed(text).await` — async, before any DB work.
@@ -490,14 +494,19 @@ impl MemoryService {
     /// 4. Return `WriteResp`.
     pub async fn write(&self, req: WriteReq) -> Result<WriteResp, crate::error::AppError> {
         // Step 1: Embed — must happen in async context before spawn_blocking.
-        let embedding: Vec<f32> = match self.embed.embed(&req.text).await {
-            Ok(arc) => arc.as_ref().clone(),
-            Err(_) => {
-                // Graceful degradation: write path stores NULL embedding (same as
-                // Python — the embedder may be temporarily unavailable).
-                vec![]
-            }
-        };
+        //
+        // Parity with Python `routes_memory.py::remember`:
+        //   `embedding = await embedder.embed(req.text)`   — no try/except
+        // Any embed failure propagates as an unhandled exception → FastAPI 500.
+        // We map this to EmbeddingUnavailable (→ HTTP 503 via IntoResponse).
+        // The transaction is never started, so no row is inserted on failure.
+        let embedding: Vec<f32> = self
+            .embed
+            .embed(&req.text)
+            .await
+            .map_err(|_| crate::error::AppError::EmbeddingUnavailable)?
+            .as_ref()
+            .clone();
 
         // Clone all config values into owned types so they can move into the
         // blocking closure.  `PathBuf` + `ScoringWeights` are cheap to clone.
@@ -682,6 +691,11 @@ impl MemoryService {
 
     /// Patch a memory row.
     ///
+    /// Returns `Err(AppError::EmbeddingUnavailable)` when `text` is `Some` and
+    /// the embed HTTP call fails — matching Python `routes_memory.py::update`
+    /// which propagates the `httpx` exception (no try/except). The existing
+    /// row is NOT modified on failure.
+    ///
     /// Semantics (mirrors Python `PUT /memory/update`):
     /// - If `text` is `Some`, re-embed it (async, before `spawn_blocking`),
     ///   update `memories.text`, `memories.embedding`, and replace the
@@ -696,13 +710,21 @@ impl MemoryService {
         r: UpdateReq,
     ) -> Result<UpdateResp, crate::error::AppError> {
         // Embed first, before entering spawn_blocking, if text is changing.
-        // Degrade gracefully (empty embedding) on embedder error — same pattern
-        // as write().
+        //
+        // Parity with Python `routes_memory.py::update`:
+        //   `new_emb = await embedder.embed(req.text)`   — no try/except
+        // Any embed failure propagates as an unhandled exception → FastAPI 500.
+        // We map this to EmbeddingUnavailable (→ HTTP 503 via IntoResponse).
+        // The transaction is never started, so the existing row is not modified.
         let (new_embedding, re_embedded) = if let Some(ref text) = r.text {
-            match self.embed.embed(text).await {
-                Ok(arc) => (arc.as_ref().clone(), true),
-                Err(_) => (vec![], true),   // still re_embedded=true; text changed even if embed failed
-            }
+            let vec = self
+                .embed
+                .embed(text)
+                .await
+                .map_err(|_| crate::error::AppError::EmbeddingUnavailable)?
+                .as_ref()
+                .clone();
+            (vec, true)
         } else {
             (vec![], false)
         };
@@ -4614,5 +4636,128 @@ mod tests {
                 "only pending/active must be returned, got {}", item.status
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Embed-failure parity tests — Python hard-fails on embed error.
+    //
+    // Python `routes_memory.py`:
+    //   remember:  `embedding = await embedder.embed(req.text)`
+    //              — no try/except; unhandled exception → FastAPI 500
+    //   update:    `new_emb = await embedder.embed(req.text)`
+    //              — no try/except; unhandled exception → FastAPI 500
+    //
+    // Python `embed.py`:
+    //   `resp.raise_for_status()` raises `httpx.HTTPStatusError` on non-200.
+    //   `ValueError` on dimension mismatch. No catch anywhere in embed().
+    //
+    // Therefore: the Rust service must return `Err(AppError::EmbeddingUnavailable)`
+    // (not Ok with NULL embedding) when the embedder returns an error, and the
+    // transaction must NOT be committed (no row inserted/modified).
+    // -----------------------------------------------------------------------
+
+    /// Spin up a stub embed server that always returns HTTP 500.
+    /// Used by the embed-failure parity tests.
+    async fn spawn_failing_embed_stub() -> String {
+        let handler = move |AxumJson(_body): AxumJson<serde_json::Value>| async move {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        let app = Router::new().route("/v1/embeddings", post(handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}/v1")
+    }
+
+    // W10: write() returns EmbeddingUnavailable on embed failure, no row inserted.
+    // Parity: Python `remember` propagates the embed exception (hard-fail).
+    #[tokio::test]
+    async fn write_embed_failure_returns_embedding_unavailable_no_row_inserted() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        open_and_migrate(tmp.path());
+
+        let embed_url = spawn_failing_embed_stub().await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let req = WriteReq {
+            bot_id: "bot_embed_fail".to_string(),
+            text: "this will fail to embed".to_string(),
+            salience: 0.5,
+            entities: vec![],
+            relations: vec![],
+            memory_type: None,
+            source: None,
+        };
+        let result = svc.write(req).await;
+
+        // Must return Err(EmbeddingUnavailable) — NOT Ok with NULL embedding.
+        assert!(
+            matches!(result, Err(crate::error::AppError::EmbeddingUnavailable)),
+            "write() with embed failure must return Err(EmbeddingUnavailable), got: {:?}",
+            result
+        );
+
+        // The transaction must NOT have been committed — no row in memories.
+        let conn = db::open_db(tmp.path()).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE bot_id='bot_embed_fail'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count memories");
+        assert_eq!(
+            count, 0,
+            "no row must be inserted when embed fails (transaction not committed)"
+        );
+    }
+
+    // U_EMBED_FAIL: update() with text change returns EmbeddingUnavailable on embed
+    // failure; existing row is NOT modified.
+    // Parity: Python `update` propagates the embed exception (hard-fail).
+    #[tokio::test]
+    async fn update_embed_failure_returns_embedding_unavailable_no_row_modified() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+        let orig_emb: Vec<f32> = vec![0.3_f32; EMBEDDING_DIM];
+        insert_raw_memory(
+            &conn, "bot_upd_fail", "m_upd_fail01", "original text", 0.6,
+            "event", None, 1_700_000_100, &orig_emb,
+        );
+
+        let embed_url = spawn_failing_embed_stub().await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let result = svc
+            .update(UpdateReq {
+                bot_id: "bot_upd_fail".to_string(),
+                memory_id: "m_upd_fail01".to_string(),
+                text: Some("new text that triggers re-embed".to_string()),
+                salience: None,
+                memory_type: None,
+                source: None,
+            })
+            .await;
+
+        // Must return Err(EmbeddingUnavailable).
+        assert!(
+            matches!(result, Err(crate::error::AppError::EmbeddingUnavailable)),
+            "update() with text+embed failure must return Err(EmbeddingUnavailable), got: {:?}",
+            result
+        );
+
+        // The original row must be unchanged.
+        let conn2 = db::open_db(tmp.path()).unwrap();
+        let stored_text: String = conn2
+            .query_row(
+                "SELECT text FROM memories WHERE id='m_upd_fail01'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("SELECT text");
+        assert_eq!(
+            stored_text, "original text",
+            "text must remain unchanged when update embed fails"
+        );
     }
 }
