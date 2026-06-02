@@ -28,23 +28,52 @@ pub enum EmbedError {
 /// OpenAI-compatible `/v1/embeddings` client.
 ///
 /// Mirrors `EmbeddingsClient` in `tot_memory/embeddings/client.py`:
-/// - `base_url` trailing slashes are trimmed.
+/// - `base_url` is normalized: any trailing `/` and any trailing `/v1` segment
+///   are stripped, so the client always POSTs to `<base>/v1/embeddings`.
+/// - Both forms are accepted:
+///   - `http://host:8081`    (Python-style base)  → `http://host:8081/v1/embeddings`
+///   - `http://host:8081/v1` (legacy workaround)  → `http://host:8081/v1/embeddings`
 /// - Bearer token is sent only when `api_key` is non-empty.
 /// - Per-request timeout is 30 s (same as Python's `httpx.AsyncClient(timeout=30.0)`).
 ///
 /// The client is `Clone`; `reqwest::Client` holds an inner `Arc` so cloning is cheap.
 #[derive(Clone)]
 pub struct EmbeddingsClient {
-    base_url: String, // trailing slash stripped
+    /// Normalized base URL: trailing `/` and trailing `/v1` segment stripped.
+    /// `embed()` appends `/v1/embeddings` to form the final request URL.
+    base_url: String,
     model: String,
     http: Client,
+}
+
+/// Normalize an embeddings endpoint URL so that it can be used as a plain base.
+///
+/// Strips any trailing `/` characters and any trailing `/v1` path segment
+/// (with or without a following `/`).  The result is the scheme+host+port
+/// portion, ready for `format!("{base}/v1/embeddings")`.
+///
+/// # Examples
+/// ```
+/// // All four forms resolve to the same final URL:
+/// //   http://h:8081     → base="http://h:8081"  → request="http://h:8081/v1/embeddings"
+/// //   http://h:8081/    → base="http://h:8081"  → request="http://h:8081/v1/embeddings"
+/// //   http://h:8081/v1  → base="http://h:8081"  → request="http://h:8081/v1/embeddings"
+/// //   http://h:8081/v1/ → base="http://h:8081"  → request="http://h:8081/v1/embeddings"
+/// ```
+fn normalize_embed_base(endpoint: &str) -> String {
+    // Step 1: strip any trailing slashes.
+    let s = endpoint.trim_end_matches('/');
+    // Step 2: strip a trailing "/v1" segment if present.
+    let s = s.strip_suffix("/v1").unwrap_or(s);
+    // Step 3: strip any trailing slashes that may have been exposed (e.g. "base//v1").
+    s.trim_end_matches('/').to_owned()
 }
 
 impl EmbeddingsClient {
     /// Build the client. Panics only if reqwest cannot build a TLS stack (should
     /// never happen in practice with the bundled rustls backend).
     pub fn new(base_url: &str, model: &str, api_key: &str) -> Self {
-        let base_url = base_url.trim_end_matches('/').to_owned();
+        let base_url = normalize_embed_base(base_url);
 
         let mut default_headers = HeaderMap::new();
         if !api_key.is_empty() {
@@ -76,7 +105,7 @@ impl EmbeddingsClient {
     /// JSON floats are `f64` by default in serde; we collect as `f32` (round-to-
     /// nearest) matching Python's `struct.pack('f', ...)` on storage.
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
-        let url = format!("{}/embeddings", self.base_url);
+        let url = format!("{}/v1/embeddings", self.base_url);
 
         let resp = self
             .http
@@ -143,7 +172,9 @@ mod tests {
     /// `captured` is written by the handler so tests can assert on it after
     /// the client call returns.
     ///
-    /// Returns `(base_url, Arc<Mutex<Captured>>)`.
+    /// Returns `(base_url, Arc<Mutex<Captured>>)` where `base_url` is the bare
+    /// scheme+host+port (e.g. `http://127.0.0.1:PORT`) — the Python-style form.
+    /// `EmbeddingsClient::new` normalizes it and appends `/v1/embeddings`.
     async fn spawn_embed_mock(
         response_vec: Vec<f32>,
     ) -> (String, Arc<Mutex<Captured>>) {
@@ -189,7 +220,66 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        (format!("http://{addr}/v1"), captured)
+        // Return bare base (Python-style): client normalizes + appends /v1/embeddings.
+        (format!("http://{addr}"), captured)
+    }
+
+    // --- Endpoint normalization unit tests ---
+    //
+    // These tests assert that `normalize_embed_base` (called inside `new()`)
+    // resolves all four accepted endpoint forms to the same final request URL.
+    // The mock server routes on `/v1/embeddings`; any other path → 404.
+
+    // N1: Bare base URL (Python-style, no /v1 suffix) → /v1/embeddings
+    #[tokio::test]
+    async fn normalize_bare_base_hits_v1_embeddings() {
+        let response_vec: Vec<f32> = vec![0.0_f32; EMBEDDING_DIM];
+        let (bare_base, _) = spawn_embed_mock(response_vec).await;
+        // bare_base = "http://127.0.0.1:PORT" — no trailing slash, no /v1.
+        let client = EmbeddingsClient::new(&bare_base, "model", "");
+        client
+            .embed("text")
+            .await
+            .expect("bare base must resolve to /v1/embeddings");
+    }
+
+    // N2: Bare base with trailing slash → /v1/embeddings
+    #[tokio::test]
+    async fn normalize_bare_base_trailing_slash_hits_v1_embeddings() {
+        let response_vec: Vec<f32> = vec![0.0_f32; EMBEDDING_DIM];
+        let (bare_base, _) = spawn_embed_mock(response_vec).await;
+        let with_slash = format!("{bare_base}/");
+        let client = EmbeddingsClient::new(&with_slash, "model", "");
+        client
+            .embed("text")
+            .await
+            .expect("bare base with trailing slash must resolve to /v1/embeddings");
+    }
+
+    // N3: /v1-suffixed base (live-deploy workaround form) → /v1/embeddings
+    #[tokio::test]
+    async fn normalize_v1_suffix_hits_v1_embeddings() {
+        let response_vec: Vec<f32> = vec![0.0_f32; EMBEDDING_DIM];
+        let (bare_base, _) = spawn_embed_mock(response_vec).await;
+        let v1_base = format!("{bare_base}/v1");
+        let client = EmbeddingsClient::new(&v1_base, "model", "");
+        client
+            .embed("text")
+            .await
+            .expect("/v1-suffixed base must resolve to /v1/embeddings");
+    }
+
+    // N4: /v1/-suffixed base (trailing slash after /v1) → /v1/embeddings
+    #[tokio::test]
+    async fn normalize_v1_trailing_slash_hits_v1_embeddings() {
+        let response_vec: Vec<f32> = vec![0.0_f32; EMBEDDING_DIM];
+        let (bare_base, _) = spawn_embed_mock(response_vec).await;
+        let v1_slash_base = format!("{bare_base}/v1/");
+        let client = EmbeddingsClient::new(&v1_slash_base, "model", "");
+        client
+            .embed("text")
+            .await
+            .expect("/v1/-suffixed base must resolve to /v1/embeddings");
     }
 
     // --- Happy-path tests ---
@@ -263,18 +353,18 @@ mod tests {
     }
 
     // H5: Trailing slashes in base_url are stripped — the URL hit is
-    //     exactly {base}/embeddings, not {base}//embeddings.
+    //     exactly <base>/v1/embeddings, not <base>//v1/embeddings.
     //     The mock only routes /v1/embeddings; double-slash would 404.
     #[tokio::test]
     async fn happy_trailing_slash_stripped() {
         let response_vec: Vec<f32> = vec![0.0_f32; EMBEDDING_DIM];
-        // spawn_embed_mock returns a /v1 base; add trailing slashes.
+        // spawn_embed_mock returns a bare base; add a trailing slash.
         let (base_url, _) = spawn_embed_mock(response_vec).await;
-        let base_url_with_slashes = format!("{}/", base_url); // e.g. http://addr/v1/
+        let base_url_with_slash = format!("{}/", base_url); // e.g. http://addr/
 
-        let client = EmbeddingsClient::new(&base_url_with_slashes, "model", "");
-        // Would return 404 (not 200) if the slash were not trimmed.
-        client.embed("text").await.expect("trailing slash must be stripped before appending /embeddings");
+        let client = EmbeddingsClient::new(&base_url_with_slash, "model", "");
+        // Would return 404 (not 200) if the slash were not trimmed before /v1/embeddings.
+        client.embed("text").await.expect("trailing slash must be stripped before appending /v1/embeddings");
     }
 
     // H6: Returned Vec<f32> values match the mock's output (f64→f32 round-trip).
@@ -300,7 +390,9 @@ mod tests {
     // --- Error-mapping helpers ---
 
     /// Spawn a mock that always responds with `status` and `body` on any POST
-    /// to /v1/embeddings. Used for non-2xx and malformed tests.
+    /// to `/v1/embeddings`. Used for non-2xx and malformed tests.
+    ///
+    /// Returns bare base URL (Python-style, e.g. `http://127.0.0.1:PORT`).
     async fn spawn_status_mock(status: StatusCode, body: serde_json::Value) -> String {
         let handler = move || {
             let s = status;
@@ -311,7 +403,8 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        format!("http://{addr}/v1")
+        // Return bare base (Python-style): client normalizes + appends /v1/embeddings.
+        format!("http://{addr}")
     }
 
     // E1: Non-2xx (e.g. 500 Internal Server Error) → EmbedError::Http.

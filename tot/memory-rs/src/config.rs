@@ -78,7 +78,12 @@ pub struct ScoringWeights {
 pub struct Settings {
     /// Path to the single SQLite database file.
     pub db_path: PathBuf,
-    /// Base URL of the embeddings service (no trailing path).
+    /// Base URL of the embeddings API (e.g. `http://host:8081`).
+    ///
+    /// The embeddings client appends `/v1/embeddings` to form the final request URL.
+    /// A trailing `/v1` suffix is tolerated and stripped automatically, so both
+    /// `http://host:8081` (Python-style) and `http://host:8081/v1` (legacy workaround)
+    /// resolve to the same endpoint.  Prefer the bare base form.
     pub embed_endpoint: String,
     /// Maximum number of episodes kept per bot before oldest are evicted.
     pub cap_per_bot: usize,
