@@ -347,3 +347,97 @@ fn migrate_run_continues_from_current_version() {
         .expect("max version");
     assert_eq!(max_version, 5, "max applied version must be 5");
 }
+
+// ---------------------------------------------------------------------------
+// Task 0.2 — sqlite-vec 0.1.9 snapshot read-compat test
+//
+// Opens the live production DB snapshot written by the Python memory_sidecar
+// running sqlite-vec 0.1.9 and verifies that:
+//   (a) vec_memories is readable (no vec0 version/format mismatch error)
+//   (b) COUNT(*) == 24,000 (the known production row count)
+//   (c) a sampled embedding round-trips as 384 f32s without decoding error
+//
+// The snapshot lives outside the repo at a fixed local path.  If it is absent
+// (e.g. in CI), the test is a no-op — it prints a notice and returns.  No
+// `#[ignore]` annotation is needed: it runs in `cargo test` when present and
+// silently passes when absent.
+// ---------------------------------------------------------------------------
+
+const PARITY_SNAPSHOT: &str =
+    "/Users/tbrack/Documents/Projects/.heimdal-parity/parity.sqlite";
+
+/// Open the production DB snapshot via `db::open_db` (which links the vendored
+/// sqlite-vec 0.1.9), read `COUNT(*) FROM vec_memories`, and decode one
+/// embedding blob.  Fails hard on any vec0 format/version mismatch.
+///
+/// No-ops gracefully when the snapshot file is absent so CI stays green.
+#[test]
+fn sqlite_vec_019_reads_production_snapshot() {
+    let snapshot = std::path::Path::new(PARITY_SNAPSHOT);
+    if !snapshot.exists() {
+        eprintln!(
+            "[sqlite_vec_019_reads_production_snapshot] snapshot absent at \
+             {PARITY_SNAPSHOT} — skipping (no-op in CI)"
+        );
+        return;
+    }
+
+    // open_db registers vec0 and sets WAL + FK pragmas.
+    let conn = db::open_db(snapshot)
+        .unwrap_or_else(|e| panic!("db::open_db({PARITY_SNAPSHOT}) failed: {e}"));
+
+    // (a) COUNT(*) — must not error with "no such module: vec0" or similar.
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM vec_memories", [], |row| row.get(0))
+        .unwrap_or_else(|e| {
+            panic!(
+                "COUNT(*) FROM vec_memories failed — possible vec0 version \
+                 mismatch between vendored 0.1.9 and snapshot: {e}"
+            )
+        });
+
+    // (b) The snapshot is known to have 24,000 rows (written by production
+    //     memory_sidecar).  Assert >= 1 as a loose lower-bound (tolerates
+    //     future growth) but also assert the known exact value while the
+    //     snapshot is pinned.
+    assert!(
+        count > 0,
+        "vec_memories must have at least one row in the snapshot, got {count}"
+    );
+    assert_eq!(
+        count, 24_000,
+        "expected 24,000 rows in production snapshot vec_memories, got {count}"
+    );
+
+    // (c) Read one embedding blob and unpack to f32s.
+    let raw_blob: Vec<u8> = conn
+        .query_row(
+            "SELECT embedding FROM vec_memories LIMIT 1",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "SELECT embedding FROM vec_memories LIMIT 1 failed: {e}"
+            )
+        });
+
+    let floats = db::unpack_f32_le(&raw_blob);
+    assert_eq!(
+        floats.len(),
+        384,
+        "embedding must decode to 384 f32s, got {} (blob len={})",
+        floats.len(),
+        raw_blob.len()
+    );
+
+    // Sanity-check: at least one float must be non-zero (no all-zeros sentinel).
+    let nonzero = floats.iter().any(|&f| f != 0.0);
+    assert!(nonzero, "embedding must contain at least one non-zero value");
+
+    eprintln!(
+        "[sqlite_vec_019_reads_production_snapshot] PASS — \
+         {count} rows read; first embedding [{:.6}, {:.6}, ..., {:.6}]",
+        floats[0], floats[1], floats[383]
+    );
+}
