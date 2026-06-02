@@ -53,6 +53,7 @@ anyhow      = "1"
 # Structured logging.
 tracing             = "0.1"
 tracing-subscriber  = { version = "0.3", features = ["env-filter", "fmt"] }
+lru = "0.18.0"
 
 [build-dependencies]
 # Compiles the vendored sqlite-vec 0.1.6 amalgamation into the binary.

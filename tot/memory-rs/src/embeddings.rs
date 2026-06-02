@@ -196,7 +196,7 @@ mod tests {
 
     // H1: embed() returns Vec<f32> of exactly EMBEDDING_DIM length.
     #[tokio::test]
-    async fn happy_returns_vec_len_768() {
+    async fn happy_returns_vec_len_embedding_dim() {
         let response_vec: Vec<f32> = (0..EMBEDDING_DIM).map(|i| i as f32 * 0.001).collect();
         let (base_url, _captured) = spawn_embed_mock(response_vec.clone()).await;
 
@@ -351,7 +351,7 @@ mod tests {
         }
     }
 
-    // E3: Wrong dimension (5 instead of 768) → EmbedError::DimMismatch{got:5,expected:768}.
+    // E3: Wrong dimension (5 instead of EMBEDDING_DIM=384) → EmbedError::DimMismatch{got:5,expected:384}.
     //     This is the variant that the search route treats as 503 (loud failure)
     //     while the write route treats as graceful degradation (NULL vec).
     #[tokio::test]

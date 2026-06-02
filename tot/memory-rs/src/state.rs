@@ -32,7 +32,8 @@ impl AppState {
     /// Field mapping (v0.2.1 re-target):
     /// - `Settings::db_path` → `AppState::data_dir` (parent dir; kept for future per-bot routing)
     /// - `Settings::embed_endpoint` → `EmbedConfig::url`
-    /// - `EmbedConfig::model` stubbed to empty string (v0.2.1 embed service is model-implicit)
+    /// - `EmbedConfig::model` is `"embedding"` (parity with Python `EmbeddingClient` which always
+    ///   sends `{"model": "embedding"}` — the llama.cpp server accepts any string here)
     /// - `EmbedConfig::api_key` stubbed to empty string (no key required by the local stub)
     pub fn from_settings(s: &crate::config::Settings) -> Self {
         AppState {
@@ -45,7 +46,7 @@ impl AppState {
                 .unwrap_or_else(|| s.db_path.clone()),
             embed: EmbedConfig {
                 url: s.embed_endpoint.clone(),
-                model: String::new(),
+                model: "embedding".to_owned(),
                 api_key: String::new(),
             },
         }
