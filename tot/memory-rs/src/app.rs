@@ -39,6 +39,7 @@ use axum::{
 use crate::{
     mcp,
     routes::{
+        events,
         goals,
         health::health,
         memory,
@@ -75,6 +76,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/goals/complete",           post(goals::complete))
         // Goals read-by-id (wildcard last).
         .route("/goals/:goal_id",           get(goals::read))
+        // SSE event stream.
+        .route("/v1/events/stream",         get(events::stream_events))
         .with_state(state.clone());
 
     // Mount MCP only when a token store was loaded (matching Python's conditional).

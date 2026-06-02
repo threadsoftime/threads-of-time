@@ -75,6 +75,11 @@ uuid        = { version = "1", features = ["v4"] }
 # YAML parsing — used by TokenStore (auth.rs) to load tokens.yaml.
 serde_yaml  = "0.9"
 
+# Async stream macro — used by the SSE route to build a Stream from async code.
+async-stream = "0.3"
+# Stream utilities — used by SSE route for Stream trait + StreamExt in tests.
+futures-util  = "0.3"
+
 [build-dependencies]
 # Compiles the vendored sqlite-vec 0.1.6 amalgamation into the binary.
 cc = "1"

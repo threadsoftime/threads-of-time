@@ -508,8 +508,9 @@ impl MemoryService {
         let embedding_owned = embedding.clone();
 
         // Step 2: All blocking DB work.
-        let (memory_id, evicted, salience_clamped) =
-            tokio::task::spawn_blocking(move || -> Result<(String, usize, f32), crate::error::AppError> {
+        // Returns (memory_id, row_id, evicted, salience_clamped).
+        let (memory_id, row_id, evicted, salience_clamped) =
+            tokio::task::spawn_blocking(move || -> Result<(String, i64, usize, f32), crate::error::AppError> {
                 let conn = db::open_db(&db_path)?;
 
                 let now = SystemTime::now()
@@ -564,6 +565,9 @@ impl MemoryService {
                         req_owned.source,
                     ],
                 )?;
+                // Capture the rowid immediately after INSERT (before any other inserts
+                // might change last_insert_rowid).  Used as the SSE event id cursor.
+                let inserted_row_id = conn.last_insert_rowid();
 
                 // (e) INSERT INTO vec_memories.
                 if !embedding_owned.is_empty() {
@@ -602,7 +606,7 @@ impl MemoryService {
                 // (i) Commit.
                 conn.execute_batch("COMMIT")?;
 
-                Ok((memory_id, evicted, salience))
+                Ok((memory_id, inserted_row_id, evicted, salience))
             })
             .await
             .map_err(|join_err| {
@@ -611,6 +615,7 @@ impl MemoryService {
 
         // Step 3: publish (fire-and-forget; never propagates error).
         let row = PubSubRow {
+            row_id,
             memory_id: memory_id.clone(),
             bot_id: req.bot_id,
             text: req.text,

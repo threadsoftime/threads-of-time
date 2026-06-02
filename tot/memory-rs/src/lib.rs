@@ -23,4 +23,5 @@ pub mod mcp;
 pub mod pubsub;
 pub mod retrieval;
 pub mod routes;
+pub mod sse_format;
 pub mod state;
