@@ -50,8 +50,13 @@ use crate::{
 
 /// Build the axum [`Router`] with [`AppState`] injected.
 ///
+/// `allowed_hosts` is forwarded to `mcp::build_mcp_service` →
+/// `StreamableHttpServerConfig::with_allowed_hosts`.  Pass an empty `Vec` to
+/// disable host-validation in tests; production passes the list built from
+/// `["127.0.0.1", "localhost", <bind_host>]` + `MEM_EXTRA_ALLOWED_HOSTS`.
+///
 /// Mounts the MCP endpoint at `/mcp/mcp` when `state.token_store` is `Some`.
-pub fn build_router(state: AppState) -> Router {
+pub fn build_router(state: AppState, allowed_hosts: Vec<String>) -> Router {
     let rest = Router::new()
         // Liveness probe.
         .route("/health", get(health))
@@ -81,12 +86,10 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state.clone());
 
     // Mount MCP only when a token store was loaded (matching Python's conditional).
-    // `allowed_hosts` is empty → host-check disabled (the live container runs
-    // behind a reverse proxy or directly on the host; the proxy handles host).
     if let Some(token_store) = state.token_store.clone() {
         let mcp_svc = mcp::build_mcp_service(
             state.service.clone(),
-            vec![],
+            allowed_hosts,
             token_store,
         );
         rest.nest_service("/mcp/mcp", mcp_svc)

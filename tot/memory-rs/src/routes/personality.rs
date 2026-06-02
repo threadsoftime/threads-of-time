@@ -135,7 +135,7 @@ mod tests {
         let weights = ScoringWeights { w_rel: 0.5, w_rec: 0.2, w_imp: 0.3, tau_seconds: 604800 };
         let svc = Arc::new(MemoryService::new(tmp.path().to_path_buf(), weights, 2000, embed, pubsub.clone()));
         let state = crate::state::AppState::for_test(svc, pubsub);
-        let router = crate::app::build_router(state);
+        let router = crate::app::build_router(state, vec![]);  // disable host check in tests
         (router, tmp)
     }
 

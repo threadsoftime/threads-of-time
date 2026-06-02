@@ -27,6 +27,10 @@ pub enum GoalOutcomeEnum {
 
 /// Args for `memory.write`.
 ///
+/// Exact parity with Python `MemoryWriteArgs` in `tool_schemas.py`:
+/// `bot_id`, `text`, `salience`, `entities`, `relations` — NO `memory_type` or `source`.
+/// The handler hardcodes `memory_type: None, source: None` in the internal `WriteReq`.
+///
 /// `relations` is a list of JSON objects with `src`, `rel`, `dst` keys.
 /// Typed as `Vec<Value>` to accept arbitrary shapes (Python uses `list[dict[str,str]]`).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

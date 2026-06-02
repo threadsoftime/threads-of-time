@@ -11,7 +11,6 @@
 //! stream before macro expansion.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use rmcp::{
     ServerHandler,
@@ -22,7 +21,6 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use serde_json::{Map, Value};
-use uuid::Uuid;
 
 use crate::auth::TokenRecord;
 use crate::core::{
@@ -173,20 +171,6 @@ pub fn strip_top_level_nulls(obj: Value) -> Value {
         }
         other => other,
     }
-}
-
-#[allow(dead_code)]
-fn unix_now_f64() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
-
-#[allow(dead_code)]
-fn gen_request_id() -> String {
-    let id = Uuid::new_v4().simple().to_string();
-    format!("mcp_{}", &id[..12])
 }
 
 /// Serialize a value to JSON string; fallback on error.

@@ -31,17 +31,13 @@ use handler::MemoryMcp;
 /// - On valid bearer: injects `auth::TokenRecord` into request extensions.
 /// - Forwards to `StreamableHttpService<MemoryMcp>` in stateful mode.
 ///
-/// Mount in `app::build_router` with:
-/// ```ignore
-/// if let Some(ts) = state.token_store.clone() {
-///     let svc = mcp::build_mcp_service(Arc::clone(&state.service), vec![], ts);
-///     app = app.nest_service("/mcp/mcp", svc);
-/// }
-/// ```
+/// Called from `app::build_router` (which receives the list from `main.rs`).
 ///
 /// `allowed_hosts`: passed to `StreamableHttpServerConfig::with_allowed_hosts`.
 /// Pass an empty `Vec` to disable host validation (tests); in production pass
-/// `["127.0.0.1", "localhost"]` or the external host.
+/// `["127.0.0.1", "localhost", <bind_host>]` + `MEM_EXTRA_ALLOWED_HOSTS` entries.
+/// The brain connects via `192.168.1.3:8090`; the Quadlet must set
+/// `MEM_EXTRA_ALLOWED_HOSTS=192.168.1.3:8090,192.168.1.3` to admit that Host header.
 pub fn build_mcp_service(
     service:       Arc<MemoryService>,
     allowed_hosts: Vec<String>,
@@ -247,6 +243,102 @@ mod tests {
         // This test just asserts the API surface compiles.
         // The actual 15-tool count test is in handler::tests.
         let _ = Value::Null; // prevent dead_code on the Value import
+    }
+
+    // ── test 7: allowed_hosts — LAN IP accepted, random host rejected ─────────
+    //
+    // Validates FIX 2 (CRITICAL-2): the dns-rebind guard must ACCEPT the brain's
+    // `Host: 192.168.1.3:8090` and REJECT an arbitrary unknown host.
+    //
+    // rmcp's allowed-hosts middleware fires before auth (it returns 403 without
+    // reading the body).  We can exercise it via axum `oneshot` with a custom
+    // Host header.  The bearer token is still required for 401 checks to pass,
+    // so here we confirm:
+    //   - LAN IP host + valid bearer  → NOT 403 (auth layer responds instead, 200 or 401 etc.)
+    //   - Unknown host + valid bearer → 403
+    //
+    // Note: when allowed_hosts is EMPTY the middleware is disabled (harness + tests use
+    // this path), so we build a separate service with the LAN IP explicitly allowed.
+
+    async fn make_app_with_allowed_hosts(token: &str, allowed_hosts: Vec<String>) -> Router {
+        let (service, _db) = make_service().await;
+        let token_store = make_token_store_with(token, "test.user");
+        let svc = super::build_mcp_service(
+            Arc::clone(&service),
+            allowed_hosts,
+            Arc::clone(&token_store),
+        );
+        Router::new().nest_service("/mcp/mcp", svc)
+    }
+
+    #[tokio::test]
+    async fn lan_ip_host_not_rejected_when_in_allowed_list() {
+        // Build with the LAN IP in the allowed list (mirrors Quadlet config).
+        let allowed = vec![
+            "127.0.0.1".to_string(),
+            "localhost".to_string(),
+            "192.168.1.3:8090".to_string(),
+            "192.168.1.3".to_string(),
+        ];
+        let app = make_app_with_allowed_hosts("dev-all", allowed).await;
+
+        let body = json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {},
+            "id": 1,
+        });
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/mcp/mcp")
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .header("Authorization", "Bearer dev-all")
+            .header("Host", "192.168.1.3:8090")  // LAN IP — must NOT be 403
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "LAN IP host must not be rejected (was 403); brain would be blocked at deploy"
+        );
+    }
+
+    #[tokio::test]
+    async fn random_host_rejected_when_allowed_list_non_empty() {
+        // Build with the LAN IP in the allowed list.
+        let allowed = vec![
+            "127.0.0.1".to_string(),
+            "localhost".to_string(),
+            "192.168.1.3:8090".to_string(),
+            "192.168.1.3".to_string(),
+        ];
+        let app = make_app_with_allowed_hosts("dev-all", allowed).await;
+
+        let body = json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {},
+            "id": 1,
+        });
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("/mcp/mcp")
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .header("Authorization", "Bearer dev-all")
+            .header("Host", "evil.attacker.example.com")  // NOT in allowed list
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "Unknown host must be rejected with 403 by dns-rebind protection"
+        );
     }
 
 }

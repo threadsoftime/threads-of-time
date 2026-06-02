@@ -736,13 +736,18 @@ impl MemoryService {
             let conn = db::open_db(&db_path)?;
 
             // Check existence first (mirrors Python 404 guard).
-            let exists: bool = conn
+            // Use OptionalExtension to propagate real DB errors; only QueryReturnedNoRows
+            // becomes None (i.e. "not found → return updated:false").
+            use rusqlite::OptionalExtension as _;
+            let exists = conn
                 .query_row(
                     "SELECT 1 FROM memories WHERE id=?1 AND bot_id=?2",
                     rusqlite::params![req.memory_id, req.bot_id],
                     |_| Ok(true),
                 )
-                .unwrap_or(false);
+                .optional()
+                .map_err(crate::error::AppError::Db)?
+                .is_some();
 
             if !exists {
                 return Ok(UpdateResp { updated: false, re_embedded: false });
@@ -1022,17 +1027,17 @@ impl MemoryService {
             let mut extra_where: Vec<&'static str> = Vec::new();
             let mut extra_params: Vec<SqlValue> = Vec::new();
 
-            if req.since_ts.is_some() {
+            if let Some(since) = req.since_ts {
                 extra_where.push("AND created_ts >= ?");
-                extra_params.push(SqlValue::Integer(req.since_ts.unwrap()));
+                extra_params.push(SqlValue::Integer(since));
             }
-            if req.until_ts.is_some() {
+            if let Some(until) = req.until_ts {
                 extra_where.push("AND created_ts <= ?");
-                extra_params.push(SqlValue::Integer(req.until_ts.unwrap()));
+                extra_params.push(SqlValue::Integer(until));
             }
-            if req.memory_type.is_some() {
+            if let Some(ref mt) = req.memory_type {
                 extra_where.push("AND memory_type = ?");
-                extra_params.push(SqlValue::Text(req.memory_type.clone().unwrap()));
+                extra_params.push(SqlValue::Text(mt.clone()));
             }
 
             let where_fragment = extra_where.join(" ");

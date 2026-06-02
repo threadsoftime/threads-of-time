@@ -97,6 +97,14 @@ pub struct Settings {
     pub bind_port: u16,
     /// Directory that contains the SQLite migration `.sql` files.
     pub migrations_dir: PathBuf,
+    /// Additional hosts (beyond `127.0.0.1`, `localhost`, and `bind_host`) that
+    /// the MCP DNS-rebind protection will accept in the HTTP `Host` header.
+    ///
+    /// Read from `MEM_EXTRA_ALLOWED_HOSTS` (comma-separated; default empty).
+    /// At deploy the Quadlet sets:
+    ///   `MEM_EXTRA_ALLOWED_HOSTS=192.168.1.3:8090,192.168.1.3`
+    /// so the brain connecting via the LAN IP is not 403-rejected.
+    pub extra_allowed_hosts: Vec<String>,
 }
 
 impl Settings {
@@ -168,6 +176,15 @@ impl Settings {
         let recency_basis_str = parse_or("MEM_W_REC_TIMESTAMP", "created")?;
         let recency_basis = recency_basis_str.parse::<RecencyBasis>()?;
 
+        // MEM_EXTRA_ALLOWED_HOSTS: comma-separated extra hosts for MCP DNS-rebind protection.
+        // e.g. "192.168.1.3:8090,192.168.1.3"  → allows the brain connecting via LAN IP.
+        let extra_allowed_hosts: Vec<String> = get("MEM_EXTRA_ALLOWED_HOSTS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
         Ok(Settings {
             db_path: PathBuf::from(parse_or("MEM_DB_PATH", "/var/memory/db.sqlite")?),
             embed_endpoint: parse_or("MEM_EMBED_ENDPOINT", "http://127.0.0.1:8081")?,
@@ -184,6 +201,7 @@ impl Settings {
             bind_host: parse_or("MEM_BIND_HOST", "0.0.0.0")?,
             bind_port: parse_u16("MEM_BIND_PORT", 8090)?,
             migrations_dir,
+            extra_allowed_hosts,
         })
     }
 }
@@ -324,6 +342,43 @@ mod tests {
         ])))
         .expect("build");
         assert_eq!(s.token_store, None, "empty string → None");
+    }
+
+    // ---------------------------------------------------------------------------
+    // extra_allowed_hosts parsing
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn extra_allowed_hosts_empty_by_default() {
+        let s = Settings::build(getter(empty())).expect("build");
+        assert!(
+            s.extra_allowed_hosts.is_empty(),
+            "extra_allowed_hosts must be empty when MEM_EXTRA_ALLOWED_HOSTS is absent"
+        );
+    }
+
+    #[test]
+    fn extra_allowed_hosts_parses_comma_separated() {
+        let s = Settings::build(getter(HashMap::from([
+            ("MEM_EXTRA_ALLOWED_HOSTS", "192.168.1.3:8090,192.168.1.3"),
+        ])))
+        .expect("build");
+        assert_eq!(
+            s.extra_allowed_hosts,
+            vec!["192.168.1.3:8090".to_string(), "192.168.1.3".to_string()],
+        );
+    }
+
+    #[test]
+    fn extra_allowed_hosts_trims_whitespace() {
+        let s = Settings::build(getter(HashMap::from([
+            ("MEM_EXTRA_ALLOWED_HOSTS", " 192.168.1.3:8090 , 192.168.1.3 "),
+        ])))
+        .expect("build");
+        assert_eq!(
+            s.extra_allowed_hosts,
+            vec!["192.168.1.3:8090".to_string(), "192.168.1.3".to_string()],
+        );
     }
 
     // ---------------------------------------------------------------------------

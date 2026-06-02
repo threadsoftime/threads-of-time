@@ -111,8 +111,22 @@ async fn main() {
     }
 
     let bind_addr = format!("{}:{}", settings.bind_host, settings.bind_port);
+
+    // Build MCP allowed-hosts list (mirrors harness-rs main.rs):
+    // Always allow loopback + the bind-host, then append MEM_EXTRA_ALLOWED_HOSTS entries.
+    // The Quadlet sets MEM_EXTRA_ALLOWED_HOSTS=192.168.1.3:8090,192.168.1.3 so the brain
+    // (connecting via LAN IP Host header) is not 403-rejected by DNS-rebind protection.
+    let mut allowed_hosts = vec![
+        "127.0.0.1".to_string(),
+        "localhost".to_string(),
+        settings.bind_host.clone(),
+    ];
+    for h in &settings.extra_allowed_hosts {
+        allowed_hosts.push(h.clone());
+    }
+
     let state = AppState { service, token_store, pubsub };
-    let app = build_router(state);
+    let app = build_router(state, allowed_hosts);
 
     let listener = TcpListener::bind(&bind_addr).await.unwrap_or_else(|e| {
         eprintln!("[memory-rs] failed to bind {bind_addr}: {e}");

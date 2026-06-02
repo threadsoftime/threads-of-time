@@ -52,7 +52,7 @@ fn test_state() -> AppState {
 
 #[tokio::test]
 async fn health_returns_200_with_ok_true() {
-    let app = build_router(test_state());
+    let app = build_router(test_state(), vec![]);  // disable host check in tests
 
     let response = app
         .oneshot(

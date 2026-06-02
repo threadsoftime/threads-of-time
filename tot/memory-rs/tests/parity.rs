@@ -299,7 +299,7 @@ fn make_rust_state(db_path: PathBuf, embed_url: &str) -> AppState {
 
 /// Issue a POST request via tower::oneshot and return `(status, body)`.
 async fn rust_post(state: AppState, path: &str, body: &Value) -> (u16, Value) {
-    let app = build_router(state);
+    let app = build_router(state, vec![]);  // disable host check in tests
     let bytes = serde_json::to_vec(body).expect("serialize request body");
     let req = Request::builder()
         .method("POST")
