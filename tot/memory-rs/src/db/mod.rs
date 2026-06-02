@@ -16,6 +16,7 @@
 //! `extern "C"` declaration matches the sqlite-vec 0.1.6 ABI exactly; no
 //! transmute is required or used.
 
+pub mod entities;
 pub mod migrate;
 
 use std::ffi::c_int;
