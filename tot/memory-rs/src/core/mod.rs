@@ -448,9 +448,11 @@ pub struct MemoryService {
     pub(crate) embed: Arc<EmbedCache>,
     pub(crate) pubsub: Arc<PubSub>,
     /// MMR λ trade-off: 1.0 = pure relevance, 0.0 = pure diversity.
-    pub(crate) mmr_lambda: f64,
+    /// Public so that `main.rs` (a separate binary crate) can set it from Settings.
+    pub mmr_lambda: f64,
     /// Which timestamp drives the recency component.
-    pub(crate) recency_basis: RecencyBasis,
+    /// Public so that `main.rs` (a separate binary crate) can set it from Settings.
+    pub recency_basis: RecencyBasis,
 }
 
 impl MemoryService {

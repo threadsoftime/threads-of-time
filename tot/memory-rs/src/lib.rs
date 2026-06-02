@@ -11,6 +11,7 @@
 pub const EMBEDDING_DIM: usize = 384;
 
 pub mod app;
+pub mod auth;
 pub mod config;
 pub mod core;
 pub mod db;
