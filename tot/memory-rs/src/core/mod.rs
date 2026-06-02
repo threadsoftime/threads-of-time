@@ -303,6 +303,11 @@ pub struct RecallAboutResp {
 }
 
 // ---------------------------------------------------------------------------
+// Task 5.1 — personality types (no separate structs needed; service methods
+// take primitive arguments and return Option<String> / unit)
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // MemoryService
 // ---------------------------------------------------------------------------
 
@@ -1586,6 +1591,85 @@ impl MemoryService {
                 .collect();
 
             Ok(SearchResp { items, total_candidates })
+        })
+        .await
+        .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!("spawn_blocking panicked: {e}")))?
+    }
+
+    // -----------------------------------------------------------------------
+    // personality_get
+    // -----------------------------------------------------------------------
+
+    /// Get the persona string for `bot_id`.
+    ///
+    /// Returns `None` if the bot row does not exist OR its `persona` column is
+    /// NULL — matching Python:
+    /// ```python
+    /// if not row or row[0] is None:
+    ///     raise HTTPException(status_code=404, detail="no persona for this bot")
+    /// ```
+    /// The REST layer converts `None` → 404.
+    pub async fn personality_get(
+        &self,
+        bot_id: &str,
+    ) -> Result<Option<String>, crate::error::AppError> {
+        let db_path = self.db_path.clone();
+        let bot_id = bot_id.to_owned();
+
+        tokio::task::spawn_blocking(move || -> Result<Option<String>, crate::error::AppError> {
+            let conn = db::open_db(&db_path)?;
+            use rusqlite::OptionalExtension;
+            // Two-level Option: outer = row existence, inner = NULL persona.
+            let row: Option<Option<String>> = conn
+                .query_row(
+                    "SELECT persona FROM bots WHERE bot_id=?1",
+                    rusqlite::params![bot_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            // Flatten: None row or None persona → both return None.
+            Ok(row.flatten())
+        })
+        .await
+        .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!("spawn_blocking panicked: {e}")))?
+    }
+
+    // -----------------------------------------------------------------------
+    // personality_set
+    // -----------------------------------------------------------------------
+
+    /// UPSERT the persona for `bot_id`.
+    ///
+    /// Enforces a 4000-character cap matching Python `PERSONA_MAX_CHARS = 4000`.
+    /// Returns `AppError::BadRequest` when exceeded.
+    ///
+    /// SQL: `INSERT INTO bots … ON CONFLICT(bot_id) DO UPDATE SET persona=excluded.persona`
+    pub async fn personality_set(
+        &self,
+        bot_id: &str,
+        persona: String,
+    ) -> Result<(), crate::error::AppError> {
+        const PERSONA_MAX_CHARS: usize = 4000;
+        if persona.len() > PERSONA_MAX_CHARS {
+            return Err(crate::error::AppError::BadRequest(format!(
+                "persona exceeds {PERSONA_MAX_CHARS} chars"
+            )));
+        }
+        let db_path = self.db_path.clone();
+        let bot_id = bot_id.to_owned();
+
+        tokio::task::spawn_blocking(move || -> Result<(), crate::error::AppError> {
+            let conn = db::open_db(&db_path)?;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            conn.execute(
+                "INSERT INTO bots (bot_id, persona, created_ts) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(bot_id) DO UPDATE SET persona=excluded.persona",
+                rusqlite::params![bot_id, persona, now],
+            )?;
+            Ok(())
         })
         .await
         .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!("spawn_blocking panicked: {e}")))?
@@ -3267,5 +3351,105 @@ mod tests {
             "filter must exclude out-of-window memory");
         assert_eq!(resp.items[0].memory_id, "m_sf_in",
             "only in-window memory must be returned");
+    }
+
+    // =======================================================================
+    // Task 5.1 — personality tests
+    // =======================================================================
+
+    // -----------------------------------------------------------------------
+    // P1: set then get round-trip.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn personality_set_then_get_round_trip() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        open_and_migrate(tmp.path());
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        svc.personality_set("bot_pers1", "I am Athena, the war-witch.".to_owned())
+            .await
+            .expect("set must succeed");
+
+        let persona = svc.personality_get("bot_pers1").await.expect("get must succeed");
+        assert_eq!(
+            persona.as_deref(),
+            Some("I am Athena, the war-witch."),
+            "round-trip must return the set persona"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // P2: get unknown bot → None.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn personality_get_unknown_bot_returns_none() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        open_and_migrate(tmp.path());
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let result = svc.personality_get("no_such_bot").await.expect("get must not error");
+        assert!(result.is_none(), "unknown bot must return None");
+    }
+
+    // -----------------------------------------------------------------------
+    // P3: set overwrites an existing persona (UPSERT).
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn personality_set_overwrites_existing() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        open_and_migrate(tmp.path());
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        svc.personality_set("bot_pers2", "first persona".to_owned())
+            .await
+            .expect("first set");
+        svc.personality_set("bot_pers2", "second persona".to_owned())
+            .await
+            .expect("second set");
+
+        let result = svc.personality_get("bot_pers2").await.expect("get");
+        assert_eq!(result.as_deref(), Some("second persona"), "UPSERT must overwrite");
+    }
+
+    // -----------------------------------------------------------------------
+    // P4: persona > 4000 chars → BadRequest.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn personality_set_exceeds_4000_chars_returns_bad_request() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        open_and_migrate(tmp.path());
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let long_persona = "x".repeat(4001);
+        let err = svc.personality_set("bot_pers3", long_persona).await;
+        assert!(
+            matches!(err, Err(crate::error::AppError::BadRequest(_))),
+            "persona > 4000 chars must be BadRequest"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // P5: persona of exactly 4000 chars is accepted.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn personality_set_exactly_4000_chars_accepted() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        open_and_migrate(tmp.path());
+
+        let embed_url = spawn_embed_stub(vec![0.1_f32; EMBEDDING_DIM]).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let persona = "a".repeat(4000);
+        svc.personality_set("bot_pers4", persona.clone()).await.expect("4000 chars must succeed");
+        let result = svc.personality_get("bot_pers4").await.expect("get").unwrap();
+        assert_eq!(result.len(), 4000, "4000-char persona must be stored intact");
     }
 }
