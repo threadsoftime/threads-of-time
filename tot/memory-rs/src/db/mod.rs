@@ -1,4 +1,4 @@
-//! Database helpers: per-bot connection management and vec0 auto-extension.
+//! Database helpers: monolithic connection management and vec0 auto-extension.
 //!
 //! # Extension registration
 //!
@@ -6,7 +6,7 @@
 //! [`rusqlite::Connection`] is opened. It registers `sqlite3_vec_init` as a
 //! SQLite auto-extension.
 //! `register_vec0()` is idempotent — it uses a `std::sync::Once` guard so
-//! it is safe to call from every `open_bot_db` invocation (production and
+//! it is safe to call from every `open_db` invocation (production and
 //! tests). The underlying `sqlite3_auto_extension` call only fires on the
 //! first call per process.
 //!
@@ -60,32 +60,60 @@ pub fn register_vec0() {
     });
 }
 
-/// Open (or create) the per-bot SQLite database.
+/// Open (or create) the monolithic SQLite database at `path`.
 ///
-/// Creates `data_dir/<bot_guid>/` if it does not exist, then opens
-/// `data_dir/<bot_guid>/memory.sqlite` in WAL mode with foreign keys on.
-/// Calls `register_vec0()` (idempotent) at the top to guarantee the `vec0`
-/// module is available on the returned connection — whether called from main,
-/// a route handler, or a test that opens a DB directly.
-pub fn open_bot_db(data_dir: &Path, bot_guid: &str) -> rusqlite::Result<rusqlite::Connection> {
+/// Calls `register_vec0()` (idempotent) to guarantee the `vec0` virtual-table
+/// module is available on the returned connection.  Sets the pragmas that
+/// match the live Python `memory_sidecar/db.py`:
+///   - `journal_mode = WAL`    — concurrent readers, single writer, no fsync on every write
+///   - `synchronous  = NORMAL` — flush on checkpoint only (matches Python default)
+///   - `foreign_keys = ON`     — enforce FK constraints (Rust adds this; Python omits it)
+///
+/// The caller is responsible for running [`migrate::run`] after opening if the
+/// DB is new or may be at an older schema version.
+pub fn open_db(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
     register_vec0();
-    let bot_dir = data_dir.join(bot_guid);
-    std::fs::create_dir_all(&bot_dir).map_err(|e| {
-        rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error {
-                code: rusqlite::ffi::ErrorCode::CannotOpen,
-                extended_code: 0,
-            },
-            Some(format!("create_dir_all {}: {e}", bot_dir.display())),
-        )
-    })?;
-
-    let db_path = bot_dir.join("memory.sqlite");
-    let conn = rusqlite::Connection::open(&db_path)?;
-
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-
+    let conn = rusqlite::Connection::open(path)?;
+    // Use PRAGMA … = … form for journal_mode so WAL handshake is performed.
+    // Use execute_batch for the remaining two; order matters: WAL first.
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
+    )?;
     Ok(conn)
+}
+
+/// Encode a slice of `f32` values as a little-endian byte blob.
+///
+/// Parity with Python `helpers.py`:
+/// ```python
+/// def embedding_to_blob(vec: np.ndarray) -> bytes:
+///     return vec.astype(np.float32).tobytes()
+/// ```
+/// `numpy.ndarray.tobytes()` uses the array's memory layout; float32 arrays on
+/// x86/ARM are always little-endian.  `f32::to_le_bytes()` produces the same
+/// 4-byte representation.
+///
+/// This is the canonical storage encoding for `vec_memories.embedding`.
+pub fn pack_f32_le(v: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(v.len() * 4);
+    for &x in v {
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+    out
+}
+
+/// Decode a little-endian byte blob back into a `Vec<f32>`.
+///
+/// Inverse of [`pack_f32_le`].  `b.len()` must be a multiple of 4; trailing
+/// bytes (if `b.len() % 4 != 0`) are silently ignored (same as `numpy.frombuffer`
+/// behaviour when the buffer is already aligned).
+pub fn unpack_f32_le(b: &[u8]) -> Vec<f32> {
+    b.chunks_exact(4)
+        .map(|chunk| {
+            let arr: [u8; 4] = chunk.try_into().expect("chunk_exact guarantees 4 bytes");
+            f32::from_le_bytes(arr)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -122,7 +150,7 @@ mod tests {
 
         // Pack 768 f32 values as little-endian bytes.
         let v: Vec<f32> = (0..768).map(|i| i as f32 / 768.0).collect();
-        let bytes: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+        let bytes = pack_f32_le(&v);
 
         conn.execute(
             "INSERT INTO vecs(rowid, embedding) VALUES (1, ?1)",
@@ -146,45 +174,31 @@ mod tests {
         );
     }
 
-    /// open_bot_db creates the directory tree and the database file.
+    /// open_db creates the database file at the given path.
     #[test]
-    fn creates_directory_and_file() {
-        register_vec0();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let data_dir = tmp.path();
-        let bot_guid = "bot_12345";
-
-        let _conn = open_bot_db(data_dir, bot_guid).expect("open_bot_db");
-
-        let db_path = data_dir.join(bot_guid).join("memory.sqlite");
-        assert!(
-            db_path.exists(),
-            "memory.sqlite must exist at {db_path:?}"
-        );
+    fn creates_db_file() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let _conn = open_db(tmp.path()).expect("open_db");
+        assert!(tmp.path().exists(), "DB file must exist at given path");
     }
 
-    /// open_bot_db sets journal_mode=WAL on the connection.
+    /// open_db sets journal_mode=WAL on the connection.
     #[test]
     fn pragma_journal_mode_wal() {
-        register_vec0();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let conn = open_bot_db(tmp.path(), "bot_wal_test").expect("open_bot_db");
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let conn = open_db(tmp.path()).expect("open_db");
 
         let mode: String = conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .expect("PRAGMA journal_mode");
-        assert_eq!(
-            mode, "wal",
-            "journal_mode must be 'wal', got '{mode}'"
-        );
+        assert_eq!(mode, "wal", "journal_mode must be 'wal', got '{mode}'");
     }
 
-    /// open_bot_db enables foreign-key enforcement.
+    /// open_db enables foreign-key enforcement.
     #[test]
     fn pragma_foreign_keys_on() {
-        register_vec0();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let conn = open_bot_db(tmp.path(), "bot_fk_test").expect("open_bot_db");
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let conn = open_db(tmp.path()).expect("open_db");
 
         let fk: i64 = conn
             .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
@@ -192,39 +206,35 @@ mod tests {
         assert_eq!(fk, 1, "foreign_keys must be ON (1), got {fk}");
     }
 
-    /// Calling open_bot_db twice on the same bot_guid is idempotent
-    /// (the directory and file already exist — no error).
+    /// Calling open_db twice on the same path is idempotent (file already
+    /// exists — no error).
     #[test]
     fn idempotent_second_open() {
-        register_vec0();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let data_dir = tmp.path();
-        open_bot_db(data_dir, "bot_idem").expect("first open");
-        open_bot_db(data_dir, "bot_idem").expect("second open must not error");
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        open_db(tmp.path()).expect("first open");
+        open_db(tmp.path()).expect("second open must not error");
     }
 
-    /// open_bot_db creates the directory and opens a WAL-mode connection.
+    /// pack_f32_le / unpack_f32_le round-trip: exact f32 bit-pattern identity.
     #[test]
-    fn open_bot_db_creates_dir_and_sets_wal() {
-        register_vec0();
+    fn pack_unpack_round_trip() {
+        let v: Vec<f32> = (0..384).map(|i| i as f32 * 0.001).collect();
+        let blob = pack_f32_le(&v);
+        assert_eq!(blob.len(), 384 * 4);
+        let decoded = unpack_f32_le(&blob);
+        assert_eq!(decoded.len(), v.len());
+        for (i, (&orig, &dec)) in v.iter().zip(decoded.iter()).enumerate() {
+            assert_eq!(
+                orig.to_bits(), dec.to_bits(),
+                "bit mismatch at index {i}"
+            );
+        }
+    }
 
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let conn = open_bot_db(tmp.path(), "bot_1234")
-            .expect("open_bot_db must succeed");
-
-        // WAL mode: PRAGMA journal_mode returns "wal".
-        let mode: String = conn
-            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
-            .expect("pragma");
-        assert_eq!(mode, "wal", "journal_mode must be WAL");
-
-        // Foreign keys: PRAGMA foreign_keys returns 1.
-        let fk: i32 = conn
-            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
-            .expect("pragma");
-        assert_eq!(fk, 1, "foreign_keys must be ON");
-
-        // DB file must exist at the expected path.
-        assert!(tmp.path().join("bot_1234").join("memory.sqlite").exists());
+    /// pack_f32_le(1.0) == [0x00, 0x00, 0x80, 0x3F] — numpy parity.
+    #[test]
+    fn pack_f32_le_one_point_zero_numpy_parity() {
+        let blob = pack_f32_le(&[1.0_f32]);
+        assert_eq!(blob, &[0x00u8, 0x00, 0x80, 0x3F]);
     }
 }

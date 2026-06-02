@@ -191,6 +191,109 @@ fn migrate_run_creates_expected_tables() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Task 1.3 — open_db (monolithic) + vec0 f32 round-trip contracts
+// ---------------------------------------------------------------------------
+
+/// open_db opens (or creates) a single-file DB with vec0 registered,
+/// journal_mode=WAL, foreign_keys=ON, and synchronous=NORMAL.
+#[test]
+fn open_db_pragma_journal_mode_wal() {
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    let conn = db::open_db(tmp.path()).expect("open_db");
+
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .expect("PRAGMA journal_mode");
+    assert_eq!(mode, "wal", "journal_mode must be 'wal', got '{mode}'");
+}
+
+#[test]
+fn open_db_pragma_foreign_keys_on() {
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    let conn = db::open_db(tmp.path()).expect("open_db");
+
+    let fk: i64 = conn
+        .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+        .expect("PRAGMA foreign_keys");
+    assert_eq!(fk, 1, "foreign_keys must be ON (1), got {fk}");
+}
+
+/// pack_f32_le / unpack_f32_le round-trip: the decoded vector must equal the
+/// original byte-for-byte (exact f32 identity, no lossy conversion).
+#[test]
+fn pack_unpack_f32_le_round_trip() {
+    let original: Vec<f32> = (0..384).map(|i| (i as f32) * 0.001).collect();
+
+    let blob = db::pack_f32_le(&original);
+    assert_eq!(blob.len(), 384 * 4, "packed blob must be 384*4 bytes");
+
+    let decoded = db::unpack_f32_le(&blob);
+    assert_eq!(decoded.len(), original.len(), "decoded length must match");
+
+    for (i, (&orig, &dec)) in original.iter().zip(decoded.iter()).enumerate() {
+        assert_eq!(
+            orig.to_bits(),
+            dec.to_bits(),
+            "f32 bit pattern mismatch at index {i}: orig={orig}, dec={dec}"
+        );
+    }
+}
+
+/// Verifies numpy parity: pack_f32_le uses little-endian byte order,
+/// matching numpy float32.tobytes() (always little-endian on x86/arm).
+#[test]
+fn pack_f32_le_byte_order_matches_numpy() {
+    // numpy: np.float32(1.0).tobytes() == b'\x00\x00\x80?'
+    //        which is 0x3F800000 in little-endian: bytes [0x00, 0x00, 0x80, 0x3F]
+    let blob = db::pack_f32_le(&[1.0_f32]);
+    assert_eq!(
+        blob,
+        &[0x00u8, 0x00, 0x80, 0x3F],
+        "pack_f32_le(1.0) must match numpy float32.tobytes() = [0x00,0x00,0x80,0x3F]"
+    );
+}
+
+/// Full vec_memories insert + select round-trip using open_db + migrate::run.
+///
+/// This is the parity-critical test: inserts a 384-float embedding via
+/// pack_f32_le, reads it back with a plain SELECT, unpacks via unpack_f32_le,
+/// and asserts exact f32 bit-pattern equality.
+#[test]
+fn vec_memories_insert_select_roundtrip() {
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    let conn = db::open_db(tmp.path()).expect("open_db");
+    db::migrate::run(&conn, migrations_dir()).expect("migrate::run");
+
+    let original: Vec<f32> = (0..384).map(|i| (i as f32) / 384.0).collect();
+    let blob = db::pack_f32_le(&original);
+
+    conn.execute(
+        "INSERT INTO vec_memories(memory_id, bot_id, embedding) VALUES (?1, ?2, ?3)",
+        rusqlite::params!["m_test001", "bot_42", blob],
+    )
+    .expect("INSERT INTO vec_memories");
+
+    let raw: Vec<u8> = conn
+        .query_row(
+            "SELECT embedding FROM vec_memories WHERE memory_id = ?1",
+            rusqlite::params!["m_test001"],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .expect("SELECT embedding");
+
+    let decoded = db::unpack_f32_le(&raw);
+    assert_eq!(decoded.len(), 384, "decoded vector must be 384 floats");
+
+    for (i, (&orig, &dec)) in original.iter().zip(decoded.iter()).enumerate() {
+        assert_eq!(
+            orig.to_bits(),
+            dec.to_bits(),
+            "f32 bit mismatch at index {i}: orig={orig}, dec={dec}"
+        );
+    }
+}
+
 /// Partial migration: if only migrations up to version 2 have been applied,
 /// `run` must pick up versions 3, 4, 5 without re-applying 1 or 2.
 #[test]
