@@ -56,6 +56,9 @@ tracing-subscriber  = { version = "0.3", features = ["env-filter", "fmt"] }
 lru = "0.18.0"
 uuid        = { version = "1", features = ["v4"] }
 
+# YAML parsing — used by TokenStore (auth.rs) to load tokens.yaml.
+serde_yaml  = "0.9"
+
 [build-dependencies]
 # Compiles the vendored sqlite-vec 0.1.6 amalgamation into the binary.
 cc = "1"
