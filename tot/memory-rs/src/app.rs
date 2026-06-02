@@ -22,16 +22,22 @@
 //! | GET    | /goals/:goal_id              | goals::read                |
 //! | PUT    | /goals/update                | goals::update              |
 //! | POST   | /goals/complete              | goals::complete            |
+//! | POST   | /mcp/mcp                     | MCP StreamableHTTP (when token file present) |
 //!
 //! Auth note: REST routes are **not** bearer-protected — only MCP/SSE uses the
 //! TokenStore (Phase 6).  This replicates Python exactly; see `auth.rs` for
 //! rationale.
+//!
+//! MCP is mounted only when `state.token_store` is `Some` (token file found at
+//! startup).  When no token file is present, the `/mcp/mcp` path returns 404,
+//! matching Python's conditional `create_app` behaviour.
 
 use axum::{
     routing::{get, post, put},
     Router,
 };
 use crate::{
+    mcp,
     routes::{
         goals,
         health::health,
@@ -42,8 +48,10 @@ use crate::{
 };
 
 /// Build the axum [`Router`] with [`AppState`] injected.
+///
+/// Mounts the MCP endpoint at `/mcp/mcp` when `state.token_store` is `Some`.
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    let rest = Router::new()
         // Liveness probe.
         .route("/health", get(health))
         // Memory routes.
@@ -67,5 +75,19 @@ pub fn build_router(state: AppState) -> Router {
         .route("/goals/complete",           post(goals::complete))
         // Goals read-by-id (wildcard last).
         .route("/goals/:goal_id",           get(goals::read))
-        .with_state(state)
+        .with_state(state.clone());
+
+    // Mount MCP only when a token store was loaded (matching Python's conditional).
+    // `allowed_hosts` is empty → host-check disabled (the live container runs
+    // behind a reverse proxy or directly on the host; the proxy handles host).
+    if let Some(token_store) = state.token_store.clone() {
+        let mcp_svc = mcp::build_mcp_service(
+            state.service.clone(),
+            vec![],
+            token_store,
+        );
+        rest.nest_service("/mcp/mcp", mcp_svc)
+    } else {
+        rest
+    }
 }

@@ -19,6 +19,7 @@ pub mod embed_cache;
 pub mod embeddings;
 pub mod error;
 pub mod ids;
+pub mod mcp;
 pub mod pubsub;
 pub mod retrieval;
 pub mod routes;
