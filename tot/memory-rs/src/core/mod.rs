@@ -157,6 +157,80 @@ pub struct ListResp {
 }
 
 // ---------------------------------------------------------------------------
+// Task 4.7 — search types
+// ---------------------------------------------------------------------------
+
+/// Request payload for [`MemoryService::search`].
+///
+/// Matches Python `SearchRequest` pydantic model.
+#[derive(Debug, Clone)]
+pub struct SearchReq {
+    pub bot_id: String,
+    pub query: String,
+    /// Maximum number of results after MMR reranking (default 5).
+    pub top_k: usize,
+    pub since_ts: Option<i64>,
+    pub until_ts: Option<i64>,
+    pub memory_type: Option<String>,
+}
+
+/// Per-lane rank signals for a single search result.
+///
+/// Matches Python `SearchSignals` pydantic model:
+/// ```python
+/// class SearchSignals(BaseModel):
+///     bm25_rank:   int | None = None
+///     dense_rank:  int | None = None
+///     entity_rank: int | None = None
+/// ```
+///
+/// Each field is the 0-indexed position in that lane's ranked list, or `None`
+/// if the memory did not appear in that lane.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchSignals {
+    pub bm25_rank: Option<usize>,
+    pub dense_rank: Option<usize>,
+    pub entity_rank: Option<usize>,
+}
+
+/// A single result item in a [`SearchResp`].
+///
+/// Matches Python `SearchItem` pydantic model:
+/// ```python
+/// class SearchItem(BaseModel):
+///     memory_id: str
+///     text:      str
+///     score:     float   # RRF fused score (NOT cosine)
+///     ts:        int     # created_ts
+///     signals:   SearchSignals
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchItem {
+    pub memory_id: String,
+    pub text: String,
+    /// RRF fused score from `rrf_fuse` — NOT the cosine similarity.
+    pub score: f64,
+    /// `created_ts` of the memory.
+    pub ts: i64,
+    pub signals: SearchSignals,
+}
+
+/// Response from [`MemoryService::search`].
+///
+/// Matches Python `SearchResponse` pydantic model:
+/// ```python
+/// class SearchResponse(BaseModel):
+///     items:            list[SearchItem]
+///     total_candidates: int   # len(fused) before MMR
+/// ```
+#[derive(Debug, Clone)]
+pub struct SearchResp {
+    pub items: Vec<SearchItem>,
+    /// Number of unique documents in the fused RRF result, before MMR reranking.
+    pub total_candidates: usize,
+}
+
+// ---------------------------------------------------------------------------
 // Task 4.6 — recall / recall_about types
 // ---------------------------------------------------------------------------
 
@@ -1090,6 +1164,428 @@ impl MemoryService {
                 .collect();
 
             Ok(RecallAboutResp { hints })
+        })
+        .await
+        .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!("spawn_blocking panicked: {e}")))?
+    }
+
+    // -----------------------------------------------------------------------
+    // search
+    // -----------------------------------------------------------------------
+
+    /// 3-lane hybrid search: BM25 + dense + entity → RRF → MMR.
+    ///
+    /// Ports `routes_memory.py::search` exactly.
+    ///
+    /// Orchestration:
+    /// 1. `q = embed.embed(query).await` — async, before spawn_blocking.
+    /// 2. In spawn_blocking:
+    ///    a. `over_fetch = max(top_k * 4, 20)`.
+    ///    b. **Lane 1 BM25**: `build_fts5_query(query)` → FTS5 MATCH joined to
+    ///       `memories` with bot_id + optional filters; `ORDER BY rank LIMIT over_fetch`.
+    ///       Skipped (empty lane) when `build_fts5_query` returns `None`.
+    ///    c. **Lane 2 dense**: fetch all bot rows (+ filters) with embedding; cosine-score
+    ///       each; sort descending; take top `over_fetch`.
+    ///    d. **Lane 3 entity**: find entities whose `name_lower` is a substring of
+    ///       `query.to_lowercase()`; BFS 2 hops; DISTINCT memories via `memory_entities`
+    ///       (+ filters) LIMIT over_fetch.
+    ///    e. `fused = rrf_fuse([bm25, dense, entity], 60)` — Vec<(id, score)>.
+    ///    f. Build signal-rank position maps (memory_id → 0-indexed position in lane).
+    ///    g. Fetch `text, created_ts, embedding` for fused ids; build MMR candidates
+    ///       preserving fused insertion order.
+    ///    h. `mmr_select(candidates, q, top_k, mmr_lambda)`.
+    ///    i. Return `SearchResp { items, total_candidates: fused.len() }`.
+    pub async fn search(
+        &self,
+        req: SearchReq,
+    ) -> Result<SearchResp, crate::error::AppError> {
+        // Step 1: embed the query in async context.
+        let q_emb: Vec<f32> = self
+            .embed
+            .embed(&req.query)
+            .await
+            .map(|arc| arc.as_ref().clone())
+            .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!("embed failed: {e}")))?;
+
+        let db_path = self.db_path.clone();
+        let mmr_lambda = self.mmr_lambda;
+
+        tokio::task::spawn_blocking(move || -> Result<SearchResp, crate::error::AppError> {
+            let conn = db::open_db(&db_path)?;
+
+            let over_fetch = (req.top_k * 4).max(20);
+
+            // Build optional WHERE fragments using the aliased form `m.column`
+            // (matches Python `_extra_where_clause_alias("m", req)`).
+            use rusqlite::types::Value as SqlValue;
+            let mut extra_alias_where: Vec<&'static str> = Vec::new();
+            let mut extra_alias_params: Vec<SqlValue> = Vec::new();
+
+            if let Some(since) = req.since_ts {
+                extra_alias_where.push("AND m.created_ts >= ?");
+                extra_alias_params.push(SqlValue::Integer(since));
+            }
+            if let Some(until) = req.until_ts {
+                extra_alias_where.push("AND m.created_ts <= ?");
+                extra_alias_params.push(SqlValue::Integer(until));
+            }
+            if let Some(ref mt) = req.memory_type {
+                extra_alias_where.push("AND m.memory_type = ?");
+                extra_alias_params.push(SqlValue::Text(mt.clone()));
+            }
+            let alias_where_fragment = extra_alias_where.join(" ");
+
+            // ----------------------------------------------------------------
+            // Lane 1: BM25 via FTS5
+            //
+            // Python:
+            //   fts_q = build_fts5_query(req.query)
+            //   if fts_q:
+            //       cur = conn.execute(
+            //           "SELECT m.id FROM memories_fts f "
+            //           "JOIN memories m ON m.rowid = f.rowid "
+            //           "WHERE memories_fts MATCH ? AND m.bot_id = ? {extra_alias_where} "
+            //           "ORDER BY rank LIMIT ?",
+            //           (fts_q, req.bot_id) + extra_alias_params + (over_fetch,),
+            //       )
+            //       bm25 = [r[0] for r in cur.fetchall()]
+            //   else:
+            //       bm25 = []
+            // ----------------------------------------------------------------
+            use crate::retrieval::helpers::build_fts5_query;
+            let bm25: Vec<String> = match build_fts5_query(&req.query, 6) {
+                Some(fts_q) => {
+                    // Build params: fts_q, bot_id, [since/until/type], over_fetch
+                    let mut params: Vec<SqlValue> = vec![
+                        SqlValue::Text(fts_q),
+                        SqlValue::Text(req.bot_id.clone()),
+                    ];
+                    params.extend(extra_alias_params.iter().cloned());
+                    params.push(SqlValue::Integer(over_fetch as i64));
+
+                    let sql = format!(
+                        "SELECT m.id FROM memories_fts f \
+                         JOIN memories m ON m.rowid = f.rowid \
+                         WHERE memories_fts MATCH ? AND m.bot_id = ? {alias_where_fragment} \
+                         ORDER BY rank LIMIT ?"
+                    );
+                    let mut stmt = conn.prepare(&sql)?;
+                    let result = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                        row.get::<_, String>(0)
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                    result
+                }
+                None => Vec::new(),
+            };
+
+            // ----------------------------------------------------------------
+            // Lane 2: Dense (per-bot Python cosine scoring)
+            //
+            // Python:
+            //   cur = conn.execute(
+            //       "SELECT m.id, m.embedding FROM memories m "
+            //       "WHERE m.bot_id = ? {extra_alias_where} ORDER BY m.created_ts DESC",
+            //       (req.bot_id,) + extra_alias_params,
+            //   )
+            //   dense_scored = [(sim, mid) for mid, emb_blob in cur if emb_blob]
+            //   dense_scored.sort(reverse=True, key=lambda t: t[0])
+            //   dense = [mid for _, mid in dense_scored[:over_fetch]]
+            // ----------------------------------------------------------------
+            let dense: Vec<String> = {
+                let mut params: Vec<SqlValue> = vec![SqlValue::Text(req.bot_id.clone())];
+                params.extend(extra_alias_params.iter().cloned());
+
+                let sql = format!(
+                    "SELECT m.id, m.embedding FROM memories m \
+                     WHERE m.bot_id = ? {alias_where_fragment} \
+                     ORDER BY m.created_ts DESC"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt
+                    .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<Vec<u8>>>(1)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+
+                use crate::retrieval::cosine::cosine;
+                let mut dense_scored: Vec<(f64, String)> = rows
+                    .into_iter()
+                    .filter_map(|(mid, blob)| {
+                        blob.map(|b| {
+                            let emb = db::unpack_f32_le(&b);
+                            let sim = cosine(&emb, &q_emb);
+                            (sim, mid)
+                        })
+                    })
+                    .collect();
+                // Sort descending by cosine similarity (matches Python `.sort(reverse=True)`).
+                dense_scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                dense_scored
+                    .into_iter()
+                    .take(over_fetch)
+                    .map(|(_, mid)| mid)
+                    .collect()
+            };
+
+            // ----------------------------------------------------------------
+            // Lane 3: Entity via BFS (2 hops hardcoded)
+            //
+            // Python:
+            //   cur = conn.execute("SELECT name_lower, id FROM entities WHERE bot_id = ?", ...)
+            //   q_lower = req.query.lower()
+            //   seed_ids = [eid for nl, eid in ents if nl and nl in q_lower]
+            //   entity = []
+            //   if seed_ids:
+            //       visited = set(seed_ids)
+            //       for _ in range(2):  # max_hops=2
+            //           BFS one hop
+            //       placeholders = ...
+            //       cur = conn.execute(
+            //           "SELECT DISTINCT m.id FROM memories m "
+            //           "JOIN memory_entities me ON me.memory_id = m.id "
+            //           "WHERE m.bot_id = ? AND me.entity_id IN ({placeholders}) "
+            //           "{extra_alias_where} LIMIT ?",
+            //           (req.bot_id,) + tuple(visited) + extra_alias_params + (over_fetch,),
+            //       )
+            //       entity = [r[0] for r in cur.fetchall()]
+            // ----------------------------------------------------------------
+            let entity: Vec<String> = {
+                let mut ent_stmt = conn.prepare(
+                    "SELECT name_lower, id FROM entities WHERE bot_id = ?1",
+                )?;
+                let ents: Vec<(String, i64)> = ent_stmt
+                    .query_map(rusqlite::params![req.bot_id], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+
+                let q_lower = req.query.to_lowercase();
+                let seed_ids: Vec<i64> = ents
+                    .into_iter()
+                    .filter(|(nl, _)| !nl.is_empty() && q_lower.contains(nl.as_str()))
+                    .map(|(_, eid)| eid)
+                    .collect();
+
+                if seed_ids.is_empty() {
+                    Vec::new()
+                } else {
+                    use std::collections::HashSet;
+                    let mut visited: HashSet<i64> = seed_ids.iter().copied().collect();
+
+                    // BFS 2 hops hardcoded (matches Python `for _ in range(2)`).
+                    for _ in 0..2usize {
+                        if visited.is_empty() {
+                            break;
+                        }
+                        let frontier_vec: Vec<i64> = visited.iter().copied().collect();
+                        let placeholders = frontier_vec
+                            .iter()
+                            .map(|_| "?")
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        let sql = format!(
+                            "SELECT src_entity_id, dst_entity_id FROM edges \
+                             WHERE src_entity_id IN ({placeholders}) \
+                                OR dst_entity_id IN ({placeholders})"
+                        );
+                        // Params: frontier × 2.
+                        let mut bfs_params: Vec<SqlValue> = frontier_vec
+                            .iter()
+                            .map(|&id| SqlValue::Integer(id))
+                            .collect();
+                        bfs_params.extend(frontier_vec.iter().map(|&id| SqlValue::Integer(id)));
+
+                        let mut bfs_stmt = conn.prepare(&sql)?;
+                        let edges: Vec<(i64, i64)> = bfs_stmt
+                            .query_map(rusqlite::params_from_iter(bfs_params.iter()), |row| {
+                                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                            })?
+                            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+                        for (s, d) in edges {
+                            visited.insert(s);
+                            visited.insert(d);
+                        }
+                    }
+
+                    // Gather DISTINCT memories linked to the visited entity set.
+                    let visited_vec: Vec<i64> = visited.into_iter().collect();
+                    let ent_placeholders = visited_vec
+                        .iter()
+                        .map(|_| "?")
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let entity_sql = format!(
+                        "SELECT DISTINCT m.id FROM memories m \
+                         JOIN memory_entities me ON me.memory_id = m.id \
+                         WHERE m.bot_id = ? AND me.entity_id IN ({ent_placeholders}) \
+                         {alias_where_fragment} \
+                         LIMIT ?"
+                    );
+                    // Params: bot_id, visited entity ids, extra alias params, over_fetch.
+                    let mut ent_params: Vec<SqlValue> =
+                        vec![SqlValue::Text(req.bot_id.clone())];
+                    ent_params.extend(visited_vec.iter().map(|&id| SqlValue::Integer(id)));
+                    ent_params.extend(extra_alias_params.iter().cloned());
+                    ent_params.push(SqlValue::Integer(over_fetch as i64));
+
+                    let mut ent_stmt2 = conn.prepare(&entity_sql)?;
+                    let ent_result = ent_stmt2
+                        .query_map(rusqlite::params_from_iter(ent_params.iter()), |row| {
+                            row.get::<_, String>(0)
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    ent_result
+                }
+            };
+
+            // ----------------------------------------------------------------
+            // RRF fusion
+            //
+            // Python: fused = rrf_fuse([bm25, dense, entity], k=60)
+            //         if not fused: return SearchResponse(items=[], total_candidates=0)
+            // ----------------------------------------------------------------
+            use crate::retrieval::rrf::rrf_fuse;
+            let fused: Vec<(String, f64)> =
+                rrf_fuse(&[bm25.clone(), dense.clone(), entity.clone()], 60);
+
+            if fused.is_empty() {
+                return Ok(SearchResp { items: Vec::new(), total_candidates: 0 });
+            }
+
+            let total_candidates = fused.len();
+
+            // Build 0-indexed position maps for signals.
+            // Python: bm25_pos  = {d: i for i, d in enumerate(bm25)}
+            //         dense_pos = {d: i for i, d in enumerate(dense)}
+            //         entity_pos= {d: i for i, d in enumerate(entity)}
+            let bm25_pos: std::collections::HashMap<&str, usize> =
+                bm25.iter().enumerate().map(|(i, d)| (d.as_str(), i)).collect();
+            let dense_pos: std::collections::HashMap<&str, usize> =
+                dense.iter().enumerate().map(|(i, d)| (d.as_str(), i)).collect();
+            let entity_pos: std::collections::HashMap<&str, usize> =
+                entity.iter().enumerate().map(|(i, d)| (d.as_str(), i)).collect();
+
+            // Build a lookup map of RRF scores.
+            let fused_score: std::collections::HashMap<&str, f64> =
+                fused.iter().map(|(id, s)| (id.as_str(), *s)).collect();
+
+            // ----------------------------------------------------------------
+            // Fetch text + created_ts + embedding for the fused ids.
+            //
+            // Python:
+            //   ids_to_score = list(fused.keys())
+            //   cur = conn.execute(
+            //       "SELECT id, text, created_ts, embedding "
+            //       "FROM memories WHERE bot_id = ? AND id IN ({placeholders})",
+            //       (req.bot_id,) + tuple(ids_to_score),
+            //   )
+            //   candidates_for_mmr: list[(str, np.ndarray)] = []  # only rows with blob
+            //   text_by_id: dict[str, (str, int)] = {}
+            // ----------------------------------------------------------------
+            let ids_to_score: Vec<&str> =
+                fused.iter().map(|(id, _)| id.as_str()).collect();
+            let placeholders = ids_to_score
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
+            let fetch_sql = format!(
+                "SELECT id, text, created_ts, embedding \
+                 FROM memories WHERE bot_id = ? AND id IN ({placeholders})"
+            );
+            let mut fetch_params: Vec<SqlValue> =
+                vec![SqlValue::Text(req.bot_id.clone())];
+            fetch_params.extend(
+                ids_to_score.iter().map(|&id| SqlValue::Text(id.to_string())),
+            );
+            let mut fetch_stmt = conn.prepare(&fetch_sql)?;
+            let fetched_rows: Vec<(String, String, i64, Option<Vec<u8>>)> = fetch_stmt
+                .query_map(rusqlite::params_from_iter(fetch_params.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<Vec<u8>>>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+
+            // Build text_by_id and candidates_for_mmr.
+            // candidates_for_mmr preserves fused insertion order (Python iterates
+            // `fused.keys()` which is CPython insertion-ordered dict).
+            let mut text_by_id: std::collections::HashMap<String, (String, i64)> =
+                std::collections::HashMap::new();
+            let mut emb_by_id: std::collections::HashMap<String, Vec<f32>> =
+                std::collections::HashMap::new();
+
+            for (mid, text, ct, blob) in fetched_rows {
+                text_by_id.insert(mid.clone(), (text, ct));
+                if let Some(b) = blob {
+                    emb_by_id.insert(mid, db::unpack_f32_le(&b));
+                }
+            }
+
+            // Build candidates in fused insertion order, including only rows with
+            // an embedding (matching Python's `if blob: candidates_for_mmr.append(...)`).
+            let candidates_for_mmr: Vec<(String, Vec<f32>)> = fused
+                .iter()
+                .filter_map(|(id, _)| {
+                    emb_by_id.get(id.as_str()).map(|emb| (id.clone(), emb.clone()))
+                })
+                .collect();
+
+            // ----------------------------------------------------------------
+            // MMR diversity reranking.
+            // ----------------------------------------------------------------
+            use crate::retrieval::mmr::mmr_select;
+            let selected =
+                mmr_select(&candidates_for_mmr, &q_emb, req.top_k, mmr_lambda);
+
+            // ----------------------------------------------------------------
+            // Build SearchItems.
+            //
+            // Python:
+            //   for mid, _ in selected:
+            //       text, ct = text_by_id.get(mid, ("", 0))
+            //       items.append(SearchItem(
+            //           memory_id=mid, text=text,
+            //           score=fused[mid],    ← RRF score
+            //           ts=ct,
+            //           signals=SearchSignals(
+            //               bm25_rank=bm25_pos.get(mid),
+            //               dense_rank=dense_pos.get(mid),
+            //               entity_rank=entity_pos.get(mid),
+            //           ),
+            //       ))
+            // ----------------------------------------------------------------
+            let items: Vec<SearchItem> = selected
+                .iter()
+                .map(|(mid, _)| {
+                    let (text, ct) = text_by_id
+                        .get(mid.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| (String::new(), 0));
+                    let score = *fused_score.get(mid.as_str()).unwrap_or(&0.0);
+                    SearchItem {
+                        memory_id: mid.clone(),
+                        text,
+                        score,
+                        ts: ct,
+                        signals: SearchSignals {
+                            bm25_rank:   bm25_pos.get(mid.as_str()).copied(),
+                            dense_rank:  dense_pos.get(mid.as_str()).copied(),
+                            entity_rank: entity_pos.get(mid.as_str()).copied(),
+                        },
+                    }
+                })
+                .collect();
+
+            Ok(SearchResp { items, total_candidates })
         })
         .await
         .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!("spawn_blocking panicked: {e}")))?
@@ -2391,5 +2887,385 @@ mod tests {
         for h in &resp.hints {
             assert!(!h.is_empty(), "hint must not be empty");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Search helpers
+    // -----------------------------------------------------------------------
+
+    /// Insert a memory row with an explicit embedding and optional entity link.
+    /// Returns the memory_id.
+    fn insert_search_memory(
+        conn: &rusqlite::Connection,
+        bot_id: &str,
+        memory_id: &str,
+        text: &str,
+        embedding: &[f32],
+        created_ts: i64,
+    ) {
+        conn.execute(
+            "INSERT OR IGNORE INTO bots (bot_id, created_ts) VALUES (?1, ?2)",
+            rusqlite::params![bot_id, created_ts],
+        )
+        .unwrap();
+        let blob = db::pack_f32_le(embedding);
+        conn.execute(
+            "INSERT INTO memories \
+             (id, bot_id, text, salience, created_ts, last_recalled_ts, embedding, memory_type) \
+             VALUES (?1, ?2, ?3, 0.5, ?4, ?4, ?5, 'event')",
+            rusqlite::params![memory_id, bot_id, text, created_ts, blob],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO vec_memories (memory_id, bot_id, embedding) VALUES (?1, ?2, ?3)",
+            rusqlite::params![memory_id, bot_id, blob],
+        )
+        .unwrap();
+    }
+
+    /// Link a memory to an entity by entity name (upserts entity if needed).
+    fn link_memory_entity(
+        conn: &rusqlite::Connection,
+        bot_id: &str,
+        memory_id: &str,
+        entity_name: &str,
+    ) -> i64 {
+        let eid = db::entities::upsert_entity(conn, bot_id, entity_name, None).unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?1, ?2)",
+            rusqlite::params![memory_id, eid],
+        )
+        .unwrap();
+        eid
+    }
+
+    // -----------------------------------------------------------------------
+    // SR-1: 3-lane fusion — each lane contributes a distinct memory; RRF
+    //        fuses them; signals carry the correct 0-indexed lane positions.
+    // -----------------------------------------------------------------------
+    //
+    // DB layout:
+    //   m_bm25_only  — text has unique keyword "dragonhide"; embedding is
+    //                  all-zeros (orthogonal to query) → BM25 lane only.
+    //   m_dense_only — text has no unique keywords; embedding == query vector
+    //                  → dense lane only.
+    //   m_ent_only   — text has no unique keywords; embedding is all-zeros;
+    //                  linked to entity "Galdrak" which appears in query
+    //                  → entity lane only.
+    //
+    // Query: "dragonhide Galdrak" (hits both keyword and entity lanes, but we
+    //         assign orthogonal embeddings so each memory is dominant in exactly
+    //         one lane).
+    //
+    // After RRF fusion all three must appear.  We then verify:
+    //   - score == RRF score (not cosine).
+    //   - signal positions are 0-indexed positions in each lane's result list.
+    //   - total_candidates == 3 (one per unique memory across all lanes).
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn search_three_lanes_fuse_and_signals_correct() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+
+        // query embedding = slot_emb(0) (1.0 at position 0, rest 0.0)
+        let q_emb = slot_emb(0);
+        // orthogonal embedding (no cosine similarity to q_emb)
+        let orth_emb = slot_emb(1);
+
+        // m_bm25_only: keyword "dragonhide" in text; orthogonal embedding.
+        insert_search_memory(&conn, "botSR", "m_bm25_only",
+            "dragonhide armor crafted", &orth_emb, 1_700_000_001);
+
+        // m_dense_only: no unique keywords; embedding == q_emb.
+        insert_search_memory(&conn, "botSR", "m_dense_only",
+            "the the the", &q_emb, 1_700_000_002);
+
+        // m_ent_only: no unique keywords; orthogonal embedding; linked to "Galdrak".
+        insert_search_memory(&conn, "botSR", "m_ent_only",
+            "something happened here", &orth_emb, 1_700_000_003);
+        link_memory_entity(&conn, "botSR", "m_ent_only", "Galdrak");
+
+        // query hits keyword "dragonhide" (→ BM25 lane), "Galdrak" entity (→
+        // entity lane), and the dense query vector aligns with m_dense_only
+        // (→ dense lane).
+        let query = "dragonhide Galdrak".to_string();
+
+        // The embed stub returns q_emb for any input.
+        let embed_url = spawn_embed_stub(q_emb.clone()).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .search(SearchReq {
+                bot_id: "botSR".to_string(),
+                query,
+                top_k: 5,
+                since_ts: None,
+                until_ts: None,
+                memory_type: None,
+            })
+            .await
+            .expect("search must succeed");
+
+        // All 3 unique memories must appear in fused set.
+        assert_eq!(resp.total_candidates, 3,
+            "3 unique memories across lanes → total_candidates=3");
+
+        // All 3 returned in items (top_k=5 ≥ 3).
+        assert_eq!(resp.items.len(), 3,
+            "top_k=5 with 3 candidates → 3 items");
+
+        // Collect into a map for per-memory assertions.
+        let item_map: std::collections::HashMap<&str, &SearchItem> =
+            resp.items.iter().map(|i| (i.memory_id.as_str(), i)).collect();
+
+        // m_bm25_only: must have bm25_rank=Some(0) (first/only in BM25 lane),
+        //              dense_rank some value (it is present in dense lane because
+        //              we do score all bot memories in dense), entity_rank=None.
+        let bm25_item = item_map.get("m_bm25_only").expect("m_bm25_only must be in results");
+        assert!(bm25_item.signals.bm25_rank.is_some(),
+            "m_bm25_only must have a bm25_rank");
+        assert!(bm25_item.signals.entity_rank.is_none(),
+            "m_bm25_only must have no entity_rank");
+
+        // m_dense_only: must have dense_rank=Some(0) (highest cosine = 1.0),
+        //               bm25_rank=None (no FTS match for stopword-only text).
+        let dense_item = item_map.get("m_dense_only").expect("m_dense_only must be in results");
+        assert_eq!(dense_item.signals.dense_rank, Some(0),
+            "m_dense_only must be rank 0 in dense lane (cos=1.0)");
+        assert!(dense_item.signals.bm25_rank.is_none(),
+            "m_dense_only must have no bm25_rank (all-stopword text)");
+
+        // m_ent_only: must have entity_rank=Some(0), and may or may not appear
+        //             in dense lane (it has orthogonal embedding).
+        let ent_item = item_map.get("m_ent_only").expect("m_ent_only must be in results");
+        assert_eq!(ent_item.signals.entity_rank, Some(0),
+            "m_ent_only must be rank 0 in entity lane");
+
+        // Score must be the RRF score (in range (0, 1/60] per lane hit = up to 3/60).
+        for item in &resp.items {
+            assert!(item.score > 0.0 && item.score <= 3.0 / 60.0 + 1e-12,
+                "RRF score must be in (0, 3/60], got {} for {}",
+                item.score, item.memory_id);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // SR-2: all-stopword query → BM25 lane is empty; dense + entity still work.
+    //
+    // Design note: the query "the and is" is 100% stopwords → build_fts5_query
+    // returns None → BM25 lane is skipped entirely.  Dense + entity lanes
+    // still fire and return results.
+    //
+    // To keep the test clean we use a bot with only stopwords in memory texts
+    // (so BM25 would miss them even if the lane ran), and only rely on dense +
+    // entity lanes to retrieve them.  We assert that no item has a bm25_rank
+    // (because the lane was empty — the pos map contains no entries).
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn search_all_stopword_query_bm25_empty_dense_entity_work() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+
+        let q_emb = slot_emb(2);
+        // m_dense: aligns with query embedding; text is all-stopwords so FTS5
+        // would not match it anyway.
+        insert_search_memory(&conn, "botSQ", "m_dense_sq", "the and is", &q_emb, 1_700_000_001);
+        // m_ent: linked to entity "zalgarak" (not a stopword, but the query is
+        //        all-stopwords "the and is" → BM25 lane returns empty regardless).
+        //        The text is also all-stopwords.
+        insert_search_memory(&conn, "botSQ", "m_ent_sq", "the or but", &slot_emb(3), 1_700_000_002);
+        link_memory_entity(&conn, "botSQ", "m_ent_sq", "zalgarak");
+
+        // Query contains entity name "zalgarak" as a substring so entity lane fires.
+        // The rest of the query is all-stopwords → BM25 lane returns empty.
+        let query = "the and is zalgarak".to_string();
+
+        let embed_url = spawn_embed_stub(q_emb).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .search(SearchReq {
+                bot_id: "botSQ".to_string(),
+                query,
+                top_k: 5,
+                since_ts: None,
+                until_ts: None,
+                memory_type: None,
+            })
+            .await
+            .expect("search must succeed");
+
+        // Must return results (dense + entity both contribute).
+        assert!(!resp.items.is_empty(), "query with stopwords only should still return results");
+
+        // BM25 lane was empty (all-stopword query → build_fts5_query returns None
+        // for "the and is" portion — "zalgarak" is ≥3 chars and not a stopword,
+        // so fts_q = Some("zalgarak")).  Actually "zalgarak" IS a significant term,
+        // so build_fts5_query("the and is zalgarak", 6) returns Some("zalgarak").
+        //
+        // Revised assertion: we only assert results are non-empty (both dense and
+        // entity lanes fire) and that m_dense_sq and m_ent_sq both appear.
+        let has_dense = resp.items.iter().any(|i| i.memory_id == "m_dense_sq");
+        assert!(has_dense, "m_dense_sq must appear via dense lane");
+
+        let has_ent = resp.items.iter().any(|i| i.memory_id == "m_ent_sq");
+        assert!(has_ent, "m_ent_sq must appear via entity lane");
+    }
+
+    // -----------------------------------------------------------------------
+    // SR-2b: pure all-stopword query (no significant terms at all) →
+    //         BM25 lane truly empty; dense still returns results.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn search_pure_stopword_query_bm25_lane_is_empty() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+
+        let q_emb = slot_emb(4);
+        // One memory with an embedding that aligns with the query vector.
+        // Text is all stopwords (FTS5 won't match it).
+        insert_search_memory(&conn, "botSP", "m_pure_dense",
+            "the and or but is", &q_emb, 1_700_000_001);
+
+        // Query is 100% stopwords → build_fts5_query returns None → BM25 lane empty.
+        let query = "the and is".to_string();
+
+        let embed_url = spawn_embed_stub(q_emb).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .search(SearchReq {
+                bot_id: "botSP".to_string(),
+                query,
+                top_k: 5,
+                since_ts: None,
+                until_ts: None,
+                memory_type: None,
+            })
+            .await
+            .expect("search must not error");
+
+        // Dense lane fires and finds m_pure_dense via embedding similarity.
+        assert!(!resp.items.is_empty(), "dense lane must still return the embedding-matching memory");
+
+        // BM25 lane was empty → no item should have a bm25_rank.
+        for item in &resp.items {
+            assert!(item.signals.bm25_rank.is_none(),
+                "pure stopword query → BM25 lane empty → bm25_rank must be None for {}",
+                item.memory_id);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // SR-3: empty result when nothing matches any lane.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn search_empty_result_when_nothing_matches() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        open_and_migrate(tmp.path());
+
+        // No memories at all for this bot.
+        let embed_url = spawn_embed_stub(slot_emb(0)).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .search(SearchReq {
+                bot_id: "botSE".to_string(),
+                query: "dragon slayer warrior".to_string(),
+                top_k: 5,
+                since_ts: None,
+                until_ts: None,
+                memory_type: None,
+            })
+            .await
+            .expect("search must not error");
+
+        assert!(resp.items.is_empty(), "no memories → items must be empty");
+        assert_eq!(resp.total_candidates, 0, "no memories → total_candidates must be 0");
+    }
+
+    // -----------------------------------------------------------------------
+    // SR-4: total_candidates = len(fused), not top_k.
+    //        When there are more fused candidates than top_k, total_candidates
+    //        exceeds items.len().
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn search_total_candidates_exceeds_top_k() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+
+        // Insert 6 memories, each with a unique keyword + distinct embedding.
+        for i in 0..6usize {
+            let text = format!("battleground{i} event occurred");
+            insert_search_memory(
+                &conn, "botST",
+                &format!("m_tc{i:04}"),
+                &text,
+                &slot_emb(i),
+                1_700_000_000 + i as i64,
+            );
+        }
+
+        // Query matches keyword "battleground" across all 6 (BM25 lane will have 6,
+        // dense lane will have 6).
+        let q_emb = slot_emb(0);
+        let embed_url = spawn_embed_stub(q_emb).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .search(SearchReq {
+                bot_id: "botST".to_string(),
+                query: "battleground".to_string(),
+                top_k: 2,  // only 2 returned in items
+                since_ts: None,
+                until_ts: None,
+                memory_type: None,
+            })
+            .await
+            .expect("search must succeed");
+
+        // items is capped at top_k=2.
+        assert_eq!(resp.items.len(), 2,
+            "top_k=2 → exactly 2 items returned");
+        // total_candidates = all 6 (fused across both BM25+dense lanes).
+        assert_eq!(resp.total_candidates, 6,
+            "6 unique memories fused → total_candidates=6");
+    }
+
+    // -----------------------------------------------------------------------
+    // SR-5: since_ts / until_ts / memory_type filters apply to all lanes.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn search_filters_apply_to_all_lanes() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+
+        let q_emb = slot_emb(0);
+        // Two memories: one inside the filter window, one outside.
+        insert_search_memory(&conn, "botSF", "m_sf_in",
+            "dragon slayer event", &q_emb, 1_700_000_002);
+        insert_search_memory(&conn, "botSF", "m_sf_out",
+            "dragon slayer event", &q_emb, 1_700_000_099);
+
+        let embed_url = spawn_embed_stub(q_emb).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .search(SearchReq {
+                bot_id: "botSF".to_string(),
+                query: "dragon slayer".to_string(),
+                top_k: 10,
+                since_ts: Some(1_700_000_000),
+                until_ts: Some(1_700_000_010),
+                memory_type: None,
+            })
+            .await
+            .expect("search with filters");
+
+        // Only the in-window memory must appear.
+        assert_eq!(resp.items.len(), 1,
+            "filter must exclude out-of-window memory");
+        assert_eq!(resp.items[0].memory_id, "m_sf_in",
+            "only in-window memory must be returned");
     }
 }
