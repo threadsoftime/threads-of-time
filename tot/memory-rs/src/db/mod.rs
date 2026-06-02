@@ -16,7 +16,8 @@
 //! `extern "C"` declaration matches the sqlite-vec 0.1.6 ABI exactly; no
 //! transmute is required or used.
 
-pub mod migrate;
+// pub mod migrate — archived to _archive-768/src/db/migrate.rs (Task 0.1).
+// Will be rebuilt against v0.2.1 schema in Phase 2.
 
 use std::ffi::c_int;
 use std::path::Path;

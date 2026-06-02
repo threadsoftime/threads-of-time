@@ -1,42 +1,15 @@
 //! Axum router factory for `memory-rs`.
 //!
-//! `build_router` assembles all route handlers and injects [`AppState`].
-//! Called once at startup in `main.rs` and in tests via `tower::ServiceExt::oneshot`.
-//!
-//! Route layout (extended across Phases 4–7):
-//! - `GET    /health`                                          — liveness probe
-//! - `POST   /v1/memory/:bot_guid/episodes`                   — write an episode (Phase 4)
-//! - `GET    /v1/memory/:bot_guid/episodes`                   — list episodes (Phase 4)
-//! - `GET    /v1/memory/:bot_guid/episodes/:episode_id`       — read an episode (Phase 4)
-//! - `PATCH  /v1/memory/:bot_guid/episodes/:episode_id`       — update an episode (Phase 5)
-//! - `DELETE /v1/memory/:bot_guid/episodes/:episode_id`       — delete an episode (Phase 5)
-//! - `POST   /v1/memory/:bot_guid/recall`                     — hybrid recall (Phase 5)
-//! - `POST   /v1/memory/:bot_guid/search`                     — dense-only search (Phase 5)
+//! Stubbed during archival (Task 0.1). Domain routes archived to `_archive-768/`.
+//! Routes will be rebuilt in Phases 4–7 against the v0.2.1 contract.
 
-use axum::{Router, routing::{get, post}};
+use axum::Router;
 use crate::state::AppState;
-use crate::routes::health::health;
-use crate::routes::write::write_episode;
-use crate::routes::read::read_episode;
-use crate::routes::list::list_episodes;
-use crate::routes::recall::recall_handler;
-use crate::routes::search::search_handler;
-use crate::routes::update::update_handler;
-use crate::routes::delete::delete_handler;
 
 /// Build the axum [`Router`] with [`AppState`] injected.
+///
+/// Currently returns an empty router. `/health` and domain routes land in
+/// Tasks 0.4+ once the v0.2.1 schema and contract are in place.
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
-        .route("/health", get(health))
-        .route(
-            "/v1/memory/:bot_guid/episodes",
-            post(write_episode).get(list_episodes),
-        )
-        .route(
-            "/v1/memory/:bot_guid/episodes/:episode_id",
-            get(read_episode).patch(update_handler).delete(delete_handler),
-        )
-        .route("/v1/memory/:bot_guid/recall", post(recall_handler))
-        .route("/v1/memory/:bot_guid/search", post(search_handler))
-        .with_state(state)
+    Router::new().with_state(state)
 }

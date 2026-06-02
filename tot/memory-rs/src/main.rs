@@ -6,6 +6,9 @@
 //!
 //! All logic lives in `lib.rs` and its submodules. This file is intentionally
 //! thin: config → state → router → serve.
+//!
+//! NOTE (Task 0.1): domain routes are archived; boot tests re-land in Task 0.4
+//! once `/health` is restored.
 
 use memory_rs::{
     app::build_router,
@@ -75,68 +78,4 @@ async fn main() {
         .unwrap_or_else(|e| eprintln!("[memory-rs] server error: {e}"));
 
     eprintln!("[memory-rs] shut down cleanly");
-}
-
-// ── Boot tests ────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
-    use memory_rs::state::{AppState, EmbedConfig};
-    use std::path::PathBuf;
-    use tower::ServiceExt; // oneshot
-
-    fn test_state() -> AppState {
-        AppState {
-            data_dir: PathBuf::from("/tmp/mem-test"),
-            embed: EmbedConfig {
-                url: "http://127.0.0.1:11434".to_string(),
-                model: "nomic-embed-text".to_string(),
-                api_key: String::new(),
-            },
-        }
-    }
-
-    /// GET /health returns 200 with body {"status":"ok"}.
-    #[tokio::test]
-    async fn health_endpoint_returns_200_status_ok() {
-        let app = build_router(test_state());
-        let req = Request::builder()
-            .method("GET")
-            .uri("/health")
-            .body(Body::empty())
-            .expect("build request");
-
-        let resp = app.oneshot(req).await.expect("oneshot");
-
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        let bytes = axum::body::to_bytes(resp.into_body(), 4096)
-            .await
-            .expect("body bytes");
-        let body: serde_json::Value =
-            serde_json::from_slice(&bytes).expect("valid JSON");
-
-        assert_eq!(body["status"], "ok", "body must be {{\"status\":\"ok\"}}");
-    }
-
-    /// Unknown routes return 405/404 (not 200) — ensures no catch-all swallows bad paths.
-    #[tokio::test]
-    async fn unknown_route_does_not_return_200() {
-        let app = build_router(test_state());
-        let req = Request::builder()
-            .method("GET")
-            .uri("/does-not-exist")
-            .body(Body::empty())
-            .expect("build request");
-
-        let resp = app.oneshot(req).await.expect("oneshot");
-        assert_ne!(
-            resp.status(),
-            StatusCode::OK,
-            "unknown route must not return 200"
-        );
-    }
 }

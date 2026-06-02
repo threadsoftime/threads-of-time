@@ -1,12 +1,12 @@
-//! `memory-rs` — drop-in Rust replacement for the Python `memory-sidecar`.
+//! `memory-rs` — stub scaffold for v0.2.1 re-target.
 //!
-//! Provides the same 8 HTTP endpoints on port 8090, backed by per-bot SQLite
-//! files in `MEMORY_DATA_DIR/<bot_guid>/memory.sqlite` with FTS5 BM25 + vec0
-//! dense vector hybrid retrieval.
+//! Domain modules archived to `_archive-768/`.
+//! Phases 1–7 will rebuild them against the live memory-sidecar v0.2.1 contract.
 
 /// Dimension of the dense embedding vector.
-/// Must match the `float[768]` in the `embeddings_vec` virtual table schema
-/// and the nomic-embed-text model output.
+/// NOTE: v0.2.1 target uses 384-dim (all-MiniLM-L6-v2); this constant will be
+/// updated in Task 0.2 / Phase 1. Kept at 768 for now so embed_stub compiles
+/// unchanged during the archival stub phase.
 pub const EMBEDDING_DIM: usize = 768;
 
 pub mod app;
@@ -14,6 +14,4 @@ pub mod config;
 pub mod db;
 pub mod embeddings;
 pub mod error;
-pub mod retrieval;
-pub mod routes;
 pub mod state;
