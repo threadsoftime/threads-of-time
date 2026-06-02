@@ -28,13 +28,25 @@ pub struct AppState {
 
 impl AppState {
     /// Construct from a validated [`crate::config::Settings`].
+    ///
+    /// Field mapping (v0.2.1 re-target):
+    /// - `Settings::db_path` → `AppState::data_dir` (parent dir; kept for future per-bot routing)
+    /// - `Settings::embed_endpoint` → `EmbedConfig::url`
+    /// - `EmbedConfig::model` stubbed to empty string (v0.2.1 embed service is model-implicit)
+    /// - `EmbedConfig::api_key` stubbed to empty string (no key required by the local stub)
     pub fn from_settings(s: &crate::config::Settings) -> Self {
         AppState {
-            data_dir: s.data_dir.clone(),
+            // db_path is the single-file path; expose its parent as data_dir for
+            // backward compat with any route code that constructs per-bot sub-paths.
+            data_dir: s
+                .db_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| s.db_path.clone()),
             embed: EmbedConfig {
-                url: s.embeddings_url.clone(),
-                model: s.embeddings_model.clone(),
-                api_key: s.embeddings_api_key.clone(),
+                url: s.embed_endpoint.clone(),
+                model: String::new(),
+                api_key: String::new(),
             },
         }
     }
@@ -67,7 +79,7 @@ mod tests {
         assert_eq!(s.embed.api_key, s2.embed.api_key);
     }
 
-    /// from_settings must propagate all fields from Settings.
+    /// from_settings must propagate all fields from Settings (v0.2.1 env names).
     #[test]
     fn from_settings_copies_all_fields() {
         use crate::config::Settings;
@@ -75,10 +87,8 @@ mod tests {
 
         let settings = Settings::build(|k| {
             HashMap::from([
-                ("MEMORY_DATA_DIR", "/var/memory"),
-                ("BRAIN_EMBEDDINGS_URL", "http://embed.internal"),
-                ("BRAIN_EMBEDDINGS_MODEL", "nomic-embed-text"),
-                ("BRAIN_EMBEDDINGS_API_KEY", "tok123"),
+                ("MEM_DB_PATH", "/var/memory/db.sqlite"),
+                ("MEM_EMBED_ENDPOINT", "http://embed.internal"),
             ])
             .get(k)
             .map(|s| s.to_string())
@@ -86,9 +96,8 @@ mod tests {
         .expect("build settings");
 
         let state = AppState::from_settings(&settings);
+        // db_path is /var/memory/db.sqlite → parent is /var/memory
         assert_eq!(state.data_dir, PathBuf::from("/var/memory"));
         assert_eq!(state.embed.url, "http://embed.internal");
-        assert_eq!(state.embed.model, "nomic-embed-text");
-        assert_eq!(state.embed.api_key, "tok123");
     }
 }

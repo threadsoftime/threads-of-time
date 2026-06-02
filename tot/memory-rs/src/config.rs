@@ -1,37 +1,102 @@
-//! Runtime configuration read from environment variables.
+//! Runtime configuration read from environment variables (v0.2.1 contract).
 //!
-//! # Required variables
+//! All variables are optional; documented defaults are parity-critical (the live
+//! Python memory-sidecar v0.2.1 uses the same defaults).
 //!
-//! | Variable               | Meaning                                      |
-//! |------------------------|----------------------------------------------|
-//! | `MEMORY_DATA_DIR`      | Root directory for per-bot SQLite files      |
-//! | `BRAIN_EMBEDDINGS_URL` | OpenAI-compatible base URL (without `/embeddings`) |
-//! | `BRAIN_EMBEDDINGS_MODEL` | Model string e.g. `nomic-embed-text`       |
-//!
-//! # Optional variables
-//!
-//! | Variable                 | Default     |
-//! |--------------------------|-------------|
-//! | `BRAIN_EMBEDDINGS_API_KEY` | `""`     |
-//! | `MEM_BIND_HOST`           | `0.0.0.0` |
-//! | `MEM_BIND_PORT`           | `8090`    |
+//! | Variable              | Default                    | Field                    |
+//! |-----------------------|----------------------------|--------------------------|
+//! | `MEM_DB_PATH`         | `/var/memory/db.sqlite`    | `db_path`                |
+//! | `MEM_EMBED_ENDPOINT`  | `http://127.0.0.1:8081`    | `embed_endpoint`         |
+//! | `MEM_CAP_PER_BOT`     | `2000`                     | `cap_per_bot`            |
+//! | `MEM_W_REL`           | `0.5`                      | `weights.w_rel`          |
+//! | `MEM_W_REC`           | `0.2`                      | `weights.w_rec`          |
+//! | `MEM_W_IMP`           | `0.3`                      | `weights.w_imp`          |
+//! | `MEM_TAU_SECONDS`     | `604800`                   | `weights.tau_seconds`    |
+//! | `MEM_W_REC_TIMESTAMP` | `created`                  | `recency_basis`          |
+//! | `MEM_MMR_LAMBDA`      | `0.7`                      | `mmr_lambda`             |
+//! | `MEM_TOKEN_STORE`     | `/etc/memory/tokens.yaml`  | `token_store`            |
+//! | `MEM_BIND_HOST`       | `0.0.0.0`                  | `bind_host`              |
+//! | `MEM_BIND_PORT`       | `8090`                     | `bind_port`              |
+//! | `MEM_MIGRATIONS_DIR`  | `<crate>/migrations`       | `migrations_dir`         |
 
 use std::path::PathBuf;
+use std::str::FromStr;
 
+// ---------------------------------------------------------------------------
+// RecencyBasis
+// ---------------------------------------------------------------------------
+
+/// Which timestamp is used for the time-decay (recency) scoring component.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecencyBasis {
+    /// Use the episode creation timestamp.
+    Created,
+    /// Use the timestamp of the most recent recall of the episode.
+    LastRecalled,
+}
+
+impl FromStr for RecencyBasis {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "created" => Ok(RecencyBasis::Created),
+            "last_recalled" => Ok(RecencyBasis::LastRecalled),
+            other => Err(anyhow::anyhow!(
+                "MEM_W_REC_TIMESTAMP must be `created` or `last_recalled`, got `{other}`"
+            )),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ScoringWeights
+// ---------------------------------------------------------------------------
+
+/// Weights and decay constant for the hybrid scoring formula.
+///
+/// Score = w_rel·relevance + w_rec·recency_decay + w_imp·importance
+/// where recency_decay = exp(−Δt / tau_seconds).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScoringWeights {
+    /// Weight for the relevance (semantic similarity) component. Default 0.5.
+    pub w_rel: f64,
+    /// Weight for the recency-decay component. Default 0.2.
+    pub w_rec: f64,
+    /// Weight for the importance component. Default 0.3.
+    pub w_imp: f64,
+    /// Time-decay constant in seconds. Default 604800 (7 days).
+    pub tau_seconds: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+/// Full runtime configuration for `memory-rs`.
 #[derive(Debug, Clone)]
 pub struct Settings {
-    /// Root directory for per-bot SQLite databases: `<data_dir>/<bot_guid>/memory.sqlite`.
-    pub data_dir: PathBuf,
-    /// OpenAI-compatible embeddings base URL (the client appends `/embeddings`).
-    pub embeddings_url: String,
-    /// Model string passed in `{"model": ...}` to the embeddings endpoint.
-    pub embeddings_model: String,
-    /// Bearer token; empty string means no `Authorization` header is sent.
-    pub embeddings_api_key: String,
+    /// Path to the single SQLite database file.
+    pub db_path: PathBuf,
+    /// Base URL of the embeddings service (no trailing path).
+    pub embed_endpoint: String,
+    /// Maximum number of episodes kept per bot before oldest are evicted.
+    pub cap_per_bot: usize,
+    /// Scoring weights + time-decay constant.
+    pub weights: ScoringWeights,
+    /// Which timestamp drives the recency component.
+    pub recency_basis: RecencyBasis,
+    /// MMR diversity trade-off: 1.0 = pure relevance, 0.0 = pure diversity.
+    pub mmr_lambda: f64,
+    /// Path to the token YAML file; `None` if the var was explicitly unset
+    /// (empty string). Defaults to `/etc/memory/tokens.yaml`.
+    pub token_store: Option<PathBuf>,
     /// IP address to bind the HTTP server on.
     pub bind_host: String,
     /// TCP port to bind the HTTP server on.
     pub bind_port: u16,
+    /// Directory that contains the SQLite migration `.sql` files.
+    pub migrations_dir: PathBuf,
 }
 
 impl Settings {
@@ -45,26 +110,87 @@ impl Settings {
     /// Separated from `from_env` so tests can inject values without touching
     /// the process environment (parallel-safe).
     pub(crate) fn build(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<Settings> {
-        let req = |k: &str| -> anyhow::Result<String> {
-            get(k).ok_or_else(|| anyhow::anyhow!("required env var `{k}` is not set"))
+        // Helper: parse a var as a concrete type, applying a default when absent.
+        let parse_or = |key: &str, default: &str| -> anyhow::Result<String> {
+            Ok(get(key).unwrap_or_else(|| default.to_string()))
         };
 
-        let bind_port: u16 = get("MEM_BIND_PORT")
-            .as_deref()
-            .unwrap_or("8090")
-            .parse()
-            .map_err(|e| anyhow::anyhow!("MEM_BIND_PORT is not a valid u16: {e}"))?;
+        let parse_u64 = |key: &str, default: u64| -> anyhow::Result<u64> {
+            match get(key) {
+                None => Ok(default),
+                Some(v) => v.parse::<u64>().map_err(|e| {
+                    anyhow::anyhow!("{key} is not a valid u64: {e}")
+                }),
+            }
+        };
+
+        let parse_usize = |key: &str, default: usize| -> anyhow::Result<usize> {
+            match get(key) {
+                None => Ok(default),
+                Some(v) => v.parse::<usize>().map_err(|e| {
+                    anyhow::anyhow!("{key} is not a valid usize: {e}")
+                }),
+            }
+        };
+
+        let parse_f64 = |key: &str, default: f64| -> anyhow::Result<f64> {
+            match get(key) {
+                None => Ok(default),
+                Some(v) => v.parse::<f64>().map_err(|e| {
+                    anyhow::anyhow!("{key} is not a valid f64: {e}")
+                }),
+            }
+        };
+
+        let parse_u16 = |key: &str, default: u16| -> anyhow::Result<u16> {
+            match get(key) {
+                None => Ok(default),
+                Some(v) => v.parse::<u16>().map_err(|e| {
+                    anyhow::anyhow!("{key} is not a valid u16: {e}")
+                }),
+            }
+        };
+
+        // token_store: Some(path) if set to a non-empty string; None if set to
+        // empty string; defaults to Some("/etc/memory/tokens.yaml").
+        let token_store = match get("MEM_TOKEN_STORE").as_deref() {
+            None => Some(PathBuf::from("/etc/memory/tokens.yaml")),
+            Some("") => None,
+            Some(p) => Some(PathBuf::from(p)),
+        };
+
+        // MEM_MIGRATIONS_DIR defaults to the compile-time crate root + "migrations".
+        let migrations_dir = PathBuf::from(
+            get("MEM_MIGRATIONS_DIR")
+                .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/migrations").to_string()),
+        );
+
+        let recency_basis_str = parse_or("MEM_W_REC_TIMESTAMP", "created")?;
+        let recency_basis = recency_basis_str.parse::<RecencyBasis>()?;
 
         Ok(Settings {
-            data_dir: PathBuf::from(req("MEMORY_DATA_DIR")?),
-            embeddings_url: req("BRAIN_EMBEDDINGS_URL")?,
-            embeddings_model: req("BRAIN_EMBEDDINGS_MODEL")?,
-            embeddings_api_key: get("BRAIN_EMBEDDINGS_API_KEY").unwrap_or_default(),
-            bind_host: get("MEM_BIND_HOST").unwrap_or_else(|| "0.0.0.0".to_string()),
-            bind_port,
+            db_path: PathBuf::from(parse_or("MEM_DB_PATH", "/var/memory/db.sqlite")?),
+            embed_endpoint: parse_or("MEM_EMBED_ENDPOINT", "http://127.0.0.1:8081")?,
+            cap_per_bot: parse_usize("MEM_CAP_PER_BOT", 2000)?,
+            weights: ScoringWeights {
+                w_rel: parse_f64("MEM_W_REL", 0.5)?,
+                w_rec: parse_f64("MEM_W_REC", 0.2)?,
+                w_imp: parse_f64("MEM_W_IMP", 0.3)?,
+                tau_seconds: parse_u64("MEM_TAU_SECONDS", 604800)?,
+            },
+            recency_basis,
+            mmr_lambda: parse_f64("MEM_MMR_LAMBDA", 0.7)?,
+            token_store,
+            bind_host: parse_or("MEM_BIND_HOST", "0.0.0.0")?,
+            bind_port: parse_u16("MEM_BIND_PORT", 8090)?,
+            migrations_dir,
         })
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -75,82 +201,178 @@ mod tests {
         move |k| map.get(k).map(|s| s.to_string())
     }
 
-    fn required_map() -> HashMap<&'static str, &'static str> {
-        HashMap::from([
-            ("MEMORY_DATA_DIR", "/tmp/mem"),
-            ("BRAIN_EMBEDDINGS_URL", "http://127.0.0.1:11434"),
-            ("BRAIN_EMBEDDINGS_MODEL", "nomic-embed-text"),
-        ])
+    // An empty map exercises "all-defaults" mode (no env vars set).
+    fn empty() -> HashMap<&'static str, &'static str> {
+        HashMap::new()
     }
 
-    #[test]
-    fn builds_with_defaults_when_optional_vars_absent() {
-        let s = Settings::build(getter(required_map())).expect("build");
-        assert_eq!(s.data_dir, PathBuf::from("/tmp/mem"));
-        assert_eq!(s.embeddings_url, "http://127.0.0.1:11434");
-        assert_eq!(s.embeddings_model, "nomic-embed-text");
-        assert_eq!(s.embeddings_api_key, "", "api_key defaults to empty string");
-        assert_eq!(s.bind_host, "0.0.0.0", "bind_host defaults to 0.0.0.0");
-        assert_eq!(s.bind_port, 8090, "bind_port defaults to 8090");
-    }
+    // ---------------------------------------------------------------------------
+    // Default values (nothing set → every field gets its documented default)
+    // ---------------------------------------------------------------------------
 
     #[test]
-    fn explicit_optional_vars_override_defaults() {
-        let mut m = required_map();
-        m.extend([
-            ("BRAIN_EMBEDDINGS_API_KEY", "secret"),
-            ("MEM_BIND_HOST", "127.0.0.1"),
-            ("MEM_BIND_PORT", "9000"),
-        ]);
-        let s = Settings::build(getter(m)).expect("build");
-        assert_eq!(s.embeddings_api_key, "secret");
-        assert_eq!(s.bind_host, "127.0.0.1");
-        assert_eq!(s.bind_port, 9000);
-    }
-
-    #[test]
-    fn missing_data_dir_returns_error() {
-        let mut m = required_map();
-        m.remove("MEMORY_DATA_DIR");
-        let err = Settings::build(getter(m)).unwrap_err();
+    fn defaults_when_no_vars_set() {
+        let s = Settings::build(getter(empty())).expect("build");
+        assert_eq!(s.db_path, PathBuf::from("/var/memory/db.sqlite"));
+        assert_eq!(s.embed_endpoint, "http://127.0.0.1:8081");
+        assert_eq!(s.cap_per_bot, 2000);
+        assert!((s.weights.w_rel - 0.5).abs() < f64::EPSILON, "w_rel");
+        assert!((s.weights.w_rec - 0.2).abs() < f64::EPSILON, "w_rec");
+        assert!((s.weights.w_imp - 0.3).abs() < f64::EPSILON, "w_imp");
+        assert_eq!(s.weights.tau_seconds, 604800);
+        assert_eq!(s.recency_basis, RecencyBasis::Created);
+        assert!((s.mmr_lambda - 0.7).abs() < f64::EPSILON, "mmr_lambda");
+        assert_eq!(
+            s.token_store,
+            Some(PathBuf::from("/etc/memory/tokens.yaml")),
+            "token_store defaults to Some(/etc/memory/tokens.yaml)"
+        );
+        assert_eq!(s.bind_host, "0.0.0.0");
+        assert_eq!(s.bind_port, 8090);
+        // migrations_dir default is CARGO_MANIFEST_DIR/migrations — non-empty path.
         assert!(
-            err.to_string().contains("MEMORY_DATA_DIR"),
-            "error message must name the missing var; got: {err}"
+            s.migrations_dir.to_string_lossy().ends_with("migrations"),
+            "migrations_dir should end with 'migrations', got: {:?}",
+            s.migrations_dir
         );
     }
 
+    // ---------------------------------------------------------------------------
+    // Non-default values (all MEM_* set to override values)
+    // ---------------------------------------------------------------------------
+
     #[test]
-    fn missing_embeddings_url_returns_error() {
-        let mut m = required_map();
-        m.remove("BRAIN_EMBEDDINGS_URL");
-        let err = Settings::build(getter(m)).unwrap_err();
-        assert!(err.to_string().contains("BRAIN_EMBEDDINGS_URL"), "got: {err}");
+    fn all_vars_override_defaults() {
+        let m = HashMap::from([
+            ("MEM_DB_PATH", "/custom/db.sqlite"),
+            ("MEM_EMBED_ENDPOINT", "http://embed.internal:8888"),
+            ("MEM_CAP_PER_BOT", "500"),
+            ("MEM_W_REL", "0.6"),
+            ("MEM_W_REC", "0.1"),
+            ("MEM_W_IMP", "0.3"),
+            ("MEM_TAU_SECONDS", "86400"),
+            ("MEM_W_REC_TIMESTAMP", "last_recalled"),
+            ("MEM_MMR_LAMBDA", "0.9"),
+            ("MEM_TOKEN_STORE", "/run/secrets/tokens.yaml"),
+            ("MEM_BIND_HOST", "127.0.0.1"),
+            ("MEM_BIND_PORT", "9090"),
+            ("MEM_MIGRATIONS_DIR", "/opt/migrations"),
+        ]);
+
+        let s = Settings::build(getter(m)).expect("build with all overrides");
+
+        assert_eq!(s.db_path, PathBuf::from("/custom/db.sqlite"));
+        assert_eq!(s.embed_endpoint, "http://embed.internal:8888");
+        assert_eq!(s.cap_per_bot, 500);
+        assert!((s.weights.w_rel - 0.6).abs() < f64::EPSILON, "w_rel");
+        assert!((s.weights.w_rec - 0.1).abs() < f64::EPSILON, "w_rec");
+        assert!((s.weights.w_imp - 0.3).abs() < f64::EPSILON, "w_imp");
+        assert_eq!(s.weights.tau_seconds, 86400);
+        assert_eq!(s.recency_basis, RecencyBasis::LastRecalled);
+        assert!((s.mmr_lambda - 0.9).abs() < f64::EPSILON, "mmr_lambda");
+        assert_eq!(
+            s.token_store,
+            Some(PathBuf::from("/run/secrets/tokens.yaml"))
+        );
+        assert_eq!(s.bind_host, "127.0.0.1");
+        assert_eq!(s.bind_port, 9090);
+        assert_eq!(s.migrations_dir, PathBuf::from("/opt/migrations"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // RecencyBasis parsing
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn recency_basis_created_parses() {
+        let s = Settings::build(getter(HashMap::from([
+            ("MEM_W_REC_TIMESTAMP", "created"),
+        ])))
+        .expect("build");
+        assert_eq!(s.recency_basis, RecencyBasis::Created);
     }
 
     #[test]
-    fn missing_embeddings_model_returns_error() {
-        let mut m = required_map();
-        m.remove("BRAIN_EMBEDDINGS_MODEL");
-        let err = Settings::build(getter(m)).unwrap_err();
-        assert!(err.to_string().contains("BRAIN_EMBEDDINGS_MODEL"), "got: {err}");
+    fn recency_basis_last_recalled_parses() {
+        let s = Settings::build(getter(HashMap::from([
+            ("MEM_W_REC_TIMESTAMP", "last_recalled"),
+        ])))
+        .expect("build");
+        assert_eq!(s.recency_basis, RecencyBasis::LastRecalled);
     }
+
+    #[test]
+    fn recency_basis_invalid_returns_error() {
+        let err = Settings::build(getter(HashMap::from([
+            ("MEM_W_REC_TIMESTAMP", "wall_clock"),
+        ])))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("MEM_W_REC_TIMESTAMP"),
+            "error must name the bad var; got: {err}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // token_store: None when set to empty string
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn token_store_none_when_empty_string() {
+        let s = Settings::build(getter(HashMap::from([
+            ("MEM_TOKEN_STORE", ""),
+        ])))
+        .expect("build");
+        assert_eq!(s.token_store, None, "empty string → None");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Parse error: bad bind_port
+    // ---------------------------------------------------------------------------
 
     #[test]
     fn invalid_bind_port_returns_error() {
-        let mut m = required_map();
-        m.insert("MEM_BIND_PORT", "not_a_number");
-        let err = Settings::build(getter(m)).unwrap_err();
+        let err = Settings::build(getter(HashMap::from([
+            ("MEM_BIND_PORT", "not_a_number"),
+        ])))
+        .unwrap_err();
         assert!(
             err.to_string().contains("MEM_BIND_PORT"),
-            "error message must name the bad var; got: {err}"
+            "error must name the bad var; got: {err}"
         );
     }
 
     #[test]
-    fn bind_port_99999_exceeds_u16_max_returns_error() {
-        let mut m = required_map();
-        m.insert("MEM_BIND_PORT", "99999");
-        let err = Settings::build(getter(m)).unwrap_err();
-        assert!(err.to_string().contains("MEM_BIND_PORT"), "got: {err}");
+    fn bind_port_out_of_u16_range_returns_error() {
+        let err = Settings::build(getter(HashMap::from([
+            ("MEM_BIND_PORT", "99999"),
+        ])))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("MEM_BIND_PORT"),
+            "error must name the bad var; got: {err}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Parse error: bad numeric fields
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn invalid_cap_per_bot_returns_error() {
+        let err = Settings::build(getter(HashMap::from([
+            ("MEM_CAP_PER_BOT", "abc"),
+        ])))
+        .unwrap_err();
+        assert!(err.to_string().contains("MEM_CAP_PER_BOT"), "got: {err}");
+    }
+
+    #[test]
+    fn invalid_w_rel_returns_error() {
+        let err = Settings::build(getter(HashMap::from([
+            ("MEM_W_REL", "not_a_float"),
+        ])))
+        .unwrap_err();
+        assert!(err.to_string().contains("MEM_W_REL"), "got: {err}");
     }
 }
