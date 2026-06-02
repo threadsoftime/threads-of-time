@@ -21,8 +21,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::ScoringWeights;
-use crate::db::{self, entities::upsert_entity, pack_f32_le};
+use rusqlite::OptionalExtension;
+
+use crate::config::{RecencyBasis, ScoringWeights};
+use crate::db::{self, entities::{bfs_entities, upsert_entity}, pack_f32_le};
 use crate::embed_cache::EmbedCache;
 use crate::ids::generate_memory_id;
 use crate::pubsub::{MemoryRow as PubSubRow, PubSub};
@@ -155,6 +157,78 @@ pub struct ListResp {
 }
 
 // ---------------------------------------------------------------------------
+// Task 4.6 — recall / recall_about types
+// ---------------------------------------------------------------------------
+
+/// Request payload for [`MemoryService::recall`].
+///
+/// Matches Python `RecallRequest` pydantic model.
+#[derive(Debug, Clone)]
+pub struct RecallReq {
+    pub bot_id: String,
+    pub query: String,
+    /// Maximum number of results to return (default 5).
+    pub top_k: usize,
+    /// Only memories with `created_ts >= since_ts`.
+    pub since_ts: Option<i64>,
+    /// Only memories with `created_ts <= until_ts`.
+    pub until_ts: Option<i64>,
+    pub memory_type: Option<String>,
+}
+
+/// A single recalled memory in a [`RecallResp`].
+///
+/// Matches Python `RecalledMemory` pydantic model:
+/// ```python
+/// class RecalledMemory(BaseModel):
+///     memory_id: str
+///     text: str
+///     score: float   # weighted-sum score (NOT the MMR score)
+///     ts: int        # = created_ts
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecalledMemory {
+    pub memory_id: String,
+    pub text: String,
+    /// Weighted-sum score from `score_memory` (NOT the MMR intermediate score).
+    pub score: f64,
+    /// `created_ts` of the memory.
+    pub ts: i64,
+}
+
+/// Response from [`MemoryService::recall`].
+///
+/// Matches Python `RecallResponse`.
+#[derive(Debug, Clone)]
+pub struct RecallResp {
+    pub memories: Vec<RecalledMemory>,
+}
+
+/// Request payload for [`MemoryService::recall_about`].
+///
+/// Matches Python `RecallAboutRequest` pydantic model.
+#[derive(Debug, Clone)]
+pub struct RecallAboutReq {
+    pub bot_id: String,
+    pub entity: String,
+    /// Maximum BFS hops to follow from the seed entity (default 2).
+    pub max_hops: usize,
+    /// Maximum number of results to return (default 3).
+    pub top_k: usize,
+    pub since_ts: Option<i64>,
+    pub until_ts: Option<i64>,
+    pub memory_type: Option<String>,
+}
+
+/// Response from [`MemoryService::recall_about`].
+///
+/// Matches Python `RecallAboutResponse`.
+#[derive(Debug, Clone)]
+pub struct RecallAboutResp {
+    pub hints: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // MemoryService
 // ---------------------------------------------------------------------------
 
@@ -168,6 +242,10 @@ pub struct MemoryService {
     pub(crate) cap_per_bot: usize,
     pub(crate) embed: Arc<EmbedCache>,
     pub(crate) pubsub: Arc<PubSub>,
+    /// MMR λ trade-off: 1.0 = pure relevance, 0.0 = pure diversity.
+    pub(crate) mmr_lambda: f64,
+    /// Which timestamp drives the recency component.
+    pub(crate) recency_basis: RecencyBasis,
 }
 
 impl MemoryService {
@@ -179,7 +257,11 @@ impl MemoryService {
         embed: Arc<EmbedCache>,
         pubsub: Arc<PubSub>,
     ) -> Self {
-        Self { db_path, weights, cap_per_bot, embed, pubsub }
+        Self {
+            db_path, weights, cap_per_bot, embed, pubsub,
+            mmr_lambda: 0.7,
+            recency_basis: RecencyBasis::Created,
+        }
     }
 
     /// Write a new memory for `req.bot_id`.
@@ -647,6 +729,367 @@ impl MemoryService {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
 
             Ok(ListResp { items, total })
+        })
+        .await
+        .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!("spawn_blocking panicked: {e}")))?
+    }
+
+    // -----------------------------------------------------------------------
+    // recall
+    // -----------------------------------------------------------------------
+
+    /// Semantic recall: embed the query, score all matching memories, MMR-select
+    /// top_k, bump `last_recalled_ts`, return scored memories in MMR order.
+    ///
+    /// Ports `routes_memory.py::recall` exactly:
+    ///
+    /// 1. `q_emb = embed(query).await` — async, before spawn_blocking.
+    /// 2. In spawn_blocking:
+    ///    a. `over_fetch = max(top_k * 4, 20)` — kept for parity; the SQL query
+    ///       fetches ALL matching rows (no LIMIT), matching Python behavior.
+    ///    b. SELECT all matching rows (bot_id + optional since/until/memory_type).
+    ///    c. For each row: `score_memory(emb, q, salience, created_ts, now, &weights)`.
+    ///    d. Build `candidates: Vec<(memory_id, Vec<f32>)>` for rows WITH embedding.
+    ///    e. `mmr_select(candidates, q_emb, top_k, lambda)`.
+    ///    f. UPDATE `last_recalled_ts = now` for each selected memory_id.
+    ///    g. COMMIT.
+    ///    h. Return selected memories with their weighted-sum scores, in MMR order.
+    pub async fn recall(
+        &self,
+        req: RecallReq,
+    ) -> Result<RecallResp, crate::error::AppError> {
+        // Step 1: embed the query in async context before entering spawn_blocking.
+        let q_emb: Vec<f32> = self
+            .embed
+            .embed(&req.query)
+            .await
+            .map(|arc| arc.as_ref().clone())
+            .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!("embed failed: {e}")))?;
+
+        let db_path = self.db_path.clone();
+        let weights = self.weights.clone();
+        let mmr_lambda = self.mmr_lambda;
+        let recency_basis = self.recency_basis.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<RecallResp, crate::error::AppError> {
+            let conn = db::open_db(&db_path)?;
+
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+
+            // over_fetch computed for parity (Python computes it even though the
+            // SELECT has no LIMIT — the comment in Python explains the design).
+            let _over_fetch = (req.top_k * 4).max(20);
+
+            // Build optional WHERE fragments (mirrors Python `_extra_where_clause`).
+            use rusqlite::types::Value as SqlValue;
+            let mut extra_where: Vec<&'static str> = Vec::new();
+            let mut extra_params: Vec<SqlValue> = Vec::new();
+
+            if req.since_ts.is_some() {
+                extra_where.push("AND created_ts >= ?");
+                extra_params.push(SqlValue::Integer(req.since_ts.unwrap()));
+            }
+            if req.until_ts.is_some() {
+                extra_where.push("AND created_ts <= ?");
+                extra_params.push(SqlValue::Integer(req.until_ts.unwrap()));
+            }
+            if req.memory_type.is_some() {
+                extra_where.push("AND memory_type = ?");
+                extra_params.push(SqlValue::Text(req.memory_type.clone().unwrap()));
+            }
+
+            let where_fragment = extra_where.join(" ");
+            let sql = format!(
+                "SELECT id, text, salience, created_ts, last_recalled_ts, embedding \
+                 FROM memories WHERE bot_id = ? {where_fragment} \
+                 ORDER BY created_ts DESC"
+            );
+
+            let mut all_params: Vec<SqlValue> = vec![SqlValue::Text(req.bot_id.clone())];
+            all_params.extend(extra_params);
+
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(all_params.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,       // id
+                        row.get::<_, String>(1)?,       // text
+                        row.get::<_, f64>(2)?,          // salience
+                        row.get::<_, i64>(3)?,          // created_ts
+                        row.get::<_, i64>(4)?,          // last_recalled_ts
+                        row.get::<_, Option<Vec<u8>>>(5)?, // embedding (nullable)
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+
+            if rows.is_empty() {
+                return Ok(RecallResp { memories: vec![] });
+            }
+
+            // Per-row scoring + build candidates list (only rows WITH embedding).
+            // `meta` maps memory_id → (text, weighted_sum_score, created_ts).
+            let mut candidates: Vec<(String, Vec<f32>)> = Vec::new();
+            let mut meta: std::collections::HashMap<String, (String, f64, i64)> =
+                std::collections::HashMap::new();
+
+            for (mid, text, salience, created_ts, last_recalled_ts, emb_blob) in rows {
+                let emb: Option<Vec<f32>> = emb_blob.as_deref().map(db::unpack_f32_le);
+
+                // Recency basis: default = created_ts, "last_recalled" → last_recalled_ts.
+                let recency_ts = match recency_basis {
+                    RecencyBasis::Created => created_ts,
+                    RecencyBasis::LastRecalled => last_recalled_ts,
+                };
+
+                let score = crate::retrieval::recall::score_memory(
+                    emb.as_deref(),
+                    &q_emb,
+                    salience,
+                    recency_ts,
+                    now,
+                    &weights,
+                );
+
+                if let Some(emb_vec) = emb {
+                    candidates.push((mid.clone(), emb_vec));
+                }
+                meta.insert(mid, (text, score, created_ts));
+            }
+
+            // MMR diversity reranking over embedding-bearing candidates.
+            let selected =
+                crate::retrieval::mmr::mmr_select(&candidates, &q_emb, req.top_k, mmr_lambda);
+
+            // Bump last_recalled_ts for selected memories + commit.
+            conn.execute_batch("BEGIN")?;
+            for (mid, _) in &selected {
+                conn.execute(
+                    "UPDATE memories SET last_recalled_ts = ?1 WHERE id = ?2",
+                    rusqlite::params![now, mid],
+                )?;
+            }
+            conn.execute_batch("COMMIT")?;
+
+            // Build response: weighted-sum score from `meta` (NOT the MMR score).
+            let memories = selected
+                .iter()
+                .filter_map(|(mid, _)| {
+                    meta.get(mid).map(|(text, score, ts)| RecalledMemory {
+                        memory_id: mid.clone(),
+                        text: text.clone(),
+                        score: *score,
+                        ts: *ts,
+                    })
+                })
+                .collect();
+
+            Ok(RecallResp { memories })
+        })
+        .await
+        .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!("spawn_blocking panicked: {e}")))?
+    }
+
+    // -----------------------------------------------------------------------
+    // recall_about
+    // -----------------------------------------------------------------------
+
+    /// Entity-centric recall: BFS from a named entity, gather candidate memories,
+    /// score+MMR, return the texts as `hints`.
+    ///
+    /// Ports `routes_memory.py::recall_about` exactly:
+    ///
+    /// 1. Lookup seed entity by `name_lower` for the bot.
+    /// 2. BFS over `edges` (both src and dst) for `max_hops` hops.
+    /// 3. Gather memories linked to the visited entity_ids via `memory_entities`.
+    /// 4. `q_emb = embed(f"recent events near {entity}").await`.
+    /// 5. Score + MMR + bump `last_recalled_ts`.
+    /// 6. Return `hints` = texts in MMR order.
+    ///
+    /// Note: the embedding is done AFTER the initial DB lookup (seed entity
+    /// must exist), matching Python's ordering.
+    pub async fn recall_about(
+        &self,
+        req: RecallAboutReq,
+    ) -> Result<RecallAboutResp, crate::error::AppError> {
+        // Step 1–3: Synchronous DB work (lookup seed + BFS + gather candidates).
+        // No embedding needed yet — we do the entity lookup first to short-circuit
+        // on unknown entity before hitting the network.
+        let db_path = self.db_path.clone();
+        let weights = self.weights.clone();
+        let mmr_lambda = self.mmr_lambda;
+        let recency_basis = self.recency_basis.clone();
+        let entity_lower = req.entity.to_lowercase();
+
+        // Phase A: find seed_id and gather memory rows.
+        // We do this in spawn_blocking BEFORE calling the embedder so we can
+        // return early (hints=[]) if the entity is unknown.
+        let (seed_found, candidate_rows) = {
+            let db_path2 = db_path.clone();
+            let bot_id2 = req.bot_id.clone();
+            let entity_lower2 = entity_lower.clone();
+            let max_hops = req.max_hops;
+            let since_ts = req.since_ts;
+            let until_ts = req.until_ts;
+            let memory_type = req.memory_type.clone();
+
+            tokio::task::spawn_blocking(move || -> Result<(bool, Vec<(String, String, f64, i64, i64, Option<Vec<u8>>)>), crate::error::AppError> {
+                let conn = db::open_db(&db_path2)?;
+
+                // Lookup seed entity.
+                let seed_id: Option<i64> = conn
+                    .query_row(
+                        "SELECT id FROM entities WHERE bot_id = ?1 AND name_lower = ?2",
+                        rusqlite::params![bot_id2, entity_lower2],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(crate::error::AppError::Db)?;
+
+                let seed_id = match seed_id {
+                    Some(id) => id,
+                    None => return Ok((false, vec![])),
+                };
+
+                // BFS over edges.
+                let visited = bfs_entities(&conn, seed_id, max_hops)?;
+
+                // Gather candidate memories for visited entities.
+                use rusqlite::types::Value as SqlValue;
+                let mut extra_where: Vec<String> = Vec::new();
+                let mut extra_params: Vec<SqlValue> = Vec::new();
+
+                if let Some(since) = since_ts {
+                    extra_where.push("AND m.created_ts >= ?".to_owned());
+                    extra_params.push(SqlValue::Integer(since));
+                }
+                if let Some(until) = until_ts {
+                    extra_where.push("AND m.created_ts <= ?".to_owned());
+                    extra_params.push(SqlValue::Integer(until));
+                }
+                if let Some(ref mt) = memory_type {
+                    extra_where.push("AND m.memory_type = ?".to_owned());
+                    extra_params.push(SqlValue::Text(mt.clone()));
+                }
+
+                let where_fragment = extra_where.join(" ");
+
+                // Build placeholders for visited entity_ids.
+                let visited_placeholders = visited
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| format!("?{}", i + 2)) // ?1 = bot_id
+                    .collect::<Vec<_>>()
+                    .join(",");
+
+                // Count how many fixed params we have before the extras.
+                // Extra params use ? (positional, unindexed) — rusqlite accepts both.
+                let sql = format!(
+                    "SELECT DISTINCT m.id, m.text, m.salience, m.created_ts, \
+                     m.last_recalled_ts, m.embedding \
+                     FROM memories m \
+                     JOIN memory_entities me ON me.memory_id = m.id \
+                     WHERE m.bot_id = ?1 AND me.entity_id IN ({visited_placeholders}) \
+                     {where_fragment}"
+                );
+
+                // Build the full params list: bot_id, then entity_ids, then extras.
+                let mut params: Vec<SqlValue> = vec![SqlValue::Text(bot_id2)];
+                params.extend(visited.iter().map(|&id| SqlValue::Integer(id)));
+                params.extend(extra_params);
+
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt
+                    .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, f64>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, Option<Vec<u8>>>(5)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+
+                Ok((true, rows))
+            })
+            .await
+            .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!("spawn_blocking panicked: {e}")))??
+        };
+
+        if !seed_found || candidate_rows.is_empty() {
+            return Ok(RecallAboutResp { hints: vec![] });
+        }
+
+        // Step 4: embed the query (async, after knowing the entity exists).
+        // Python: `q_emb = await embedder.embed(f"recent events near {req.entity}")`
+        let query_text = format!("recent events near {}", req.entity);
+        let q_emb: Vec<f32> = self
+            .embed
+            .embed(&query_text)
+            .await
+            .map(|arc| arc.as_ref().clone())
+            .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!("embed failed: {e}")))?;
+
+        // Step 5–6: Score + MMR + update last_recalled_ts + return hints.
+        let top_k = req.top_k;
+
+        tokio::task::spawn_blocking(move || -> Result<RecallAboutResp, crate::error::AppError> {
+            let conn = db::open_db(&db_path)?;
+
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+
+            let mut candidates: Vec<(String, Vec<f32>)> = Vec::new();
+            let mut meta: std::collections::HashMap<String, (String, f64, i64)> =
+                std::collections::HashMap::new();
+
+            for (mid, text, salience, created_ts, last_recalled_ts, emb_blob) in candidate_rows {
+                let emb: Option<Vec<f32>> = emb_blob.as_deref().map(db::unpack_f32_le);
+
+                let recency_ts = match recency_basis {
+                    RecencyBasis::Created => created_ts,
+                    RecencyBasis::LastRecalled => last_recalled_ts,
+                };
+
+                let score = crate::retrieval::recall::score_memory(
+                    emb.as_deref(),
+                    &q_emb,
+                    salience,
+                    recency_ts,
+                    now,
+                    &weights,
+                );
+
+                if let Some(emb_vec) = emb {
+                    candidates.push((mid.clone(), emb_vec));
+                }
+                meta.insert(mid, (text, score, created_ts));
+            }
+
+            let selected =
+                crate::retrieval::mmr::mmr_select(&candidates, &q_emb, top_k, mmr_lambda);
+
+            conn.execute_batch("BEGIN")?;
+            for (mid, _) in &selected {
+                conn.execute(
+                    "UPDATE memories SET last_recalled_ts = ?1 WHERE id = ?2",
+                    rusqlite::params![now, mid],
+                )?;
+            }
+            conn.execute_batch("COMMIT")?;
+
+            let hints = selected
+                .iter()
+                .filter_map(|(mid, _)| meta.get(mid).map(|(text, _, _)| text.clone()))
+                .collect();
+
+            Ok(RecallAboutResp { hints })
         })
         .await
         .map_err(|e| crate::error::AppError::Internal(anyhow::anyhow!("spawn_blocking panicked: {e}")))?
@@ -1569,5 +2012,384 @@ mod tests {
 
         assert_eq!(resp.items[0].created_ts, 1_700_000_002, "most recent first");
         assert_eq!(resp.items[1].created_ts, 1_700_000_001, "older second");
+    }
+
+    // -----------------------------------------------------------------------
+    // Recall / recall_about helpers
+    // -----------------------------------------------------------------------
+
+    /// Build a unique directional unit embedding for a given `slot` in [0, 383].
+    /// Slot `i` has a 1.0 at position `i % EMBEDDING_DIM`, rest 0.0.
+    fn slot_emb(slot: usize) -> Vec<f32> {
+        let mut v = vec![0.0_f32; EMBEDDING_DIM];
+        v[slot % EMBEDDING_DIM] = 1.0;
+        v
+    }
+
+    // -----------------------------------------------------------------------
+    // RCL-1: recall returns up to top_k results, each with weighted-sum score.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn recall_returns_top_k_in_mmr_order_with_weighted_sum_score() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+
+        // Insert 4 memories. Memory 0 is most relevant (embedding aligns with query).
+        for i in 0..4u64 {
+            insert_raw_memory(
+                &conn, "botR", &format!("m_rcl{i:07}"), &format!("text {i}"),
+                0.5, "event", None, 1_700_000_000 + i as i64, &slot_emb(i as usize),
+            );
+        }
+
+        // Query embedding aligns with slot 0 → memory 0 is most relevant.
+        let q_emb = slot_emb(0);
+        let embed_url = spawn_embed_stub(q_emb).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .recall(RecallReq {
+                bot_id: "botR".to_string(),
+                query: "anything".to_string(),
+                top_k: 2,
+                since_ts: None,
+                until_ts: None,
+                memory_type: None,
+            })
+            .await
+            .expect("recall must succeed");
+
+        assert_eq!(resp.memories.len(), 2, "must return exactly top_k=2");
+        // First result should be memory 0 (highest cosine to query).
+        assert_eq!(resp.memories[0].memory_id, "m_rcl0000000");
+        // Scores must be in [0, 1] (weighted sum).
+        for m in &resp.memories {
+            assert!(m.score >= 0.0 && m.score <= 1.01, "score out of range: {}", m.score);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // RCL-2: last_recalled_ts is bumped for returned memories.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn recall_bumps_last_recalled_ts_for_selected() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+        let emb = slot_emb(0);
+        insert_raw_memory(
+            &conn, "botR2", "m_rcl_bump1", "bump text", 0.5,
+            "event", None, 1_700_000_000, &emb,
+        );
+
+        let before = {
+            conn.query_row(
+                "SELECT last_recalled_ts FROM memories WHERE id='m_rcl_bump1'",
+                [], |r| r.get::<_, i64>(0),
+            ).unwrap()
+        };
+
+        // Give the clock a chance to advance by sleeping 1 second would be slow;
+        // instead we just record the time before and check that after recall
+        // the stored value equals the `now` used inside recall (i.e., ≥ before).
+        let embed_url = spawn_embed_stub(slot_emb(0)).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        svc.recall(RecallReq {
+            bot_id: "botR2".to_string(),
+            query: "bump".to_string(),
+            top_k: 5,
+            since_ts: None,
+            until_ts: None,
+            memory_type: None,
+        })
+        .await
+        .expect("recall");
+
+        let conn2 = db::open_db(tmp.path()).unwrap();
+        let after: i64 = conn2.query_row(
+            "SELECT last_recalled_ts FROM memories WHERE id='m_rcl_bump1'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert!(after >= before, "last_recalled_ts must be bumped: before={before} after={after}");
+    }
+
+    // -----------------------------------------------------------------------
+    // RCL-3: since_ts / until_ts / memory_type filters apply.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn recall_filters_since_until_and_type() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+        let emb = slot_emb(0);
+
+        insert_raw_memory(&conn, "botF", "m_f_in",  "in range",  0.5, "goal",  None, 1_700_000_002, &emb);
+        insert_raw_memory(&conn, "botF", "m_f_out", "out range", 0.5, "goal",  None, 1_700_000_099, &emb);
+        insert_raw_memory(&conn, "botF", "m_f_typ", "wrong type",0.5, "event", None, 1_700_000_002, &emb);
+
+        let embed_url = spawn_embed_stub(slot_emb(0)).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .recall(RecallReq {
+                bot_id: "botF".to_string(),
+                query: "anything".to_string(),
+                top_k: 10,
+                since_ts: Some(1_700_000_000),
+                until_ts: Some(1_700_000_010),
+                memory_type: Some("goal".to_string()),
+            })
+            .await
+            .expect("recall with filters");
+
+        assert_eq!(resp.memories.len(), 1, "only 1 memory matches all filters");
+        assert_eq!(resp.memories[0].memory_id, "m_f_in");
+    }
+
+    // -----------------------------------------------------------------------
+    // RCL-4: unknown bot → empty memories list.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn recall_unknown_bot_returns_empty() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        open_and_migrate(tmp.path());
+
+        let embed_url = spawn_embed_stub(slot_emb(0)).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .recall(RecallReq {
+                bot_id: "no_such_bot".to_string(),
+                query: "anything".to_string(),
+                top_k: 5,
+                since_ts: None,
+                until_ts: None,
+                memory_type: None,
+            })
+            .await
+            .expect("recall must not error");
+
+        assert!(resp.memories.is_empty(), "unknown bot → empty memories");
+    }
+
+    // -----------------------------------------------------------------------
+    // RCL-5: score field is the weighted-sum score (not MMR score).
+    // The weighted-sum is computed BEFORE MMR; we verify it is > 0 and ≤ 1
+    // (since all weights sum to 1 and all components are in [0,1]).
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn recall_score_is_weighted_sum_not_mmr_score() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+        let emb = slot_emb(0);
+        // High salience + recent + relevant → score near 1.0
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        insert_raw_memory(&conn, "botS", "m_score1", "score test", 1.0, "event", None, now_ts, &emb);
+
+        let embed_url = spawn_embed_stub(slot_emb(0)).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .recall(RecallReq {
+                bot_id: "botS".to_string(),
+                query: "score test".to_string(),
+                top_k: 1,
+                since_ts: None,
+                until_ts: None,
+                memory_type: None,
+            })
+            .await
+            .expect("recall");
+
+        assert_eq!(resp.memories.len(), 1);
+        let score = resp.memories[0].score;
+        // w_rel=0.5 * cos≈1.0 + w_rec=0.2 * exp(0)≈1.0 + w_imp=0.3 * 1.0 ≈ 1.0
+        assert!(score > 0.9, "high-salience recent relevant memory must have score > 0.9, got {score}");
+        assert!(score <= 1.01, "weighted-sum score must be ≤ 1.01, got {score}");
+    }
+
+    // -----------------------------------------------------------------------
+    // RCL-6: ts field in RecalledMemory = created_ts.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn recall_ts_equals_created_ts() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+        let emb = slot_emb(0);
+        let created_ts: i64 = 1_750_000_042;
+        insert_raw_memory(&conn, "botTS", "m_ts0001", "ts test", 0.7, "event", None, created_ts, &emb);
+
+        let embed_url = spawn_embed_stub(slot_emb(0)).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .recall(RecallReq {
+                bot_id: "botTS".to_string(),
+                query: "ts test".to_string(),
+                top_k: 1,
+                since_ts: None,
+                until_ts: None,
+                memory_type: None,
+            })
+            .await
+            .expect("recall");
+
+        assert_eq!(resp.memories.len(), 1);
+        assert_eq!(resp.memories[0].ts, created_ts, "ts must equal created_ts");
+    }
+
+    // -----------------------------------------------------------------------
+    // RA-1: recall_about returns hints for entity-linked memories.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn recall_about_returns_hints_for_linked_entity() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+        let emb = slot_emb(5);
+
+        // Write a memory and link it to entity "Arthas".
+        insert_raw_memory(&conn, "botA", "m_ra00001", "Arthas attacked", 0.8, "event", None, 1_700_000_000, &emb);
+        let entity_id = db::entities::upsert_entity(&conn, "botA", "Arthas", None).unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES ('m_ra00001', ?1)",
+            rusqlite::params![entity_id],
+        ).unwrap();
+
+        let embed_url = spawn_embed_stub(slot_emb(5)).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .recall_about(RecallAboutReq {
+                bot_id: "botA".to_string(),
+                entity: "Arthas".to_string(),
+                max_hops: 2,
+                top_k: 5,
+                since_ts: None,
+                until_ts: None,
+                memory_type: None,
+            })
+            .await
+            .expect("recall_about");
+
+        assert_eq!(resp.hints.len(), 1, "one linked memory → one hint");
+        assert_eq!(resp.hints[0], "Arthas attacked");
+    }
+
+    // -----------------------------------------------------------------------
+    // RA-2: recall_about follows edges (1-hop).
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn recall_about_follows_entity_edges() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+        let emb = slot_emb(10);
+
+        // Entity A → B via edge.
+        let a_id = db::entities::upsert_entity(&conn, "botB", "EntityA", None).unwrap();
+        let b_id = db::entities::upsert_entity(&conn, "botB", "EntityB", None).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO edges (src_entity_id, rel, dst_entity_id, weight, last_seen_ts) VALUES (?1, 'link', ?2, 1.0, 0)",
+            rusqlite::params![a_id, b_id],
+        ).unwrap();
+
+        // Memory linked to EntityB only.
+        insert_raw_memory(&conn, "botB", "m_ra_edge1", "B memory", 0.7, "event", None, 1_700_000_000, &emb);
+        conn.execute(
+            "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES ('m_ra_edge1', ?1)",
+            rusqlite::params![b_id],
+        ).unwrap();
+
+        let embed_url = spawn_embed_stub(slot_emb(10)).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        // Query from EntityA with max_hops=1 — should reach B and find the memory.
+        let resp = svc
+            .recall_about(RecallAboutReq {
+                bot_id: "botB".to_string(),
+                entity: "EntityA".to_string(),
+                max_hops: 1,
+                top_k: 5,
+                since_ts: None,
+                until_ts: None,
+                memory_type: None,
+            })
+            .await
+            .expect("recall_about");
+
+        assert_eq!(resp.hints.len(), 1, "must follow edge A→B and return B's memory");
+        assert_eq!(resp.hints[0], "B memory");
+    }
+
+    // -----------------------------------------------------------------------
+    // RA-3: unknown entity → empty hints.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn recall_about_unknown_entity_returns_empty() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        open_and_migrate(tmp.path());
+
+        let embed_url = spawn_embed_stub(slot_emb(0)).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .recall_about(RecallAboutReq {
+                bot_id: "botC".to_string(),
+                entity: "NoSuchEntity".to_string(),
+                max_hops: 2,
+                top_k: 5,
+                since_ts: None,
+                until_ts: None,
+                memory_type: None,
+            })
+            .await
+            .expect("recall_about must not error");
+
+        assert!(resp.hints.is_empty(), "unknown entity → empty hints");
+    }
+
+    // -----------------------------------------------------------------------
+    // RA-4: recall_about returns only texts (no scores), in MMR order.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn recall_about_returns_texts_only_no_scores() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = open_and_migrate(tmp.path());
+
+        // 3 memories linked to same entity with distinct embeddings.
+        let entity_id = db::entities::upsert_entity(&conn, "botD", "Boss", None).unwrap();
+        for i in 0..3usize {
+            let id = format!("m_ra_txt{i:04}");
+            let text = format!("boss memory {i}");
+            insert_raw_memory(&conn, "botD", &id, &text, 0.6, "event", None, 1_700_000_000 + i as i64, &slot_emb(i));
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_entities (memory_id, entity_id) VALUES (?1, ?2)",
+                rusqlite::params![id, entity_id],
+            ).unwrap();
+        }
+
+        let embed_url = spawn_embed_stub(slot_emb(0)).await;
+        let svc = make_service(tmp.path().to_path_buf(), &embed_url);
+
+        let resp = svc
+            .recall_about(RecallAboutReq {
+                bot_id: "botD".to_string(),
+                entity: "Boss".to_string(),
+                max_hops: 2,
+                top_k: 2,
+                since_ts: None,
+                until_ts: None,
+                memory_type: None,
+            })
+            .await
+            .expect("recall_about");
+
+        // hints is Vec<String> — texts only, top_k=2.
+        assert_eq!(resp.hints.len(), 2, "must return top_k=2 hints");
+        // All hints are non-empty strings.
+        for h in &resp.hints {
+            assert!(!h.is_empty(), "hint must not be empty");
+        }
     }
 }

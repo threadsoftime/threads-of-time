@@ -20,7 +20,96 @@
 //!     return cur.lastrowid
 //! ```
 
+use std::collections::HashSet;
+
 use rusqlite::Connection;
+
+/// BFS over the `edges` table starting from `seed_entity_id`, following up to
+/// `max_hops` hops in BOTH directions (src→dst and dst→src), scoped to
+/// `bot_id` via the entity table.
+///
+/// Ports the BFS loop in `routes_memory.py::recall_about`:
+/// ```python
+/// visited = {seed_id}
+/// frontier = {seed_id}
+/// for _ in range(max(0, req.max_hops)):
+///     if not frontier: break
+///     # query: WHERE src_entity_id IN frontier OR dst_entity_id IN frontier
+///     for s, d in rows:
+///         for n in (s, d):
+///             if n not in visited:
+///                 next_frontier.add(n); visited.add(n)
+///     frontier = next_frontier
+/// ```
+///
+/// Returns all reachable entity_ids including `seed_entity_id`.
+/// The edges table has no `bot_id` column; scoping is implicit through
+/// `memory_entities` (the caller uses the returned ids against `m.bot_id`).
+pub fn bfs_entities(
+    conn: &Connection,
+    seed_entity_id: i64,
+    max_hops: usize,
+) -> rusqlite::Result<Vec<i64>> {
+    let mut visited: HashSet<i64> = HashSet::new();
+    visited.insert(seed_entity_id);
+    let mut frontier: HashSet<i64> = HashSet::new();
+    frontier.insert(seed_entity_id);
+
+    for _ in 0..max_hops {
+        if frontier.is_empty() {
+            break;
+        }
+        let frontier_vec: Vec<i64> = frontier.iter().copied().collect();
+        // Build a dynamic placeholder string for the IN clause.
+        // We need it twice (for src_entity_id and dst_entity_id).
+        let placeholders = frontier_vec
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+        let n = frontier_vec.len();
+        // Offset for the second IN set: ?{n+1} … ?{2n}
+        let placeholders2 = frontier_vec
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", n + i + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT src_entity_id, dst_entity_id FROM edges \
+             WHERE src_entity_id IN ({placeholders}) \
+                OR dst_entity_id IN ({placeholders2})"
+        );
+
+        // Build the params list: frontier ids × 2.
+        let mut params: Vec<rusqlite::types::Value> = frontier_vec
+            .iter()
+            .map(|&id| rusqlite::types::Value::Integer(id))
+            .collect();
+        params.extend(frontier_vec.iter().map(|&id| rusqlite::types::Value::Integer(id)));
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut next_frontier: HashSet<i64> = HashSet::new();
+        for (s, d) in rows {
+            for &n_id in &[s, d] {
+                if !visited.contains(&n_id) {
+                    next_frontier.insert(n_id);
+                    visited.insert(n_id);
+                }
+            }
+        }
+        frontier = next_frontier;
+    }
+
+    Ok(visited.into_iter().collect())
+}
 
 /// Insert or fetch an entity row; optionally set `type` when the row is new or
 /// the existing row has `type IS NULL`.
@@ -205,5 +294,109 @@ mod tests {
             Some("character"),
             "existing non-null type must not be overwritten"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // bfs_entities tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: insert an edge between two entity_ids.
+    fn insert_edge(conn: &rusqlite::Connection, src: i64, dst: i64) {
+        conn.execute(
+            "INSERT OR REPLACE INTO edges \
+             (src_entity_id, rel, dst_entity_id, weight, last_seen_ts) \
+             VALUES (?1, 'related', ?2, 1.0, 0)",
+            rusqlite::params![src, dst],
+        )
+        .unwrap();
+    }
+
+    /// BFS-1: no edges → only the seed is returned.
+    #[test]
+    fn bfs_no_edges_returns_seed_only() {
+        let conn = open_migrated();
+        let seed = upsert_entity(&conn, "bot1", "Alice", None).unwrap();
+        let result = bfs_entities(&conn, seed, 2).unwrap();
+        assert_eq!(result, vec![seed], "no edges → only seed returned");
+    }
+
+    /// BFS-2: direct edge (1 hop).  max_hops=1 reaches the neighbour.
+    #[test]
+    fn bfs_one_hop_reaches_neighbour() {
+        let conn = open_migrated();
+        let alice = upsert_entity(&conn, "bot1", "Alice", None).unwrap();
+        let bob = upsert_entity(&conn, "bot1", "Bob", None).unwrap();
+        insert_edge(&conn, alice, bob);
+
+        let mut result = bfs_entities(&conn, alice, 1).unwrap();
+        result.sort();
+        let mut expected = vec![alice, bob];
+        expected.sort();
+        assert_eq!(result, expected);
+    }
+
+    /// BFS-3: both directions — edge dst→src reached when starting from src.
+    #[test]
+    fn bfs_follows_reverse_direction() {
+        let conn = open_migrated();
+        let alice = upsert_entity(&conn, "bot1", "Alice", None).unwrap();
+        let carol = upsert_entity(&conn, "bot1", "Carol", None).unwrap();
+        // Edge: carol → alice (alice is the dst)
+        insert_edge(&conn, carol, alice);
+
+        // Starting from alice, should reach carol via reverse direction.
+        let mut result = bfs_entities(&conn, alice, 1).unwrap();
+        result.sort();
+        let mut expected = vec![alice, carol];
+        expected.sort();
+        assert_eq!(result, expected, "reverse direction must be followed");
+    }
+
+    /// BFS-4: 2-hop chain A→B→C with max_hops=2 reaches all three.
+    #[test]
+    fn bfs_two_hop_chain() {
+        let conn = open_migrated();
+        let a = upsert_entity(&conn, "bot1", "A", None).unwrap();
+        let b = upsert_entity(&conn, "bot1", "B", None).unwrap();
+        let c = upsert_entity(&conn, "bot1", "C", None).unwrap();
+        insert_edge(&conn, a, b);
+        insert_edge(&conn, b, c);
+
+        let mut result = bfs_entities(&conn, a, 2).unwrap();
+        result.sort();
+        let mut expected = vec![a, b, c];
+        expected.sort();
+        assert_eq!(result, expected, "2-hop chain from A must reach C");
+    }
+
+    /// BFS-5: 2-hop chain with max_hops=1 stops at B (does not reach C).
+    #[test]
+    fn bfs_max_hops_limits_reach() {
+        let conn = open_migrated();
+        let a = upsert_entity(&conn, "bot1", "A", None).unwrap();
+        let b = upsert_entity(&conn, "bot1", "B", None).unwrap();
+        let c = upsert_entity(&conn, "bot1", "C", None).unwrap();
+        insert_edge(&conn, a, b);
+        insert_edge(&conn, b, c);
+
+        let mut result = bfs_entities(&conn, a, 1).unwrap();
+        result.sort();
+        let mut expected = vec![a, b];
+        expected.sort();
+        assert_eq!(result, expected, "max_hops=1 must not reach C");
+        assert!(!result.contains(&c), "C must not be reachable with max_hops=1");
+    }
+
+    /// BFS-6: max_hops=0 → only the seed.
+    #[test]
+    fn bfs_zero_hops_returns_seed_only() {
+        let conn = open_migrated();
+        let a = upsert_entity(&conn, "bot1", "A", None).unwrap();
+        let b = upsert_entity(&conn, "bot1", "B", None).unwrap();
+        insert_edge(&conn, a, b);
+
+        let result = bfs_entities(&conn, a, 0).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result.contains(&a));
     }
 }
