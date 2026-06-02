@@ -113,8 +113,45 @@ use memory_rs::{
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Float comparison tolerance for score parity.
+/// Float comparison tolerance for scores that contain NO recency term.
+///
+/// Covers: (a) RRF search scores (purely rank-based integer arithmetic — no
+/// `exp(-(now-ts)/tau)` term); (b) ordering / set-boundary comparisons where
+/// both sides compute `now` within the same in-process call so the recency
+/// terms cancel to within float-accumulation noise (~9e-9 each).
 const EPS: f64 = 1e-6;
+
+/// Timing-aware tolerance for absolute scores that CONTAIN the recency term.
+///
+/// Formula: `score_memory = w_rel·cosine + w_rec·exp(-(now−created_ts)/τ) + w_imp·salience`
+///
+/// Python computes `now` in its HTTP handler; Rust computes `now` inside
+/// `spawn_blocking` roughly 1-2 seconds later.  The maximum rate at which the
+/// recency term can change is `|d/dt exp(-t/τ)| = 1/τ` (at t=0, where the
+/// term is largest), so the score difference induced by a timing gap `Δt` is
+/// bounded by:
+///
+///   Δscore ≤ w_rec · Δt / τ
+///
+/// With w_rec = 0.2 and τ = 604_800 s (7 days), a conservative DT_MAX = 30 s:
+///
+///   timing_budget = 0.2 × 30 / 604_800 ≈ 9.92e-6
+///
+/// Adding the float-accumulation floor FLOAT_EPS = 1e-6:
+///
+///   SCORE_EPS_TIMING = 1e-6 + 9.92e-6 ≈ 1.09e-5
+///
+/// Applied ONLY to recall `score` (contains recency) and anchor score
+/// comparisons.  NOT applied to search scores (RRF — no recency), NOT applied
+/// to ordering comparisons (recency terms cancel between two items compared at
+/// the same `now`).
+const SCORE_EPS_TIMING: f64 = {
+    const FLOAT_EPS: f64 = 1e-6;
+    const W_REC: f64 = 0.2;
+    const TAU: f64 = 604_800.0;
+    const DT_MAX: f64 = 30.0; // conservative inter-process wall-clock skew (seconds)
+    FLOAT_EPS + W_REC * DT_MAX / TAU
+};
 
 /// Number of top bots (by memory count) to exercise.
 const TOP_BOTS: usize = 8;
@@ -458,11 +495,12 @@ fn compare_ordered_with_eps_tolerance(
     Ok(())
 }
 
-/// Compare score values within EPS after set/order comparison.
-fn compare_scores_eps(
+/// Compare score values within a given `eps` after set/order comparison.
+fn compare_scores_with_eps(
     label: &str,
     rust_list: &[(String, f64)],
     python_list: &[(String, f64)],
+    eps: f64,
 ) -> Result<(), String> {
     let rust_scores: HashMap<&str, f64> =
         rust_list.iter().map(|(id, s)| (id.as_str(), *s)).collect();
@@ -472,15 +510,35 @@ fn compare_scores_eps(
     for (id, rs) in &rust_scores {
         if let Some(&ps) = python_scores.get(id) {
             let diff = (rs - ps).abs();
-            if diff > EPS {
+            if diff > eps {
                 return Err(format!(
                     "[parity] SCORE MISMATCH — {label}  memory_id={id}\n\
-                     Rust={rs:.9}  Python={ps:.9}  diff={diff:.2e}  eps={EPS:.0e}"
+                     Rust={rs:.9}  Python={ps:.9}  diff={diff:.2e}  eps={eps:.2e}"
                 ));
             }
         }
     }
     Ok(())
+}
+
+/// Compare score values within EPS (for RRF / recency-free scores).
+fn compare_scores_eps(
+    label: &str,
+    rust_list: &[(String, f64)],
+    python_list: &[(String, f64)],
+) -> Result<(), String> {
+    compare_scores_with_eps(label, rust_list, python_list, EPS)
+}
+
+/// Compare score values within SCORE_EPS_TIMING (for recall scores containing
+/// the recency term, where cross-process wall-clock skew introduces bounded
+/// divergence — see the SCORE_EPS_TIMING derivation comment above).
+fn compare_scores_timing_eps(
+    label: &str,
+    rust_list: &[(String, f64)],
+    python_list: &[(String, f64)],
+) -> Result<(), String> {
+    compare_scores_with_eps(label, rust_list, python_list, SCORE_EPS_TIMING)
 }
 
 // ---------------------------------------------------------------------------
@@ -563,8 +621,11 @@ async fn parity_cutover_gate() {
                     Err(e) => panic!("{e}"),
                 }
 
-                // Score parity on items that appear in both.
-                match compare_scores_eps(&label, &rust_ranked, &python_ranked) {
+                // Absolute score parity on items that appear in both.
+                // Recall scores contain a recency term exp(-(now-ts)/τ); Python
+                // and Rust compute `now` in separate processes with a small
+                // wall-clock skew, so use SCORE_EPS_TIMING (see derivation above).
+                match compare_scores_timing_eps(&label, &rust_ranked, &python_ranked) {
                     Ok(()) => {}
                     Err(e) => panic!("{e}"),
                 }
@@ -613,6 +674,8 @@ async fn parity_cutover_gate() {
                     Err(e) => panic!("{e}"),
                 }
 
+                // Search scores are RRF (pure rank-based integer arithmetic; NO
+                // recency term) — strict EPS=1e-6 applies; timing skew is irrelevant.
                 match compare_scores_eps(&label, &rust_ranked, &python_ranked) {
                     Ok(()) => {}
                     Err(e) => panic!("{e}"),
@@ -658,14 +721,14 @@ async fn parity_cutover_gate() {
         // For a handful of PARITY_MEM:{mid} recall queries, verify that `mid`
         // appears in BOTH sides' results (top_k=50 is large enough for bots
         // with 2000 memories to surface the queried mid) and that its score
-        // matches between sides within EPS.
+        // matches between sides within SCORE_EPS_TIMING.
         //
-        // This is the strongest correctness proof available without prior
-        // knowledge of the recency/importance landscape: the queried mid has
-        // cosine = 1.0 with itself, giving it the maximum possible relevance
-        // contribution.  Both sides must compute the same composite score for
-        // it.  Any discrepancy > EPS indicates a scoring bug in one
-        // implementation.
+        // This is the strongest correctness proof available: the queried mid
+        // has cosine = 1.0 with itself, giving it the maximum possible relevance
+        // contribution.  Cosine and salience are identical on both sides; the only
+        // source of score difference is the recency term's cross-process wall-clock
+        // skew.  Any discrepancy exceeding SCORE_EPS_TIMING indicates a genuine
+        // scoring bug in one implementation (see constant derivation above).
         let anchor_mids = pick_memory_ids(&snapshot, bot_id, ANCHOR_MIDS_PER_BOT);
         for mid in &anchor_mids {
             let query = format!("PARITY_MEM:{mid}");
@@ -704,18 +767,22 @@ async fn parity_cutover_gate() {
                  Python list: {python_ranked:?}"
             );
 
-            // Score of the queried mid must match to EPS on both sides.
-            // This is the strongest arithmetic parity check: cosine = 1.0 is
-            // exact and bit-identical, so any divergence is a genuine scoring bug.
+            // Score of the queried mid must match within SCORE_EPS_TIMING on
+            // both sides.  Cosine = 1.0 is exact and bit-identical; w_imp·salience
+            // is read from the DB and is identical.  The only source of divergence
+            // is the recency term: Python computes `now` in its HTTP handler, Rust
+            // computes `now` inside spawn_blocking ~1-2 s later, giving a bounded
+            // Δscore ≤ w_rec·Δt/τ (see SCORE_EPS_TIMING derivation).  Any
+            // divergence exceeding that bound is a genuine scoring bug.
             let rust_mid_score = rust_mid_entry.unwrap().1;
             let python_mid_score = python_mid_entry.unwrap().1;
             let score_diff = (rust_mid_score - python_mid_score).abs();
             assert!(
-                score_diff <= EPS,
+                score_diff <= SCORE_EPS_TIMING,
                 "[parity] ANCHOR SCORE MISMATCH — {label}\n\
                  Rust   score({mid}) = {rust_mid_score:.9}\n\
                  Python score({mid}) = {python_mid_score:.9}\n\
-                 diff = {score_diff:.2e}  eps = {EPS:.0e}"
+                 diff = {score_diff:.2e}  eps = {SCORE_EPS_TIMING:.2e} (timing-aware)"
             );
 
             // Both sides should also agree on ordering up to EPS-tie tolerance.
@@ -882,8 +949,12 @@ async fn parity_cutover_gate() {
                  Only in Python: {only_python:?}"
             );
 
-            // Score parity on common items.
-            match compare_scores_eps(&label, &rust_ranked, &python_ranked) {
+            // Absolute score parity on common items.
+            // These are recall scores containing the recency term; use
+            // SCORE_EPS_TIMING to account for cross-process wall-clock skew
+            // (SHA-256 stub produces a flat cosine landscape so the recency
+            // contribution is the dominant source of difference here).
+            match compare_scores_timing_eps(&label, &rust_ranked, &python_ranked) {
                 Ok(()) => {}
                 Err(e) => panic!("{e}"),
             }
