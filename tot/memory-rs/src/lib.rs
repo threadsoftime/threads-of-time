@@ -14,4 +14,5 @@ pub mod config;
 pub mod db;
 pub mod embeddings;
 pub mod error;
+pub mod routes;
 pub mod state;
