@@ -80,6 +80,31 @@ pub fn open_db(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
     conn.execute_batch(
         "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
     )?;
+    // Unconditional idempotent index guard — mirrors Python `run_legacy_migrations`
+    // which always executes `CREATE INDEX IF NOT EXISTS idx_memories_bot`.
+    //
+    // The versioned Rust migration runner (migrate::run) skips migration 0001 on
+    // existing snapshots where schema_version=1 is already recorded, so the index
+    // may not be present on DBs created before this index was added. Without the
+    // index, SQLite uses the TEXT PRIMARY KEY B-tree for `WHERE bot_id=? AND id IN
+    // (...)`, returning TEXT-sorted order; with it, SQLite switches to an index
+    // scan on bot_id returning rowid order — exactly what Python sees after it runs
+    // its legacy migration on startup. Both orders must agree for MMR tie-break parity.
+    //
+    // Guard: only run if the `memories` table already exists (fresh in-memory and
+    // not-yet-migrated connections call open_db before migrations are applied).
+    let memories_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memories'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0) > 0;
+    if memories_exists {
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_memories_bot ON memories(bot_id);",
+        )?;
+    }
     Ok(conn)
 }
 

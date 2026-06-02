@@ -1676,28 +1676,26 @@ impl MemoryService {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
 
             // Build text_by_id and candidates_for_mmr.
-            // candidates_for_mmr preserves fused insertion order (Python iterates
-            // `fused.keys()` which is CPython insertion-ordered dict).
+            //
+            // Python iterates `rows = cur.fetchall()` directly — SQLite returns rows
+            // in rowid (physical storage) order when there is no ORDER BY.  This is
+            // the order that reaches MMR's strict-`>` tie-break.
+            //
+            // The previous Rust code re-ordered via `fused.iter()` (RRF-score order),
+            // causing near-tie divergence on dense-dominated queries (parity gate case
+            // `search bot=1013 PARITY_MEM:m_clww3vcbl5e`).  Fix: iterate `fetched_rows`
+            // directly, exactly as Python does.
             let mut text_by_id: std::collections::HashMap<String, (String, i64)> =
                 std::collections::HashMap::new();
-            let mut emb_by_id: std::collections::HashMap<String, Vec<f32>> =
-                std::collections::HashMap::new();
+            let mut candidates_for_mmr: Vec<(String, Vec<f32>)> = Vec::new();
 
             for (mid, text, ct, blob) in fetched_rows {
                 text_by_id.insert(mid.clone(), (text, ct));
+                // Python: `if blob: candidates_for_mmr.append((mid, np.frombuffer(...)))`
                 if let Some(b) = blob {
-                    emb_by_id.insert(mid, db::unpack_f32_le(&b));
+                    candidates_for_mmr.push((mid, db::unpack_f32_le(&b)));
                 }
             }
-
-            // Build candidates in fused insertion order, including only rows with
-            // an embedding (matching Python's `if blob: candidates_for_mmr.append(...)`).
-            let candidates_for_mmr: Vec<(String, Vec<f32>)> = fused
-                .iter()
-                .filter_map(|(id, _)| {
-                    emb_by_id.get(id.as_str()).map(|emb| (id.clone(), emb.clone()))
-                })
-                .collect();
 
             // ----------------------------------------------------------------
             // MMR diversity reranking.
