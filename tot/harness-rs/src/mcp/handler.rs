@@ -20,15 +20,18 @@
 //! `harness_daemon/tool_schemas.py` (the one-liner per tool) so the brain
 //! receives the same hints as from the Python daemon.
 
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rmcp::{
     ServerHandler,
     handler::server::{router::tool::ToolRouter, tool::Extension, wrapper::Parameters},
-    model::{CallToolResult, Content},
+    model::{CallToolResult, Content, ListToolsResult, PaginatedRequestParams},
+    service::RequestContext,
+    RoleServer,
     tool, tool_handler, tool_router,
 };
-use serde_json::Value;
+use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use crate::audit::AuditEvent;
@@ -37,6 +40,156 @@ use crate::config::TokenRecord;
 use crate::dispatch::dispatch_tool;
 use crate::mcp::schemas;
 use crate::rest::SharedState;
+
+// ── Nullable-schema transform ─────────────────────────────────────────────────
+
+/// Convert schemars draft-2020-12 nullable form to pydantic-v2 `anyOf` form.
+///
+/// schemars 1.x emits `{"type": ["integer", "null"], ...}` for `Option<i64>`.
+/// The brain client (`schema_builder.py:_render_arg`) passes `schema.get("type")`
+/// directly to `_JSON_TO_PY_TYPE.get(...)` — a list value is unhashable and
+/// crashes with `TypeError: unhashable type: 'list'` at startup.
+///
+/// This function walks the entire schema tree (recursively through `properties`,
+/// `$defs`, `anyOf`, `allOf`, `oneOf`, `items`, etc.) and wherever it finds a
+/// node whose `"type"` key is a JSON array (possibly containing `"null"`), it
+/// rewrites that node as:
+///
+/// ```json
+/// {
+///   "anyOf": [{"type": "T1"}, {"type": "T2"}, {"type": "null"}],
+///   "description": "...",   // outer-level metadata kept
+///   "default": ...,         // outer-level metadata kept
+///   "title": "...",         // outer-level metadata kept
+/// }
+/// ```
+///
+/// Keys that are structural type descriptors (`"type"`, `"format"`) are moved
+/// into the first `anyOf` branch; keys that are documentation/defaults
+/// (`"description"`, `"default"`, `"title"`) stay at the outer level,
+/// mirroring pydantic v2 output.
+///
+/// The transform is applied at the SERVING BOUNDARY so the stored schemas are
+/// not mutated — only the `list_tools` response is affected.
+pub fn transform_nullable_types(v: Value) -> Value {
+    match v {
+        Value::Object(map) => transform_nullable_object(map),
+        Value::Array(arr)  => Value::Array(arr.into_iter().map(transform_nullable_types).collect()),
+        other              => other,
+    }
+}
+
+/// Structural keys that belong INSIDE an `anyOf` branch (not at the outer level).
+const STRUCTURAL_KEYS: &[&str] = &["format", "minimum", "maximum", "minLength", "maxLength",
+                                   "pattern", "enum", "const", "items", "prefixItems",
+                                   "properties", "required", "additionalProperties",
+                                   "allOf", "anyOf", "oneOf", "not",
+                                   "$ref", "$defs", "$schema"];
+
+fn transform_nullable_object(mut map: Map<String, Value>) -> Value {
+    // First recursively transform all nested values.
+    for v in map.values_mut() {
+        *v = transform_nullable_types(std::mem::replace(v, Value::Null));
+    }
+
+    // Now check if "type" is an array.
+    let type_is_array = map
+        .get("type")
+        .map(|t| t.is_array())
+        .unwrap_or(false);
+
+    if !type_is_array {
+        return Value::Object(map);
+    }
+
+    // Extract the type array.
+    let type_arr: Vec<Value> = match map.remove("type") {
+        Some(Value::Array(a)) => a,
+        other => {
+            // Shouldn't happen, but restore and return unchanged.
+            if let Some(t) = other { map.insert("type".into(), t); }
+            return Value::Object(map);
+        }
+    };
+
+    // Build anyOf branches: one per type string in the array.
+    // Each non-null type gets its own branch; structural sibling keys (format,
+    // minimum, etc.) are pulled into the FIRST non-null branch only (same as
+    // pydantic, which puts format annotations inside the typed branch).
+    let non_null_types: Vec<&Value> = type_arr.iter().filter(|t| t != &&Value::String("null".into())).collect();
+    let has_null = type_arr.iter().any(|t| t == &Value::String("null".into()));
+
+    // Collect structural sibling keys to move into the first non-null branch.
+    let mut first_branch_extra: Map<String, Value> = Map::new();
+    for &key in STRUCTURAL_KEYS {
+        if key == "anyOf" || key == "oneOf" || key == "allOf" {
+            // These are already present in the map (transformed above) — leave them.
+            continue;
+        }
+        if let Some(v) = map.remove(key) {
+            first_branch_extra.insert(key.to_string(), v);
+        }
+    }
+
+    let mut branches: Vec<Value> = Vec::new();
+    let mut is_first = true;
+    for type_val in &non_null_types {
+        let mut branch: Map<String, Value> = Map::new();
+        branch.insert("type".into(), (*type_val).clone());
+        if is_first {
+            branch.extend(first_branch_extra.clone());
+            is_first = false;
+        }
+        branches.push(Value::Object(branch));
+    }
+    if has_null {
+        branches.push(Value::Object({
+            let mut m = Map::new();
+            m.insert("type".into(), Value::String("null".into()));
+            m
+        }));
+    }
+
+    // If there's only one type (no null case, e.g. a plain non-nullable array type),
+    // skip anyOf expansion — just reconstruct.
+    if !has_null && non_null_types.len() == 1 {
+        // Restore: single-type array → plain type string (shouldn't normally happen
+        // with schemars, but handle gracefully).
+        map.insert("type".into(), non_null_types[0].clone());
+        for (k, v) in first_branch_extra {
+            map.insert(k, v);
+        }
+        return Value::Object(map);
+    }
+
+    // Build the outer node: anyOf + outer-level metadata keys stay.
+    map.insert("anyOf".into(), Value::Array(branches));
+    // type was already removed; structural keys were moved to branch — done.
+    Value::Object(map)
+}
+
+/// Apply `transform_nullable_types` to every tool in a `ListToolsResult`.
+///
+/// The `input_schema` on each `Tool` is an `Arc<JsonObject>`; we clone the map,
+/// transform it, and re-wrap it.
+fn transform_tools_schemas(mut result: ListToolsResult) -> ListToolsResult {
+    result.tools = result.tools
+        .into_iter()
+        .map(|mut tool| {
+            // Clone the JsonObject (serde_json::Map<String, Value>) into a Value::Object,
+            // transform, then re-wrap as Arc<JsonObject>.
+            let schema_val = Value::Object((*tool.input_schema).clone());
+            let transformed = transform_nullable_types(schema_val);
+            let new_map = match transformed {
+                Value::Object(m) => m,
+                _                 => Map::new(),
+            };
+            tool.input_schema = Arc::new(new_map);
+            tool
+        })
+        .collect();
+    result
+}
 
 // ── HarnessMcp ────────────────────────────────────────────────────────────────
 
@@ -421,8 +574,29 @@ impl HarnessMcp {
 
 // `#[tool_handler]` sets serverInfo.name and serverInfo.version in the
 // `initialize` response (spike finding (e): name="tot-harness", version="0.2.0").
+//
+// We define `list_tools` MANUALLY here so the macro skips generating the default.
+// (rmcp-macros tool_handler only generates `list_tools` when `has_method` returns
+// false — see rmcp-macros-1.7.0/src/tool_handler.rs:64.)  Our override calls
+// `Self::tool_router().list_all()` (identical to the macro default) and then
+// applies `transform_tools_schemas` to rewrite every nullable `"type":["T","null"]`
+// as `"anyOf":[{"type":"T"},{"type":"null"}]` — the pydantic-v2 form the brain
+// client (`schema_builder.py:_render_arg`) expects.
 #[tool_handler(name = "tot-harness", version = "0.2.0")]
-impl ServerHandler for HarnessMcp {}
+impl ServerHandler for HarnessMcp {
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, rmcp::ErrorData> {
+        let raw = ListToolsResult {
+            tools:       Self::tool_router().list_all(),
+            meta:        None,
+            next_cursor: None,
+        };
+        Ok(transform_tools_schemas(raw))
+    }
+}
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
@@ -515,5 +689,187 @@ mod tests {
         let input = json!({ "x": 1, "y": "two", "z": false });
         let out = strip_top_level_nulls(input.clone());
         assert_eq!(out, input);
+    }
+
+    // ── transform_nullable_types ──────────────────────────────────────────────
+    //
+    // The brain client's _render_arg (schema_builder.py:158) calls
+    //   _JSON_TO_PY_TYPE.get(schema.get("type", ""), "any")
+    // and crashes with `TypeError: unhashable type: 'list'` when `type` is a JSON
+    // array (the schemars 1.x draft-2020-12 form for nullable fields).
+    //
+    // These tests verify that transform_nullable_types converts every
+    // `"type": ["T", "null"]` node into `"anyOf": [{"type":"T"}, {"type":"null"}]`
+    // while keeping outer metadata keys (description/default/title) in place.
+
+    use super::transform_nullable_types;
+
+    /// Basic case: `{"type": ["integer", "null"]}` → anyOf form.
+    #[test]
+    fn transform_nullable_integer() {
+        let input = json!({
+            "type": ["integer", "null"],
+            "description": "A nullable integer",
+            "default": null,
+        });
+        let out = transform_nullable_types(input);
+        // "type" key must be gone at the outer level
+        assert!(out.get("type").is_none(), "type key must be removed from outer level");
+        // anyOf must be present
+        let any_of = out.get("anyOf").expect("anyOf must be present");
+        let branches = any_of.as_array().expect("anyOf must be an array");
+        assert_eq!(branches.len(), 2, "must have 2 branches: integer + null");
+        assert_eq!(branches[0], json!({"type": "integer"}));
+        assert_eq!(branches[1], json!({"type": "null"}));
+        // description stays at outer level
+        assert_eq!(out.get("description"), Some(&json!("A nullable integer")));
+        // default stays at outer level
+        assert!(out.get("default").is_some(), "default must remain at outer level");
+    }
+
+    /// String nullable: `{"type": ["string", "null"], "description": "..."}` → anyOf.
+    #[test]
+    fn transform_nullable_string() {
+        let input = json!({
+            "type": ["string", "null"],
+            "description": "optional text",
+        });
+        let out = transform_nullable_types(input);
+        assert!(out.get("type").is_none());
+        let branches = out["anyOf"].as_array().unwrap();
+        assert_eq!(branches[0], json!({"type": "string"}));
+        assert_eq!(branches[1], json!({"type": "null"}));
+        assert_eq!(out.get("description"), Some(&json!("optional text")));
+    }
+
+    /// Non-nullable type strings must NOT be transformed.
+    #[test]
+    fn transform_non_nullable_not_changed() {
+        let input = json!({
+            "type": "integer",
+            "description": "required int",
+        });
+        let out = transform_nullable_types(input.clone());
+        assert_eq!(out, input, "plain string type must be unchanged");
+    }
+
+    /// Nested properties are transformed recursively.
+    #[test]
+    fn transform_recurses_into_properties() {
+        let input = json!({
+            "type": "object",
+            "properties": {
+                "since_ts_ms": {
+                    "type": ["integer", "null"],
+                    "description": "optional timestamp",
+                },
+                "limit": {
+                    "type": ["integer", "null"],
+                },
+                "required_field": {
+                    "type": "integer",
+                },
+            },
+        });
+        let out = transform_nullable_types(input);
+        // top-level type unchanged (it's a plain string)
+        assert_eq!(out.get("type"), Some(&json!("object")));
+
+        let props = out["properties"].as_object().unwrap();
+        // since_ts_ms: must be anyOf form
+        let since = &props["since_ts_ms"];
+        assert!(since.get("type").is_none(), "since_ts_ms type must be moved to anyOf");
+        assert!(since.get("anyOf").is_some(), "since_ts_ms must have anyOf");
+        // required_field: unchanged
+        let req = &props["required_field"];
+        assert_eq!(req.get("type"), Some(&json!("integer")));
+    }
+
+    /// $defs entries are transformed recursively.
+    #[test]
+    fn transform_recurses_into_defs() {
+        let input = json!({
+            "type": "object",
+            "$defs": {
+                "MyType": {
+                    "type": "object",
+                    "properties": {
+                        "opt_field": {
+                            "type": ["boolean", "null"],
+                        },
+                    },
+                },
+            },
+        });
+        let out = transform_nullable_types(input);
+        let defs = out["$defs"].as_object().unwrap();
+        let my_type_props = &defs["MyType"]["properties"];
+        let opt_field = &my_type_props["opt_field"];
+        assert!(opt_field.get("type").is_none(), "opt_field type must be moved to anyOf in $defs");
+        assert!(opt_field.get("anyOf").is_some(), "opt_field must have anyOf in $defs");
+    }
+
+    /// After transform, NO node anywhere in the schema tree should have "type" as
+    /// an array. This is the regression guard: if any nullable field escapes
+    /// transform, the brain will crash.
+    ///
+    /// We use the REAL `obs.get_combat_log` wrapper schema (which has Optional
+    /// fields `since_ts_ms` and `limit`) as the test input.
+    #[test]
+    fn transform_produces_no_type_arrays_in_real_schema() {
+        use crate::mcp::schemas::ObsGetCombatLogWrapper;
+
+        let raw_schema = schemars::schema_for!(ObsGetCombatLogWrapper);
+        let v: serde_json::Value = serde_json::to_value(&raw_schema).unwrap();
+
+        // Confirm the raw schema HAS at least one array-type (otherwise the test
+        // isn't proving anything).
+        fn has_array_type(v: &serde_json::Value) -> bool {
+            match v {
+                serde_json::Value::Object(m) => {
+                    if let Some(t) = m.get("type") {
+                        if t.is_array() { return true; }
+                    }
+                    m.values().any(has_array_type)
+                }
+                serde_json::Value::Array(a) => a.iter().any(has_array_type),
+                _ => false,
+            }
+        }
+        assert!(
+            has_array_type(&v),
+            "ObsGetCombatLogWrapper must have at least one nullable (array-type) field \
+             in its raw schemars output — otherwise this test proves nothing"
+        );
+
+        // Apply transform.
+        let transformed = transform_nullable_types(v);
+
+        // Assert: NO node anywhere has type as an array.
+        fn has_no_array_type(v: &serde_json::Value) -> bool {
+            match v {
+                serde_json::Value::Object(m) => {
+                    if let Some(t) = m.get("type") {
+                        if t.is_array() { return false; }
+                    }
+                    m.values().all(has_no_array_type)
+                }
+                serde_json::Value::Array(a) => a.iter().all(has_no_array_type),
+                _ => true,
+            }
+        }
+        assert!(
+            has_no_array_type(&transformed),
+            "After transform, no schema node may have \"type\" as a JSON array. \
+             At least one nullable field escaped the transform."
+        );
+
+        // Assert: properties.args still present (brain contract preserved).
+        assert!(
+            transformed.get("properties")
+                .and_then(|p| p.get("args"))
+                .is_some(),
+            "properties.args must survive the nullable transform (brain contract)"
+        );
     }
 }

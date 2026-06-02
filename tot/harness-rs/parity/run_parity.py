@@ -539,17 +539,34 @@ async def run_mcp_battery(
 
     # ── tools/list: 46 tools + description equality ───────────────────────────
 
-    # ── Import brain's unwrap_fastmcp_args for envelope assertions ───────────
+    # ── Import brain's schema pipeline (Fix B — parity gate hardening) ──────────
+    # We run the FULL brain schema pipeline (not just unwrap_fastmcp_args) so that
+    # _render_arg and compose_oneof are exercised against BOTH daemons.  This is
+    # the regression guard: if any daemon emits a schema form that crashes the
+    # brain, this check catches it before deployment.
     import sys as _sys
     _brain_path = "/Users/tbrack/Documents/Projects/threads-of-time/tot/brain/brain_sidecar"
     if _brain_path not in _sys.path:
         _sys.path.insert(0, _brain_path)
+    _unwrap_available = False
+    _full_pipeline_available = False
     try:
-        from schema_builder import unwrap_fastmcp_args as _unwrap_fastmcp_args
+        from schema_builder import (
+            unwrap_fastmcp_args as _unwrap_fastmcp_args,
+            render_prompt_summary as _render_prompt_summary,
+            compose_oneof as _compose_oneof,
+            ToolEntry as _ToolEntry,
+        )
         _unwrap_available = True
+        _full_pipeline_available = True
     except ImportError as _e:
-        _unwrap_available = False
-        print(f"  [WARNING] could not import unwrap_fastmcp_args: {_e}", file=sys.stderr)
+        _full_pipeline_available = False
+        print(f"  [WARNING] could not import brain schema_builder: {_e}", file=sys.stderr)
+        try:
+            from schema_builder import unwrap_fastmcp_args as _unwrap_fastmcp_args
+            _unwrap_available = True
+        except ImportError:
+            _unwrap_available = False
 
     async def list_tools_full(mcp_url: str, headers: dict) -> dict[str, Any]:
         """Returns {name: {'desc': str, 'schema': dict}} for all listed tools."""
@@ -648,6 +665,226 @@ async def run_mcp_battery(
         )
     else:
         print("  [SKIP] brain unwrap_fastmcp_args check skipped — module not importable", file=sys.stderr)
+
+    # ── Fix B: full brain render pipeline ────────────────────────────────────
+    # Run render_prompt_summary + compose_oneof on BOTH daemons' schemas.
+    # This is the function that crashed on cutover: _render_arg at line ~158
+    # of schema_builder.py does _JSON_TO_PY_TYPE.get(schema.get("type", ""), "any")
+    # which raises TypeError when type is a list.
+    # HARD FAIL: any exception here means a daemon emits schemas the brain
+    # cannot process — deployment is blocked.
+
+    def _build_per_tool(schemas_dict: dict, label: str) -> tuple[dict, list[str]]:
+        """Build per_tool dict using unwrap_fastmcp_args.  Returns (per_tool, errors)."""
+        per_tool: dict = {}
+        errors: list = []
+        for name, schema in sorted(schemas_dict.items()):
+            if not isinstance(schema, dict):
+                errors.append(f"  {name}: schema is not a dict")
+                continue
+            try:
+                unwrapped = _unwrap_fastmcp_args(schema)
+                per_tool[name] = _ToolEntry(
+                    description="",   # description not needed for render/compose
+                    schema=unwrapped,
+                    source_mcp="harness",
+                )
+            except Exception as exc:
+                errors.append(f"  {name}: unwrap failed: {exc}")
+        return per_tool, errors
+
+    def _normalize_render(text: str) -> set[str]:
+        """Normalize render_prompt_summary output for comparison.
+
+        We compare the SET of tool signature lines with args SORTED within each
+        signature.  This handles the known difference in field ordering between
+        pydantic (declaration order) and schemars (BTreeMap / alphabetical order).
+
+        We ALSO normalise the type token: 'dict' → 'any' because schemars emits
+        no 'type' key for serde_json::Value fields (→ 'any') while pydantic
+        emits 'type: object' (→ 'dict').  These are the same semantic concept.
+        The intent check is: same field names, same optional markers ('?').
+
+        Description lines (starting with '—') are skipped.
+        """
+        def _norm_arg_token(name_part: str, type_part: str) -> str:
+            """Normalise an arg token for cross-daemon comparison.
+
+            Accepted deviations (both render as semantically equivalent):
+            - 'dict' vs 'any' — schemars emits no 'type' for serde_json::Value
+              while pydantic emits 'type:object'.  Both mean opaque dict.
+            - For OPTIONAL args (name ends with '?'): 'float'/'int'/'str'/'bool'
+              vs 'any' — happens when Rust uses a plain type with #[serde(default)]
+              (not Optional<T>) while Python uses Optional[T].  The field is
+              optional in both (not in required) so the type label discrepancy is
+              cosmetic: pydantic renders the anyOf → 'any'; schemars renders the
+              scalar type → its name.
+            """
+            t = type_part
+            # dict/any equivalence (serde_json::Value vs Python dict)
+            if t == "dict":
+                t = "any"
+            # optional scalar → any (Python anyOf renders as 'any'; Rust plain
+            # scalar with default renders as its scalar name)
+            is_optional = name_part.endswith("?")
+            if is_optional and t in ("float", "int", "str", "bool"):
+                t = "any"
+            return t
+
+        def _norm_signature(sig: str) -> str:
+            # sig looks like: tool.name(arg1: type, arg2?: type, ...)
+            lparen = sig.find("(")
+            rparen = sig.rfind(")")
+            if lparen == -1 or rparen == -1:
+                return sig
+            tool_name = sig[:lparen]
+            args_str = sig[lparen+1:rparen].strip()
+            if not args_str:
+                return f"{tool_name}()"
+            args = [a.strip() for a in args_str.split(",")]
+            # Normalise each arg token
+            norm_args = []
+            for arg in args:
+                parts = arg.split(":")
+                if len(parts) == 2:
+                    name_part = parts[0].strip()
+                    type_part = _norm_arg_token(name_part, parts[1].strip())
+                    norm_args.append(f"{name_part}: {type_part}")
+                else:
+                    norm_args.append(arg)
+            # Sort args for ordering-independent comparison
+            norm_args.sort()
+            return f"{tool_name}({', '.join(norm_args)})"
+
+        lines = set()
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("—"):
+                lines.add(_norm_signature(stripped))
+        return lines
+
+    def _normalize_oneof(oneof: dict) -> set[str]:
+        """Normalize compose_oneof output for comparison.
+
+        We compare branch titles as a set — the exact arg schemas inside each
+        branch may have minor annotation differences (format, title) which we
+        accept, but each tool must produce a branch with the correct name.
+        """
+        branches = oneof.get("oneOf", [])
+        return {b.get("title", "") for b in branches}
+
+    if _full_pipeline_available and _unwrap_available:
+        # Build per_tool for both daemons
+        py_per_tool, py_build_errors = _build_per_tool(py_schemas, "Python daemon")
+        rs_per_tool, rs_build_errors = _build_per_tool(rs_schemas, "Rust daemon")
+
+        build_ok = (len(py_build_errors) == 0 and len(rs_build_errors) == 0)
+        results.record(
+            "Brain pipeline: build per_tool dict (unwrap_fastmcp_args) for BOTH daemons",
+            build_ok,
+            ("Python errors:\n" + "\n".join(py_build_errors) if py_build_errors else "") +
+            ("Rust errors:\n" + "\n".join(rs_build_errors) if rs_build_errors else ""),
+        )
+
+        # render_prompt_summary — the function that crashed with list-type TypeError
+        py_render_ok, py_render_result, py_render_err = False, "", ""
+        rs_render_ok, rs_render_result, rs_render_err = False, "", ""
+
+        try:
+            py_render_result = _render_prompt_summary(py_per_tool)
+            py_render_ok = True
+        except Exception as exc:
+            py_render_err = str(exc)
+
+        try:
+            rs_render_result = _render_prompt_summary(rs_per_tool)
+            rs_render_ok = True
+        except Exception as exc:
+            rs_render_err = str(exc)
+
+        results.record(
+            "Brain pipeline: render_prompt_summary succeeds on Python daemon (no crash)",
+            py_render_ok,
+            f"EXCEPTION: {py_render_err}" if not py_render_ok else "",
+        )
+        results.record(
+            "Brain pipeline: render_prompt_summary succeeds on Rust daemon (no crash)",
+            rs_render_ok,
+            f"EXCEPTION: {rs_render_err}" if not rs_render_ok else "",
+        )
+
+        if py_render_ok and rs_render_ok:
+            # Semantic equality: same set of tool signature lines
+            py_sigs = _normalize_render(py_render_result)
+            rs_sigs = _normalize_render(rs_render_result)
+            render_match = (py_sigs == rs_sigs)
+            if not render_match:
+                missing_in_rs = py_sigs - rs_sigs
+                extra_in_rs   = rs_sigs - py_sigs
+                render_diff_msg = ""
+                if missing_in_rs:
+                    render_diff_msg += "Missing in Rust:\n" + "\n".join(f"  {s}" for s in sorted(missing_in_rs))
+                if extra_in_rs:
+                    render_diff_msg += "\nExtra in Rust:\n" + "\n".join(f"  {s}" for s in sorted(extra_in_rs))
+            else:
+                render_diff_msg = ""
+            results.record(
+                "Brain pipeline: render_prompt_summary output semantically equal (tool signatures)",
+                render_match, render_diff_msg,
+            )
+            if render_match:
+                print(f"  [INFO] render_prompt_summary: {len(py_sigs)} tool signature lines match")
+
+        # compose_oneof — builds the discriminated-union llama-server grammar schema
+        py_oneof_ok, py_oneof_result, py_oneof_err = False, {}, ""
+        rs_oneof_ok, rs_oneof_result, rs_oneof_err = False, {}, ""
+
+        try:
+            py_oneof_result = _compose_oneof(py_per_tool)
+            py_oneof_ok = True
+        except Exception as exc:
+            py_oneof_err = str(exc)
+
+        try:
+            rs_oneof_result = _compose_oneof(rs_per_tool)
+            rs_oneof_ok = True
+        except Exception as exc:
+            rs_oneof_err = str(exc)
+
+        results.record(
+            "Brain pipeline: compose_oneof succeeds on Python daemon (no crash)",
+            py_oneof_ok,
+            f"EXCEPTION: {py_oneof_err}" if not py_oneof_ok else "",
+        )
+        results.record(
+            "Brain pipeline: compose_oneof succeeds on Rust daemon (no crash)",
+            rs_oneof_ok,
+            f"EXCEPTION: {rs_oneof_err}" if not rs_oneof_ok else "",
+        )
+
+        if py_oneof_ok and rs_oneof_ok:
+            py_titles = _normalize_oneof(py_oneof_result)
+            rs_titles = _normalize_oneof(rs_oneof_result)
+            oneof_match = (py_titles == rs_titles)
+            if not oneof_match:
+                missing_in_rs = py_titles - rs_titles
+                extra_in_rs   = rs_titles - py_titles
+                oneof_diff_msg = ""
+                if missing_in_rs:
+                    oneof_diff_msg += "Missing in Rust: " + str(sorted(missing_in_rs))
+                if extra_in_rs:
+                    oneof_diff_msg += "\nExtra in Rust: " + str(sorted(extra_in_rs))
+            else:
+                oneof_diff_msg = ""
+            results.record(
+                "Brain pipeline: compose_oneof branch titles semantically equal (all tools present)",
+                oneof_match, oneof_diff_msg,
+            )
+            if oneof_match:
+                print(f"  [INFO] compose_oneof: {len(py_titles)} branches match (including no_op)")
+    else:
+        print("  [SKIP] full brain render pipeline check skipped — schema_builder not importable",
+              file=sys.stderr)
 
     # ── Schema semantic comparison ────────────────────────────────────────────
 
