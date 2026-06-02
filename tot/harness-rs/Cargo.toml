@@ -1,0 +1,53 @@
+[package]
+name = "harness-rs"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0"
+
+# NOTE: axum 0.8 here vs 0.7 in the other 4 workspace members — compiles (separate
+# versions resolve independently); do NOT copy axum-0.7 test patterns from memory-rs.
+# Use 0.8 `tower::ServiceExt::oneshot` / http-body 1.x patterns. (adversarial review C6)
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+rmcp = { version = "1.7", default-features = false, features = [
+    "server", "macros", "schemars", "transport-streamable-http-server", "tower",
+] }
+# no TLS: the AC bridge is plain HTTP (http://127.0.0.1:8091)
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# minimal-rust → flate2/rust_backend (pure-Rust miniz_oxide). NOT "minimal" (flate2/zlib
+# → C libz-sys → breaks musl/scratch). TLS-off; the MySQL link is pod-local. (C1)
+mysql_async = { version = "0.34", default-features = false, features = ["minimal-rust"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# deprecated-but-functional; swap to maintained `serde_yml` later if desired. (C5)
+serde_yaml = "0.9"
+# MUST resolve 1.x — schemars 0.8 emits #/definitions/ which breaks the brain's
+# _resolve_refs (it only accepts #/$defs/). (C4)
+schemars = "1"
+sha2 = "0.10"
+thiserror = "2"
+# SIGHUP execv re-exec (Task 11.2); std Command::exec spawns, doesn't replace in-process. (C3)
+nix = { version = "0.29", features = ["process"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# `env` feature for #[arg(env = "AC_MYSQL_PASSWORD")] (W1)
+clap = { version = "4", features = ["derive", "env"] }
+uuid = { version = "1", features = ["v4"] }
+tower = "0.5"
+http = "1"
+# 24-byte random token generation for `mint-token` — already resolved in Cargo.lock (C3)
+rand = "0.9"
+# URL-safe base64 for `mint-token` output — already in lock via reqwest/rmcp (C3)
+base64 = "0.22"
+# Needed by auth_layer.rs (BoxBody body type matching StreamableHttpService).
+# Already pulled transitively by rmcp/axum — made explicit to use in src/ code.
+bytes = "1"
+http-body-util = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+# spike example deps — pulled transitively by axum/rmcp in the main deps already
+http-body = "1"
+anyhow = "1"

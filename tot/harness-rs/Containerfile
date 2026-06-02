@@ -1,0 +1,111 @@
+# ── harness-rs Containerfile ──────────────────────────────────────────────────
+#
+# Multi-stage build → minimal-footprint fully-static binary on scratch.
+# Replaces the Python/FastMCP harness-daemon (185 MB) with a single musl binary.
+#
+# Build target: x86_64-unknown-linux-musl (static musl libc — no dynamic libc).
+# Runtime base: scratch (zero OS layer — just the binary).
+#
+# No vendored C / TLS: harness-rs talks plain HTTP to the AC bridge (reqwest, no
+# TLS backend) and connects to MySQL via pure-Rust mysql_async (minimal-rust /
+# miniz_oxide). The musl dep tree carries no openssl-sys / libz-sys / native-tls
+# (verified with `cargo tree`), so the scratch base is genuinely empty.
+#
+# Build on Heimdal (from the tot/ workspace root):
+#   podman build -f harness-rs/Containerfile -t localhost/harness-daemon:rust-<date> tot/
+# Build locally:
+#   docker build -f harness-rs/Containerfile -t localhost/harness-daemon:rust-<date> tot/
+#
+# ── Stage 1: dependency cache ─────────────────────────────────────────────────
+
+FROM rust:1-slim AS builder
+
+# Build with cargo-zigbuild: zig's clang-based toolchain cross-compiles the
+# transitive C/asm deps (zstd-sys, pulled by mysql_common) to musl cleanly.
+# Bare `musl-gcc` (musl-tools) CANNOT assemble zstd's huf_decompress_amd64.S;
+# zig can. This matches the locally-validated `cargo zigbuild` build.
+# Zig version pinned; ARCH-detected so the builder works on x86_64 AND arm64.
+RUN apt-get update -qq \
+    && apt-get install -y --no-install-recommends curl xz-utils ca-certificates \
+    && rustup target add x86_64-unknown-linux-musl \
+    && ARCH="$(uname -m)" \
+    && curl -fL "https://ziglang.org/download/0.13.0/zig-linux-${ARCH}-0.13.0.tar.xz" \
+       | tar -xJ -C /opt \
+    && ln -s "/opt/zig-linux-${ARCH}-0.13.0/zig" /usr/local/bin/zig \
+    && cargo install --locked cargo-zigbuild \
+    && rm -rf /var/lib/apt/lists/* ~/.cargo/registry/cache
+
+    # Heimdal -j4 discipline: cap cargo parallelism so the bake never saturates
+    # the always-on baseline (worldserver + 100 bots + llama).
+ENV CARGO_BUILD_JOBS=4
+
+WORKDIR /build
+
+# Workspace + ALL FIVE member manifests are needed for workspace resolution
+# (audited against tot/Cargo.toml [workspace.members]:
+# game-event-scheduler, harness-rs, lfg-matchmaker, memory-rs, slice-host).
+COPY Cargo.toml Cargo.lock ./
+COPY game-event-scheduler/Cargo.toml ./game-event-scheduler/
+COPY harness-rs/Cargo.toml            ./harness-rs/
+COPY lfg-matchmaker/Cargo.toml        ./lfg-matchmaker/
+COPY memory-rs/Cargo.toml             ./memory-rs/
+COPY slice-host/Cargo.toml            ./slice-host/
+
+# Stub sources for ALL members so `cargo build -p harness-rs` can resolve the
+# workspace and compile harness-rs's dependency crates without real sources.
+# memory-rs declares a lib + two bins (memory-rs, embed-stub) + a build.rs — all
+# are stubbed (memory-rs is NOT built by `-p harness-rs`, but its declared target
+# files must exist for workspace target discovery). The stubs are replaced by the
+# real harness-rs sources in the COPY step below.
+RUN mkdir -p game-event-scheduler/src harness-rs/src lfg-matchmaker/src \
+             memory-rs/src memory-rs/src/bin slice-host/src \
+    && echo 'pub fn _stub() {}' > game-event-scheduler/src/lib.rs \
+    && echo 'fn main() {}'      > game-event-scheduler/src/main.rs \
+    && echo 'fn main() {}'      > harness-rs/src/main.rs \
+    && echo 'pub fn _stub() {}' > lfg-matchmaker/src/lib.rs \
+    && echo 'fn main() {}'      > lfg-matchmaker/src/main.rs \
+    && echo 'pub fn _stub() {}' > memory-rs/src/lib.rs \
+    && echo 'fn main() {}'      > memory-rs/src/main.rs \
+    && echo 'fn main() {}'      > memory-rs/src/bin/embed_stub.rs \
+    && echo 'fn main() {}'      > memory-rs/build.rs \
+    && echo 'fn main() {}'      > slice-host/src/main.rs \
+    && cargo zigbuild --release --target x86_64-unknown-linux-musl -p harness-rs --bin harness-rs \
+    && rm -rf harness-rs/src
+
+# ── Stage 2: real source build ────────────────────────────────────────────────
+
+COPY harness-rs/src/ ./harness-rs/src/
+
+# CRITICAL (anti-stub fix — kb_87a7eade item 45): touch all .rs AFTER COPY so
+# Cargo's fingerprint sees them as newer than the cached stub artifacts and forces
+# a full recompile. Without this, `cargo build` finishes in ~0.1s and ships the
+# stub `fn main() {}` binary (links clean, passes ELF checks, exits immediately).
+RUN find /build/harness-rs/src -name "*.rs" -exec touch {} \+
+
+RUN cargo zigbuild --release --target x86_64-unknown-linux-musl -p harness-rs --bin harness-rs
+
+# Verify the binary is REAL (anti-stub): grep the unique startup log string
+# "listening on" (emitted by main.rs at startup: "[harness-rs] listening on ...").
+# A stub `fn main() {}` binary will not contain this string. If this fails, the
+# anti-stub touch above did not force a recompile — abort the build.
+RUN strings /build/target/x86_64-unknown-linux-musl/release/harness-rs \
+    | grep -q "listening on" \
+    && echo "BINARY_REAL_OK" \
+    || (echo "ERROR: binary appears to be a stub — touch did not force recompile" >&2 && exit 1)
+
+# ── Stage 3: runtime ──────────────────────────────────────────────────────────
+
+# Heimdal builds this natively on x86_64 (podman build), so plain `FROM scratch`
+# yields a correct x86_64 image. The binary is always cross-compiled to
+# x86_64-musl via cargo-zigbuild, so it is the right arch for the deploy target
+# regardless of the (possibly arm64) builder host used for local validation.
+FROM scratch
+
+COPY --from=builder \
+    /build/target/x86_64-unknown-linux-musl/release/harness-rs \
+    /harness-rs
+
+EXPOSE 8099
+
+ENTRYPOINT ["/harness-rs"]
+CMD ["serve", "--config", "/etc/harness/tokens.yaml"]
