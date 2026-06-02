@@ -296,3 +296,207 @@ mod tests {
         assert_eq!(me_count, 0, "memory_entities for evicted memory must be removed");
     }
 }
+
+// ---------------------------------------------------------------------------
+// FTS5 query construction — ports `helpers.py::build_fts5_query`
+// ---------------------------------------------------------------------------
+
+/// Stopword set copied VERBATIM from `helpers.py::_STOPWORDS` (89 words).
+///
+/// The set is defined as a sorted, deduplicated &[&str] slice rather than a
+/// HashSet so the count is statically verified in tests — any accidental edit
+/// is caught immediately.
+static STOPWORDS: &[&str] = &[
+    // Row 1 — from helpers.py line 90
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    // Row 2 — line 91
+    "i", "my", "me", "we", "our", "you", "your", "he", "she", "they", "them",
+    // Row 3 — line 92
+    "it", "its", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with",
+    // Row 4 — line 93
+    "this", "that", "by", "from", "as", "not", "no", "so", "if", "do", "did",
+    // Row 5 — line 94
+    "have", "had", "has", "will", "would", "can", "could", "should", "shall",
+    // Row 6 — line 95
+    "into", "up", "out", "off", "over", "about", "then", "than", "when", "while",
+    // Row 7 — line 96
+    "after", "before", "there", "here", "what", "which", "who", "how",
+    // Row 8 — line 97
+    "today", "yesterday", "now", "just", "very", "also", "too", "more", "some",
+    // Row 9 — line 98
+    "all", "any", "each", "both", "few", "other", "same", "such", "only",
+];
+
+/// Returns `true` if `word` is in the stopword list.
+///
+/// Linear scan is fine — the list is 89 entries and called per-token (≤ a few
+/// dozen per query).  A binary search over the sorted slice would be faster
+/// but the current size doesn't justify the complexity.
+fn is_stopword(word: &str) -> bool {
+    STOPWORDS.contains(&word)
+}
+
+/// Convert a natural-language query into an FTS5 `MATCH` expression.
+///
+/// Ports `helpers.py::build_fts5_query` exactly:
+/// 1. Lowercase + tokenize on `[a-zA-Z]+` runs (strips apostrophes / punctuation).
+/// 2. Drop tokens that are shorter than 3 chars OR in `_STOPWORDS` OR duplicate.
+///    First-occurrence wins for deduplication.
+/// 3. Cap at `max_terms` (default 6).
+/// 4. OR-join the survivors.
+///
+/// Returns `None` if no significant terms remain (caller should skip BM25).
+///
+/// # Examples
+/// ```
+/// use memory_rs::retrieval::helpers::build_fts5_query;
+/// assert_eq!(
+///     build_fts5_query("what did Alice and I plan about the mount", 6),
+///     Some("alice OR plan OR mount".to_string())
+/// );
+/// ```
+pub fn build_fts5_query(natural_query: &str, max_terms: usize) -> Option<String> {
+    // Tokenize on alphabetic runs only (same as Python's re.findall(r"[a-zA-Z]+", ...)).
+    // Apostrophes are excluded: "brun's" → ["brun", "s"], and "s" is dropped (<3 chars).
+    let lower = natural_query.to_lowercase();
+    let mut sig: Vec<String> = Vec::new();
+    // Track seen tokens for deduplication — first-occurrence wins.
+    let mut seen: Vec<String> = Vec::new();
+
+    for tok in lower.split(|c: char| !c.is_ascii_alphabetic()) {
+        if tok.is_empty() {
+            continue;
+        }
+        // Drop: too short, stopword, or duplicate.
+        if tok.len() < 3 || is_stopword(tok) || seen.contains(&tok.to_string()) {
+            continue;
+        }
+        seen.push(tok.to_string());
+        sig.push(tok.to_string());
+        if sig.len() >= max_terms {
+            break;
+        }
+    }
+
+    if sig.is_empty() {
+        None
+    } else {
+        Some(sig.join(" OR "))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests for build_fts5_query
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod fts_tests {
+    use super::*;
+
+    /// The stopword slice must contain exactly 89 entries (parity with Python).
+    #[test]
+    fn stopwords_count_is_89() {
+        assert_eq!(
+            STOPWORDS.len(),
+            89,
+            "STOPWORDS must have 89 entries to match helpers.py::_STOPWORDS"
+        );
+    }
+
+    /// All entries in the slice are distinct (no accidental duplicates).
+    #[test]
+    fn stopwords_no_duplicates() {
+        let mut words: Vec<&str> = STOPWORDS.to_vec();
+        let before = words.len();
+        words.sort_unstable();
+        words.dedup();
+        assert_eq!(words.len(), before, "STOPWORDS contains duplicate entries");
+    }
+
+    // --- ported from tests/test_fts_query.py ---
+
+    /// Docstring example from helpers.py.
+    #[test]
+    fn docstring_example() {
+        assert_eq!(
+            build_fts5_query("what did Alice and I plan about the mount", 6),
+            Some("alice OR plan OR mount".to_string()),
+        );
+    }
+
+    /// All tokens are stopwords or too short → None.
+    #[test]
+    fn all_stopwords_returns_none() {
+        assert_eq!(build_fts5_query("the a to of", 6), None);
+    }
+
+    /// 'to' is a stopword; 'went' and 'stormwind' survive.
+    #[test]
+    fn stopword_filtered_mid_sentence() {
+        assert_eq!(
+            build_fts5_query("Alice went to Stormwind", 6),
+            Some("alice OR went OR stormwind".to_string()),
+        );
+    }
+
+    /// 7 good tokens, cap=6 — seventh is dropped.
+    #[test]
+    fn cap_at_six_terms() {
+        assert_eq!(
+            build_fts5_query("one two three four five six seven", 6),
+            Some("one OR two OR three OR four OR five OR six".to_string()),
+        );
+    }
+
+    /// Duplicate tokens: second occurrence dropped.
+    #[test]
+    fn deduplication_first_occurrence_wins() {
+        assert_eq!(
+            build_fts5_query("battle battle battle", 6),
+            Some("battle".to_string()),
+        );
+    }
+
+    /// Tokens shorter than 3 chars are dropped.
+    #[test]
+    fn tokens_shorter_than_three_dropped() {
+        // "go" is 2 chars, should be dropped; "run" survives.
+        assert_eq!(
+            build_fts5_query("go run", 6),
+            Some("run".to_string()),
+        );
+    }
+
+    /// Empty string → None.
+    #[test]
+    fn empty_query_returns_none() {
+        assert_eq!(build_fts5_query("", 6), None);
+    }
+
+    /// Apostrophes are stripped (FTS5 parse-safety).
+    #[test]
+    fn apostrophe_stripped() {
+        // "brun's" → tokens ["brun", "s"]; "s" is <3 chars → dropped; "brun" survives.
+        let result = build_fts5_query("brun's tavern", 6);
+        // "brun" (4 chars, not a stopword) and "tavern" both survive.
+        assert_eq!(result, Some("brun OR tavern".to_string()));
+    }
+
+    /// Exactly max_terms tokens — all included.
+    #[test]
+    fn exactly_max_terms_all_included() {
+        assert_eq!(
+            build_fts5_query("one two three four five six", 6),
+            Some("one OR two OR three OR four OR five OR six".to_string()),
+        );
+    }
+
+    /// Single surviving token → no " OR " in result.
+    #[test]
+    fn single_surviving_token() {
+        assert_eq!(
+            build_fts5_query("the quest", 6),
+            Some("quest".to_string()),
+        );
+    }
+}
