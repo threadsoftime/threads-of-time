@@ -158,3 +158,6 @@ data/
 /SUBSET_GATING_STATE.md
 /SUBSET_GATING_IN_GAME_TEST.md
 /OPERATOR_INSTALL_STATE.md
+
+# Rust build artifacts
+/tot/target/

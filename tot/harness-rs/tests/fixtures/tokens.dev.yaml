@@ -1,0 +1,14 @@
+# Non-secret dev/smoke/parity token fixture. Never deployed.
+max_augmented_bots: 1
+ac_bridge_url: "http://127.0.0.1:8091"
+audit_path: "/tmp/harness-rs-dev/audit.jsonl"
+listen_address: "0.0.0.0:8099"
+tokens:
+  - token: "dev-all"
+    identity: "dev.user"
+    scope: ["gm.*", "bot.*", "obs.*", "event.*", "lfg.*", "memory.*"]
+  - token: "dev-self"
+    identity: "bot.self"
+    scope: ["bot.self.*", "obs.self.*"]
+    bound_to_guid: 12345
+    augmented: true

@@ -1,0 +1,68 @@
+[package]
+name = "memory-rs"
+version = "0.1.0"
+edition = "2021"
+
+# Both a lib (testable via unit tests) and a standalone binary.
+[lib]
+name = "memory_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "memory-rs"
+path = "src/main.rs"
+
+# Deterministic embed stub — a parity/test utility (NOT shipped in the runtime
+# container image; the Containerfile builds only the `memory-rs` binary). The
+# parity harness (tests/parity.rs) runs it via `cargo run -p memory-rs --bin
+# embed-stub`. Needs sha2 at normal build time, hence sha2 is a [dependencies].
+[[bin]]
+name = "embed-stub"
+path = "src/bin/embed_stub.rs"
+
+[dependencies]
+# Async runtime + HTTP server — match workspace pinned majors.
+tokio       = { version = "1", features = ["full"] }
+axum        = "0.7"
+reqwest     = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Serialisation.
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+
+# SQLite (bundled = static; bundled enables FTS5 + bm25() + porter/unicode61
+# tokenisers and re-exports rusqlite::ffi so we can call sqlite3_auto_extension).
+rusqlite    = { version = "0.32", features = ["bundled"] }
+# Direct dep on the *same* libsqlite3-sys rusqlite resolves (0.30, bundled).
+# It carries `links = "sqlite3"`, so this DIRECT edge makes Cargo export
+# DEP_SQLITE3_INCLUDE to our build.rs — the path to the bundled `sqlite3.h`
+# the static lib is built from. build.rs feeds that to cc so the vendored
+# sqlite-vec amalgamation compiles against the *same* SQLite headers it links
+# against (critical for the musl/scratch container build, which has no system
+# sqlite3.h). Cargo unifies this with rusqlite's transitive edge — one copy.
+libsqlite3-sys = { version = "0.30", features = ["bundled"] }
+
+# Hashing — used by the embed-stub bin (deterministic SHA-256 embeddings) at
+# normal build time, and by the quality_gate / parity tests (same algorithm).
+sha2        = "0.10"
+
+# Error handling.
+thiserror   = "2"
+anyhow      = "1"
+
+# Structured logging.
+tracing             = "0.1"
+tracing-subscriber  = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[build-dependencies]
+# Compiles the vendored sqlite-vec 0.1.6 amalgamation into the binary.
+cc = "1"
+
+[dev-dependencies]
+tempfile    = "3"
+# sha2 is a normal [dependencies] (used by the embed-stub bin); still available
+# to tests (quality_gate/parity use the same SHA-256 stub-embedding algorithm).
+wiremock    = "0.6"
+tower       = { version = "0.5", features = ["util"] }
+serde_json  = "1"
+tokio       = { version = "1", features = ["full", "test-util"] }

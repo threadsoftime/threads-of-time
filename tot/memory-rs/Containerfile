@@ -1,0 +1,126 @@
+# ── memory-rs Containerfile ───────────────────────────────────────────────────
+#
+# Multi-stage build → minimal-footprint fully-static binary on scratch.
+#
+# Build target: x86_64-unknown-linux-musl (static musl libc — no dynamic libc).
+# Runtime base: scratch (zero OS layer — just the binary + /var/memory dir).
+#
+# sqlite-vec rationale: vec0 is statically compiled into the binary via
+# build.rs (cc crate, vendored amalgamation v0.1.6). No .so is needed at
+# runtime; the scratch image contains no dynamic linker. auto_extension
+# registers vec0 on every connection before any open() call in main().
+#
+# No system sqlite needed: the crate depends DIRECTLY on libsqlite3-sys
+# (bundled), which carries `links = "sqlite3"` and so exports
+# DEP_SQLITE3_INCLUDE to build.rs — the path to the bundled sqlite3.h the
+# static lib is built from. build.rs feeds that to cc, so the vendored
+# sqlite-vec amalgamation compiles against the SAME headers the bundled SQLite
+# links against. That means NO libsqlite3-dev and NO system sqlite3.h are
+# required, and the scratch runtime base is truly empty (bundled SQLite +
+# statically-linked vec0 are both inside the binary).
+#
+# TLS: BRAIN_EMBEDDINGS_URL is http:// in the dev/prod env (llama-embed on
+# 192.168.1.3). rustls-tls is compiled in but never used at runtime, so no CA
+# bundle is needed on the scratch base.
+#
+# embed-stub is a parity/test utility (cargo run -p memory-rs --bin embed-stub)
+# and is deliberately NOT built or shipped here. Both build steps below pass
+# `--bin memory-rs` so cargo builds ONLY the runtime binary and never resolves
+# the embed-stub target — that is also why the stub stage needs no
+# src/bin/embed_stub.rs placeholder.
+#
+# Build on Heimdal (from tot/ workspace root):
+#   podman build -f memory-rs/Containerfile -t localhost/memory-sidecar:rust-<date> tot/
+#
+# ── Stage 1: dependency cache ─────────────────────────────────────────────────
+
+FROM rust:1-slim AS builder
+
+# Install musl target and linker, plus clang (cc crate / build.rs compiles the
+# vendored sqlite-vec amalgamation).
+RUN rustup target add x86_64-unknown-linux-musl \
+    && apt-get update -qq \
+    && apt-get install -y --no-install-recommends musl-tools clang \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CARGO_BUILD_TARGET=x86_64-unknown-linux-musl \
+    # Heimdal -j4 discipline: cap cargo's parallelism to 4 jobs so the build
+    # never saturates the always-on baseline (worldserver + 100 bots + llama).
+    CARGO_BUILD_JOBS=4
+
+WORKDIR /build
+
+# Copy workspace manifests first — dep-compile layer is reused when only
+# source files change. All four workspace members' manifests are needed for
+# dependency resolution (audited against tot/Cargo.toml [workspace.members]:
+# game-event-scheduler, lfg-matchmaker, memory-rs, slice-host).
+COPY Cargo.toml Cargo.lock ./
+COPY game-event-scheduler/Cargo.toml ./game-event-scheduler/
+COPY lfg-matchmaker/Cargo.toml        ./lfg-matchmaker/
+COPY slice-host/Cargo.toml            ./slice-host/
+COPY memory-rs/Cargo.toml             ./memory-rs/
+
+# Stub sources for ALL workspace members so `cargo build -p memory-rs`
+# can resolve and compile all dependency crates without real sources.
+# `--bin memory-rs` targets only the runtime binary, so a stub main.rs is
+# enough — cargo never resolves the embed-stub bin (src/bin/embed_stub.rs).
+# The stubs are replaced by real sources in the COPY steps below.
+RUN mkdir -p game-event-scheduler/src lfg-matchmaker/src slice-host/src memory-rs/src \
+    && echo 'pub fn _stub() {}' > game-event-scheduler/src/lib.rs \
+    && echo 'fn main() {}' > game-event-scheduler/src/main.rs \
+    && echo 'pub fn _stub() {}' > lfg-matchmaker/src/lib.rs \
+    && echo 'fn main() {}' > lfg-matchmaker/src/main.rs \
+    && echo 'fn main() {}' > slice-host/src/main.rs \
+    && echo 'pub fn _stub() {}' > memory-rs/src/lib.rs \
+    && echo 'fn main() {}' > memory-rs/src/main.rs \
+    && cargo build --release -p memory-rs --bin memory-rs \
+    && rm -rf game-event-scheduler/src lfg-matchmaker/src slice-host/src memory-rs/src
+
+# ── Stage 2: real source build ────────────────────────────────────────────────
+
+# Copy the build script and vendored C amalgamation (needed at build.rs time),
+# the migrations, and the real Rust sources.
+COPY memory-rs/build.rs              ./memory-rs/build.rs
+COPY memory-rs/vendor/               ./memory-rs/vendor/
+COPY memory-rs/migrations/           ./memory-rs/migrations/
+COPY memory-rs/src/                  ./memory-rs/src/
+
+# CRITICAL (T32 anti-stub fix — kb_87a7eade item 45):
+# Touch all .rs files AFTER COPY so Cargo's fingerprint detects them as
+# newer than the cached stub dep artifacts, forcing a full recompile.
+# Without this touch, `cargo build` emits `Finished` in 0.08s and ships
+# the stub `fn main() {}` binary — it links cleanly and passes ELF checks
+# but exits immediately and contains no startup log strings.
+RUN find /build/memory-rs/src -name "*.rs" -exec touch {} \+
+
+RUN cargo build --release -p memory-rs --bin memory-rs
+
+# Verify the binary is real: grep for the UNIQUE startup log string
+# "listening on" (emitted by main.rs at startup: "[memory-rs] listening on ...").
+# A stub `fn main() {}` binary will not contain this string; the weak
+# "memory-rs" literal alone is insufficient (it appears in path strings even in
+# stub builds). If this grep fails, the anti-stub touch above did not work —
+# abort the build.
+RUN strings /build/target/x86_64-unknown-linux-musl/release/memory-rs \
+    | grep -q "listening on" \
+    && echo "BINARY_REAL_OK" \
+    || (echo "ERROR: binary appears to be stub — touch did not force recompile" >&2 && exit 1)
+
+# ── Stage 3: runtime ──────────────────────────────────────────────────────────
+
+FROM scratch
+
+# Copy the fully-static binary.
+# vec0 and SQLite are statically linked — no .so or extension file needed.
+COPY --from=builder \
+    /build/target/x86_64-unknown-linux-musl/release/memory-rs \
+    /memory-rs
+
+# Default env — all overridable via EnvironmentFile in the Quadlet.
+ENV MEMORY_DATA_DIR=/var/memory \
+    MEM_BIND_HOST=0.0.0.0 \
+    MEM_BIND_PORT=8090
+
+EXPOSE 8090
+
+ENTRYPOINT ["/memory-rs"]
