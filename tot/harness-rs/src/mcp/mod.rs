@@ -1,4 +1,4 @@
-//! MCP adapter — exposes the 46-tool V1 surface over the MCP StreamableHTTP
+//! MCP adapter — exposes the 47-tool V1 surface over the MCP StreamableHTTP
 //! transport so the daemon is a drop-in for the Python FastMCP daemon.
 //!
 //! Public surface:
@@ -238,8 +238,8 @@ mod tests {
     // ── test 5: HarnessMcp::new constructs with correct tool_router ───────────
 
     #[tokio::test]
-    async fn registry_contains_46_tools() {
-        // TODO(Phase-12): also assert the MCP tools/list surface exposes all 46
+    async fn registry_contains_47_tools() {
+        // TODO(Phase-12): also assert the MCP tools/list surface exposes all 47
         // (needs a full streamable-HTTP session — done in the parity gate).
         use crate::mcp::handler::HarnessMcp;
         use crate::mcp::schemas;
@@ -271,12 +271,12 @@ mod tests {
         let handler = HarnessMcp::new(state);
 
         // The #[tool_router] generates a ToolRouter; there is no public
-        // runtime count on it, but we can verify the registry has 46 tools.
+        // runtime count on it, but we can verify the registry has 47 tools.
         let registry = build_v1_registry();
         assert_eq!(
             registry.names().len(),
-            46,
-            "registry must have 46 tools matching the 46 #[tool] methods"
+            47,
+            "registry must have 47 tools matching the 47 #[tool] methods"
         );
 
         // Verify that the flat Args types (no wrapper) serialize correctly.

@@ -7,7 +7,7 @@
 //! `Serialize` is required by the MCP handler to call `serde_json::to_value(&w.args)`
 //! (the exclude_none path in `forward()`).
 //!
-//! All 46 tools from `TOOL_SCHEMAS` are represented here.
+//! All 47 tools from `TOOL_SCHEMAS` are represented here.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

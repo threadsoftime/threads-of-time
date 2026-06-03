@@ -117,7 +117,7 @@ impl Registry {
 
 /// Build the V1 registry per spec §6.
 ///
-/// Verbatim port of `registry.py:build_v1_registry` (46 entries).
+/// Verbatim port of `registry.py:build_v1_registry` (47 entries).
 pub fn build_v1_registry() -> Registry {
     Registry::new(vec![
         // GM-tier
@@ -177,6 +177,8 @@ pub fn build_v1_registry() -> Registry {
         ToolEntry::new("memory.delete",           "memory.delete",          Some("bot_guid"),    true),
         // LFG force-form primitives (Inc 1)
         ToolEntry::new("lfg.form_group",          "lfg.form_group",         None,                true),
+        // LFG cancel drain (Inc 2)
+        ToolEntry::new("lfg.cancel",              "lfg.cancel",             None,                true),
         // Stage 3: pull-based intent drain
         ToolEntry::new("obs.lfg_pending",         "obs.lfg_pending",        None,                true),
     ])
@@ -190,9 +192,9 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn registry_has_46_tools() {
+    fn registry_has_47_tools() {
         let reg = build_v1_registry();
-        assert_eq!(reg.names().len(), 46);
+        assert_eq!(reg.names().len(), 47);
     }
 
     #[test]
