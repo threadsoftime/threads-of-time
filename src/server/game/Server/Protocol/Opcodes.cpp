@@ -994,7 +994,7 @@ void OpcodeTable::Initialize()
     /*0x35F*/ DEFINE_HANDLER(CMSG_SEARCH_LFG_LEAVE,                                                 STATUS_LOGGEDIN,   PROCESS_THREADUNSAFE,   &WorldSession::HandleLfrSearchLeaveOpcode               );
     /*0x360*/ DEFINE_SERVER_OPCODE_HANDLER(SMSG_UPDATE_LFG_LIST,                                    STATUS_NEVER);
     /*0x361*/ DEFINE_SERVER_OPCODE_HANDLER(SMSG_LFG_PROPOSAL_UPDATE,                                STATUS_NEVER);
-    /*0x362*/ DEFINE_HANDLER(CMSG_LFG_PROPOSAL_RESULT,                                              STATUS_LOGGEDIN,   PROCESS_THREADUNSAFE,   &WorldSession::HandleLfgProposalResultOpcode            );
+    /*0x362*/ DEFINE_HANDLER(CMSG_LFG_PROPOSAL_RESULT,                                              STATUS_NEVER,      PROCESS_INPLACE,        &WorldSession::Handle_NULL                              ); // Inc-3 C2: proposal handler deleted
     /*0x363*/ DEFINE_SERVER_OPCODE_HANDLER(SMSG_LFG_ROLE_CHECK_UPDATE,                              STATUS_NEVER);
     /*0x364*/ DEFINE_SERVER_OPCODE_HANDLER(SMSG_LFG_JOIN_RESULT,                                    STATUS_NEVER);
     /*0x365*/ DEFINE_SERVER_OPCODE_HANDLER(SMSG_LFG_QUEUE_STATUS,                                   STATUS_NEVER);
@@ -1002,9 +1002,9 @@ void OpcodeTable::Initialize()
     /*0x367*/ DEFINE_SERVER_OPCODE_HANDLER(SMSG_LFG_UPDATE_PLAYER,                                  STATUS_NEVER);
     /*0x368*/ DEFINE_SERVER_OPCODE_HANDLER(SMSG_LFG_UPDATE_PARTY,                                   STATUS_NEVER);
     /*0x369*/ DEFINE_SERVER_OPCODE_HANDLER(SMSG_LFG_UPDATE_SEARCH,                                  STATUS_NEVER);
-    /*0x36A*/ DEFINE_HANDLER(CMSG_LFG_SET_ROLES,                                                    STATUS_LOGGEDIN,   PROCESS_THREADUNSAFE,   &WorldSession::HandleLfgSetRolesOpcode                  );
+    /*0x36A*/ DEFINE_HANDLER(CMSG_LFG_SET_ROLES,                                                    STATUS_NEVER,      PROCESS_INPLACE,        &WorldSession::Handle_NULL                              ); // Inc-3 C2: roles handler deleted
     /*0x36B*/ DEFINE_HANDLER(CMSG_LFG_SET_NEEDS,                                                    STATUS_NEVER,      PROCESS_INPLACE,        &WorldSession::Handle_NULL                              );
-    /*0x36C*/ DEFINE_HANDLER(CMSG_LFG_SET_BOOT_VOTE,                                                STATUS_LOGGEDIN,   PROCESS_THREADUNSAFE,   &WorldSession::HandleLfgSetBootVoteOpcode               );
+    /*0x36C*/ DEFINE_HANDLER(CMSG_LFG_SET_BOOT_VOTE,                                                STATUS_NEVER,      PROCESS_INPLACE,        &WorldSession::Handle_NULL                              ); // Inc-3 C2: boot vote handler deleted
     /*0x36D*/ DEFINE_SERVER_OPCODE_HANDLER(SMSG_LFG_BOOT_PROPOSAL_UPDATE,                           STATUS_NEVER);
     /*0x36E*/ DEFINE_HANDLER(CMSG_LFD_PLAYER_LOCK_INFO_REQUEST,                                     STATUS_LOGGEDIN,   PROCESS_THREADUNSAFE,   &WorldSession::HandleLfgPlayerLockInfoRequestOpcode     );
     /*0x36F*/ DEFINE_SERVER_OPCODE_HANDLER(SMSG_LFG_PLAYER_INFO,                                    STATUS_NEVER);

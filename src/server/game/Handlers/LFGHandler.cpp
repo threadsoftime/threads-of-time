@@ -125,33 +125,9 @@ void WorldSession::HandleLfgLeaveOpcode(WorldPackets::LFG::LFGLeave& /*packet*/)
     GetPlayer()->UpdateLFGChannel();
 }
 
-void WorldSession::HandleLfgProposalResultOpcode(WorldPacket& recvData)
-{
-    uint32 proposalID;                                      // Internal lfgGroupID
-    bool accept;                                           // Accept to join?
-    recvData >> proposalID;
-    recvData >> accept;
+// HandleLfgProposalResultOpcode — deleted in Inc-3 C2 (proposal machinery removed)
 
-    LOG_DEBUG("network", "CMSG_LFG_PROPOSAL_RESULT [{}] proposal: {} accept: {}", GetPlayer()->GetGUID().ToString(), proposalID, accept ? 1 : 0);
-    sLFGMgr->UpdateProposal(proposalID, GetPlayer()->GetGUID(), accept);
-}
-
-void WorldSession::HandleLfgSetRolesOpcode(WorldPacket& recvData)
-{
-    uint8 roles;
-    recvData >> roles;                                    // Player Group Roles
-    ObjectGuid guid = GetPlayer()->GetGUID();
-    Group* group = GetPlayer()->GetGroup();
-    if (!group)
-    {
-        LOG_DEBUG("network", "CMSG_LFG_SET_ROLES [{}] Not in group", guid.ToString());
-        return;
-    }
-    ObjectGuid gguid = group->GetGUID();
-    LOG_DEBUG("network", "CMSG_LFG_SET_ROLES: Group [{}], Player [{}], Roles: {}", gguid.ToString(), guid.ToString(), roles);
-    // Inc-3 C1: UpdateRoleCheck deleted; role-check state transitions owned by Rust slice.
-    // Handler reads + discards the packet (LOG above). Deleted with handler body in C2.
-}
+// HandleLfgSetRolesOpcode — deleted in Inc-3 C2 (role-check machinery removed)
 
 void WorldSession::HandleLfgSetCommentOpcode(WorldPacket&  recvData)
 {
@@ -164,15 +140,7 @@ void WorldSession::HandleLfgSetCommentOpcode(WorldPacket&  recvData)
     sLFGMgr->LfrSetComment(GetPlayer(), comment);
 }
 
-void WorldSession::HandleLfgSetBootVoteOpcode(WorldPacket& recvData)
-{
-    bool agree;                                            // Agree to kick player
-    recvData >> agree;
-
-    ObjectGuid guid = GetPlayer()->GetGUID();
-    LOG_DEBUG("network", "CMSG_LFG_SET_BOOT_VOTE [{}] agree: {}", guid.ToString(), agree ? 1 : 0);
-    sLFGMgr->UpdateBoot(guid, agree);
-}
+// HandleLfgSetBootVoteOpcode — deleted in Inc-3 C2 (boot machinery removed)
 
 void WorldSession::HandleLfgTeleportOpcode(WorldPacket& recvData)
 {
@@ -414,63 +382,8 @@ void WorldSession::SendLfgUpdateParty(lfg::LfgUpdateData const& updateData)
     SendPacket(&data);
 }
 
-void WorldSession::SendLfgRoleChosen(ObjectGuid guid, uint8 roles)
-{
-    LOG_DEBUG("network", "SMSG_LFG_ROLE_CHOSEN [{}] guid: [{}] roles: {}", GetPlayer()->GetGUID().ToString(), guid.ToString(), roles);
-
-    WorldPacket data(SMSG_LFG_ROLE_CHOSEN, 8 + 1 + 4);
-    data << guid;                                          // Guid
-    data << uint8(roles > 0);                              // Ready
-    data << uint32(roles);                                 // Roles
-    SendPacket(&data);
-}
-
-void WorldSession::SendLfgRoleCheckUpdate(lfg::LfgRoleCheck const& roleCheck)
-{
-    lfg::LfgDungeonSet dungeons;
-    if (roleCheck.rDungeonId)
-        dungeons.insert(roleCheck.rDungeonId);
-    else
-        dungeons = roleCheck.dungeons;
-
-    LOG_DEBUG("network", "SMSG_LFG_ROLE_CHECK_UPDATE [{}]", GetPlayer()->GetGUID().ToString());
-    WorldPacket data(SMSG_LFG_ROLE_CHECK_UPDATE, 4 + 1 + 1 + dungeons.size() * 4 + 1 + roleCheck.roles.size() * (8 + 1 + 4 + 1));
-
-    data << uint32(roleCheck.state);                       // Check result
-    data << uint8(roleCheck.state == lfg::LFG_ROLECHECK_INITIALITING);
-    data << uint8(dungeons.size());                        // Number of dungeons
-    if (!dungeons.empty())
-        for (lfg::LfgDungeonSet::iterator it = dungeons.begin(); it != dungeons.end(); ++it)
-            data << uint32(sLFGMgr->GetLFGDungeonEntry(*it)); // Dungeon
-
-    data << uint8(roleCheck.roles.size());                 // Players in group
-    if (!roleCheck.roles.empty())
-    {
-        // Leader info MUST be sent 1st :S
-        ObjectGuid guid = roleCheck.leader;
-        uint8 roles = roleCheck.roles.find(guid)->second;
-        data << guid;                                      // Guid
-        data << uint8(roles > 0);                          // Ready
-        data << uint32(roles);                             // Roles
-        Player* player = ObjectAccessor::FindConnectedPlayer(guid);
-        data << uint8(player ? player->GetLevel() : 0);    // Level
-
-        for (lfg::LfgRolesMap::const_iterator it = roleCheck.roles.begin(); it != roleCheck.roles.end(); ++it)
-        {
-            if (it->first == roleCheck.leader)
-                continue;
-
-            guid = it->first;
-            roles = it->second;
-            data << guid;                                  // Guid
-            data << uint8(roles > 0);                      // Ready
-            data << uint32(roles);                         // Roles
-            player = ObjectAccessor::FindConnectedPlayer(guid);
-            data << uint8(player ? player->GetLevel() : 0);// Level
-        }
-    }
-    SendPacket(&data);
-}
+// SendLfgRoleChosen — deleted in Inc-3 C2 (role-check machinery removed)
+// SendLfgRoleCheckUpdate — deleted in Inc-3 C2 (role-check machinery removed)
 
 void WorldSession::SendLfgJoinResult(lfg::LfgJoinResultData const& joinData)
 {
@@ -544,85 +457,8 @@ void WorldSession::SendLfgPlayerReward(lfg::LfgPlayerRewardData const& rewardDat
     SendPacket(&data);
 }
 
-void WorldSession::SendLfgBootProposalUpdate(lfg::LfgPlayerBoot const& boot)
-{
-    ObjectGuid guid = GetPlayer()->GetGUID();
-    lfg::LfgAnswer playerVote = boot.votes.find(guid)->second;
-    uint8 votesNum = 0;
-    uint8 agreeNum = 0;
-    uint32 secsleft = boot.cancelTime - GameTime::GetGameTime().count();
-    for (lfg::LfgAnswerContainer::const_iterator it = boot.votes.begin(); it != boot.votes.end(); ++it)
-    {
-        if (it->second != lfg::LFG_ANSWER_PENDING)
-        {
-            ++votesNum;
-            if (it->second == lfg::LFG_ANSWER_AGREE)
-                ++agreeNum;
-        }
-    }
-    LOG_DEBUG("network", "SMSG_LFG_BOOT_PROPOSAL_UPDATE [{}] inProgress: {} - didVote: {} - agree: {} - victim: [{}] votes: {} - agrees: {} - left: {} - needed: {} - reason {}",
-                   guid.ToString(), uint8(boot.inProgress), uint8(playerVote != lfg::LFG_ANSWER_PENDING), uint8(playerVote == lfg::LFG_ANSWER_AGREE),
-                   boot.victim.ToString(), votesNum, agreeNum, secsleft, lfg::LFG_GROUP_KICK_VOTES_NEEDED, boot.reason);
-    WorldPacket data(SMSG_LFG_BOOT_PROPOSAL_UPDATE, 1 + 1 + 1 + 8 + 4 + 4 + 4 + 4 + boot.reason.length());
-    data << uint8(boot.inProgress);                        // Vote in progress
-    data << uint8(playerVote != lfg::LFG_ANSWER_PENDING);  // Did Vote
-    data << uint8(playerVote == lfg::LFG_ANSWER_AGREE);    // Agree
-    data << boot.victim;                                   // Victim GUID
-    data << uint32(votesNum);                              // Total Votes
-    data << uint32(agreeNum);                              // Agree Count
-    data << uint32(secsleft);                              // Time Left
-    data << uint32(lfg::LFG_GROUP_KICK_VOTES_NEEDED);      // Needed Votes
-    data << boot.reason.c_str();                           // Kick reason
-    SendPacket(&data);
-}
-
-void WorldSession::SendLfgUpdateProposal(lfg::LfgProposal const& proposal)
-{
-    ObjectGuid guid = GetPlayer()->GetGUID();
-    ObjectGuid gguid = proposal.players.find(guid)->second.group;
-    bool silent = !proposal.isNew && gguid == proposal.group;
-    uint32 dungeonEntry = proposal.dungeonId;
-
-    LOG_DEBUG("network", "SMSG_LFG_PROPOSAL_UPDATE [{} state: {}", guid.ToString(), proposal.state);
-
-    // show random dungeon if player selected random dungeon and it's not lfg group
-    if (!silent)
-    {
-        lfg::LfgDungeonSet const& playerDungeons = sLFGMgr->GetSelectedDungeons(guid);
-        if (playerDungeons.find(proposal.dungeonId) == playerDungeons.end())
-            dungeonEntry = (*playerDungeons.begin());
-    }
-
-    dungeonEntry = sLFGMgr->GetLFGDungeonEntry(dungeonEntry);
-
-    WorldPacket data(SMSG_LFG_PROPOSAL_UPDATE, 4 + 1 + 4 + 4 + 1 + 1 + proposal.players.size() * (4 + 1 + 1 + 1 + 1 + 1));
-    data << uint32(dungeonEntry);                          // Dungeon
-    data << uint8(proposal.state);                         // Proposal state
-    data << uint32(proposal.id);                           // Proposal ID
-    data << uint32(proposal.encounters);                   // encounters done
-    data << uint8(silent);                                 // Show proposal window
-    data << uint8(proposal.players.size());                // Group size
-
-    for (lfg::LfgProposalPlayerContainer::const_iterator it = proposal.players.begin(); it != proposal.players.end(); ++it)
-    {
-        lfg::LfgProposalPlayer const& player = it->second;
-        data << uint32(player.role);                       // Role
-        data << uint8(it->first == guid);                  // Self player
-        if (!player.group)                                 // Player not it a group
-        {
-            data << uint8(0);                              // Not in dungeon
-            data << uint8(0);                              // Not same group
-        }
-        else
-        {
-            data << uint8(player.group == proposal.group); // In dungeon (silent)
-            data << uint8(player.group == gguid);          // Same Group than player
-        }
-        data << uint8(player.accept != lfg::LFG_ANSWER_PENDING);// Answered
-        data << uint8(player.accept == lfg::LFG_ANSWER_AGREE);  // Accepted
-    }
-    SendPacket(&data);
-}
+// SendLfgBootProposalUpdate — deleted in Inc-3 C2 (boot machinery removed)
+// SendLfgUpdateProposal — deleted in Inc-3 C2 (proposal machinery removed)
 
 void WorldSession::SendLfgLfrList(bool update)
 {

@@ -1054,9 +1054,9 @@ public:                                                 // opcodes handlers
     void HandleLfgPartyLockInfoRequestOpcode(WorldPacket& recvData);
     void HandleLfgJoinOpcode(WorldPackets::LFG::LFGJoin& lfgJoin);
     void HandleLfgLeaveOpcode(WorldPackets::LFG::LFGLeave& lfgleave);
-    void HandleLfgSetRolesOpcode(WorldPacket& recvData);
-    void HandleLfgProposalResultOpcode(WorldPacket& recvData);
-    void HandleLfgSetBootVoteOpcode(WorldPacket& recvData);
+    // HandleLfgSetRolesOpcode — deleted in Inc-3 C2
+    // HandleLfgProposalResultOpcode — deleted in Inc-3 C2
+    // HandleLfgSetBootVoteOpcode — deleted in Inc-3 C2
     void HandleLfgTeleportOpcode(WorldPacket& recvData);
     void HandleLfrSearchJoinOpcode(WorldPacket& recvData);
     void HandleLfrSearchLeaveOpcode(WorldPacket& recvData);
@@ -1064,14 +1064,14 @@ public:                                                 // opcodes handlers
 
     void SendLfgUpdatePlayer(lfg::LfgUpdateData const& updateData);
     void SendLfgUpdateParty(lfg::LfgUpdateData const& updateData);
-    void SendLfgRoleChosen(ObjectGuid guid, uint8 roles);
-    void SendLfgRoleCheckUpdate(lfg::LfgRoleCheck const& pRoleCheck);
+    // SendLfgRoleChosen — deleted in Inc-3 C2
+    // SendLfgRoleCheckUpdate — deleted in Inc-3 C2
     void SendLfgLfrList(bool update);
     void SendLfgJoinResult(lfg::LfgJoinResultData const& joinData);
     void SendLfgQueueStatus(lfg::LfgQueueStatusData const& queueData);
     void SendLfgPlayerReward(lfg::LfgPlayerRewardData const& lfgPlayerRewardData);
-    void SendLfgBootProposalUpdate(lfg::LfgPlayerBoot const& boot);
-    void SendLfgUpdateProposal(lfg::LfgProposal const& proposal);
+    // SendLfgBootProposalUpdate — deleted in Inc-3 C2
+    // SendLfgUpdateProposal — deleted in Inc-3 C2
     void SendLfgDisabled();
     void SendLfgOfferContinue(uint32 dungeonEntry);
     void SendLfgTeleportError(uint8 err);

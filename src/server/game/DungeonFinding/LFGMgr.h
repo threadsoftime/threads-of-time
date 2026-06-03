@@ -528,12 +528,7 @@ namespace lfg
         LfgDungeonSet GetRandomAndSeasonalDungeons(uint8 level, uint8 expansion);
         /// Teleport a player to/from selected dungeon
         void TeleportPlayer(Player* player, bool out, WorldLocation const* teleportLocation = nullptr);
-        /// Inits new proposal to boot a player
-        void InitBoot(ObjectGuid gguid, ObjectGuid kicker, ObjectGuid victim, std::string const& reason);
-        /// Updates player boot proposal with new player answer
-        void UpdateBoot(ObjectGuid guid, bool accept);
-        /// Updates proposal to join dungeon with player answer
-        void UpdateProposal(uint32 proposalId, ObjectGuid guid, bool accept);
+        // InitBoot/UpdateBoot/UpdateProposal — deleted in Inc-3 C2
         /// Sets player lfg roles
         void SetRoles(ObjectGuid guid, uint8 roles);
         /// Sets player lfr comment
@@ -565,8 +560,7 @@ namespace lfg
         bool IsLfgGroup(ObjectGuid guid);
         /// Gets the player count of given group
         uint8 GetPlayerCount(ObjectGuid guid);
-        /// Add a new Proposal
-        uint32 AddProposal(LfgProposal& proposal);
+        // AddProposal — deleted in Inc-3 C2
         /// Checks if given players are ignoring each other
         static bool HasIgnore(ObjectGuid guid1, ObjectGuid guid2);
         /// Sends queue status to player
@@ -598,25 +592,25 @@ namespace lfg
         void _SaveToDB(ObjectGuid guid);
 
         // Proposals
-        void RemoveProposal(LfgProposalContainer::iterator itProposal, LfgUpdateType type);
-        void MakeNewGroup(LfgProposal const& proposal);
+        // RemoveProposal — deleted in Inc-3 C2
+        // MakeNewGroup — deleted in Inc-3 C2
 
         // Generic
         LfgDungeonSet const& GetDungeonsByRandom(uint32 randomdungeon);
         LfgType GetDungeonType(uint32 dungeon);
 
-        void SendLfgBootProposalUpdate(ObjectGuid guid, LfgPlayerBoot const& boot);
+        // SendLfgBootProposalUpdate — deleted in Inc-3 C2
         void SendLfgJoinResult(ObjectGuid guid, LfgJoinResultData const& data);
-        void SendLfgRoleChosen(ObjectGuid guid, ObjectGuid pguid, uint8 roles);
-        void SendLfgRoleCheckUpdate(ObjectGuid guid, LfgRoleCheck const& roleCheck);
+        // SendLfgRoleChosen — deleted in Inc-3 C2
+        // SendLfgRoleCheckUpdate — deleted in Inc-3 C2
         void SendLfgUpdateParty(ObjectGuid guid, LfgUpdateData const& data);
         void SendLfgUpdatePlayer(ObjectGuid guid, LfgUpdateData const& data);
-        void SendLfgUpdateProposal(ObjectGuid guid, LfgProposal const& proposal);
+        // SendLfgUpdateProposal — deleted in Inc-3 C2
 
         LfgGuidSet const& GetPlayers(ObjectGuid guid);
 
         // General variables
-        uint32 m_lfgProposalId;                            ///< used as internal counter for proposals
+        // m_lfgProposalId — deleted in Inc-3 C2 (used only by AddProposal, now removed)
         uint32 m_options;                                  ///< Stores config options
         uint32 m_raidBrowserUpdateTimer[2];                ///< pussywizard
         uint32 m_raidBrowserLastUpdatedDungeonId[2];       ///< pussywizard: for 2 factions
@@ -625,10 +619,9 @@ namespace lfg
         // Reward System
         LfgRewardContainer RewardMapStore;                 ///< Stores rewards for random dungeons
         LFGDungeonContainer  LfgDungeonStore;
-        // Rolecheck - Proposal - Vote Kicks
-        LfgRoleCheckContainer RoleChecksStore;             ///< Current Role checks
-        LfgProposalContainer ProposalsStore;               ///< Current Proposals
-        LfgPlayerBootContainer BootsStore;                 ///< Current player kicks
+        // RoleChecksStore — deleted in Inc-3 C2 (role-check machinery removed)
+        // ProposalsStore — deleted in Inc-3 C2 (proposal machinery removed)
+        // BootsStore — deleted in Inc-3 C2 (boot vote machinery removed)
         LfgPlayerDataContainer PlayersStore;               ///< Player data
         LfgGroupDataContainer GroupsStore;                 ///< Group data
         bool m_Testing;

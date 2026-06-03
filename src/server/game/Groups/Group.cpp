@@ -554,12 +554,8 @@ bool Group::RemoveMember(ObjectGuid guid, const RemoveMethod& method /*= GROUP_R
 {
     BroadcastGroupUpdate();
 
-    // LFG group vote kick handled in scripts
-    if (isLFGGroup(true) && method == GROUP_REMOVEMETHOD_KICK)
-    {
-        sLFGMgr->InitBoot(GetGUID(), kicker, guid, std::string(reason ? reason : ""));
-        return m_memberSlots.size() > 0;
-    }
+    // LFG group vote kick: boot vote machinery deleted in Inc-3 C2 (sLFGMgr->InitBoot gone).
+    // In-dungeon kicks now fall through to standard Group member removal below.
 
     // remove member and change leader (if need) only if strong more 2 members _before_ member remove (BG/BF allow 1 member group)
     if (GetMembersCount() > ((isBGGroup() || isLFGGroup() || isBFGroup()) ? 1u : 2u))
