@@ -10,6 +10,7 @@ pub mod models;
 pub mod personality;
 pub mod salience;
 pub mod schema_builder;
+pub mod sse_parser;
 pub mod state;
 pub mod tool_policy;
 pub mod triage;
