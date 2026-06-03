@@ -26,6 +26,7 @@
 #include "GameTime.h"
 #include "Group.h"
 #include "LFGMgr.h"
+#include "LfgIntentStore.h"
 #include "Language.h"
 #include "ObjectAccessor.h"
 #include "Opcodes.h"
@@ -539,6 +540,10 @@ void WorldSession::HandleBattleFieldPortOpcode(WorldPacket& recvData)
         }
 
         // Remove from LFG queues
+        // Inc-2: if this player is queued in the Rust slice, signal a cancel so the
+        // slice removes them from its queue (idempotent — no-op if not slice-queued).
+        if (sLFGMgr->GetState(_player->GetGUID()) == lfg::LFG_STATE_QUEUED)
+            HarnessBridge::RecordLfgCancel(_player->GetGUID().GetCounter());
         sLFGMgr->LeaveAllLfgQueues(_player->GetGUID(), false);
 
         _player->SetBattlegroundId(bg->GetInstanceID(), bg->GetBgTypeID(), queueSlot, true, bgTypeId == BATTLEGROUND_RB, teamId);

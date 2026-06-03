@@ -33,6 +33,7 @@
 #include "InstanceSaveMgr.h"
 #include "LFG.h"
 #include "LFGMgr.h"
+#include "LfgIntentStore.h"
 #include "Language.h"
 #include "MapMgr.h"
 #include "MiscPackets.h"
@@ -492,6 +493,10 @@ public:
             player->SendDirectMessage(&data);
 
             // Remove from LFG queues
+            // Inc-2: if this player is queued in the Rust slice, signal a cancel so the
+            // slice removes them from its queue (idempotent — no-op if not slice-queued).
+            if (sLFGMgr->GetState(player->GetGUID()) == lfg::LFG_STATE_QUEUED)
+                HarnessBridge::RecordLfgCancel(player->GetGUID().GetCounter());
             sLFGMgr->LeaveAllLfgQueues(player->GetGUID(), false);
 
             player->SetBattlegroundId(bg->GetInstanceID(), bgTypeId, queueSlot, true, false, teamId);
