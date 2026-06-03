@@ -17,14 +17,13 @@
 ///   7. Wakeup clamp: <60k → 60k, >600k → 600k, None → 180k.
 ///   8. Organic wakeup fires when `_next_wakeup_ms` is expired.
 ///   9. Telemetry record always emitted (no-decide path + exception path).
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::{routing::post, Json, Router};
 use brain_rs::decide::Decider;
 use brain_rs::dispatch::Dispatcher;
 use brain_rs::loop_supervisor::{DecisionLogWriter, LoopSupervisor};
-use brain_rs::models::{PersonalityCard, TickState};
+use brain_rs::models::PersonalityCard;
 use brain_rs::personality::McpCallable;
 use brain_rs::state::StateStore;
 use brain_rs::triage::TriageGate;
@@ -52,10 +51,6 @@ impl TestLogWriter {
         let records = Arc::new(Mutex::new(Vec::new()));
         (Self { records: Arc::clone(&records) }, records)
     }
-
-    fn records(&self) -> Vec<Value> {
-        self.records.lock().unwrap().clone()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -64,8 +59,6 @@ impl TestLogWriter {
 
 struct MockMcp {
     response: Value,
-    /// Optional per-call delay in millis (for simulating slow triage).
-    delay_ms: Option<u64>,
     calls: Mutex<Vec<String>>,
 }
 
@@ -73,21 +66,8 @@ impl MockMcp {
     fn always_ok(resp: Value) -> Arc<Self> {
         Arc::new(Self {
             response: resp,
-            delay_ms: None,
             calls: Mutex::new(vec![]),
         })
-    }
-
-    fn with_delay(resp: Value, delay_ms: u64) -> Arc<Self> {
-        Arc::new(Self {
-            response: resp,
-            delay_ms: Some(delay_ms),
-            calls: Mutex::new(vec![]),
-        })
-    }
-
-    fn call_count(&self) -> usize {
-        self.calls.lock().unwrap().len()
     }
 }
 
@@ -100,14 +80,8 @@ impl McpCallable for MockMcp {
         Box<dyn std::future::Future<Output = Result<Value, anyhow::Error>> + Send + 'a>,
     > {
         let resp = self.response.clone();
-        let delay = self.delay_ms;
         self.calls.lock().unwrap().push(tool.to_string());
-        Box::pin(async move {
-            if let Some(ms) = delay {
-                tokio::time::sleep(tokio::time::Duration::from_millis(ms)).await;
-            }
-            Ok(resp)
-        })
+        Box::pin(async move { Ok(resp) })
     }
 }
 
@@ -171,19 +145,11 @@ fn make_supervisor(
     reduced_tick_interval_s: f64,
     harness_mcp: Arc<dyn McpCallable>,
     memory_mcp: Arc<dyn McpCallable>,
-    llm_base_url: Option<String>,
 ) -> Arc<LoopSupervisor> {
     let triage = Arc::new(TriageGate::new(
         Arc::clone(&harness_mcp),
         Arc::clone(&memory_mcp),
     ));
-
-    let card = test_card();
-    let llm_url = llm_base_url.unwrap_or_else(|| "http://127.0.0.1:11434".to_string());
-    let decider = Arc::new(Decider::new_test_with_max_level(1001, card, "{}", 25));
-    // Override the LLM URL by building a fresh Decider pointing at our test server.
-    let _ = llm_url; // decider already built; LLM URL override requires struct field mutation.
-    // For tests that don't call the LLM (triage returns no-decide), this is fine.
 
     let dispatcher = Arc::new(Dispatcher::new(
         Arc::clone(&harness_mcp),
@@ -344,7 +310,6 @@ async fn test_start_makes_bot_active() {
         300.0,
         harness_mcp_no_event(),
         memory_mcp_empty(),
-        None,
     );
 
     sup.start(1001);
@@ -373,7 +338,6 @@ async fn test_stop_removes_from_list_active() {
         300.0,
         harness_mcp_no_event(),
         memory_mcp_empty(),
-        None,
     );
 
     sup.start(1002);
@@ -404,7 +368,6 @@ async fn test_stop_all_removes_all_bots() {
         300.0,
         harness_mcp_no_event(),
         memory_mcp_empty(),
-        None,
     );
 
     sup.start(2001);
@@ -436,7 +399,6 @@ async fn test_tick_skipped_busy_drops_when_lock_held() {
         300.0,
         harness_mcp_no_event(),
         memory_mcp_empty(),
-        None,
     );
 
     sup.start(3001);
@@ -493,7 +455,6 @@ async fn test_always_emits_record_on_no_decide_path() {
         300.0,
         harness_mcp_no_event(),
         Arc::clone(&timeout_mcp),
-        None,
     );
 
     sup.start(4001);
@@ -548,7 +509,6 @@ async fn test_tier_interval_switch_uses_new_interval_after_boundary() {
         0.5,  // reduced tier: 500ms
         harness_mcp_no_event(),
         memory_mcp_empty(),
-        None,
     );
 
     sup.start(5001);
@@ -744,7 +704,6 @@ async fn test_dedup_fence_skips_already_decided_memory_ids() {
         300.0,
         harness_mcp_no_event(),
         mem_with_chat as Arc<dyn McpCallable>,
-        None,
     );
 
     sup.start(7001);
@@ -827,7 +786,6 @@ async fn test_organic_wakeup_fires_when_timer_expired() {
         300.0,
         harness_mcp_no_event(),
         memory_mcp_empty(),
-        None,
     );
 
     sup.start(8001);
@@ -864,7 +822,6 @@ async fn test_start_is_idempotent() {
         300.0,
         harness_mcp_no_event(),
         memory_mcp_empty(),
-        None,
     );
 
     sup.start(9001);
@@ -899,7 +856,6 @@ async fn test_enroll_and_release_bot() {
         300.0,
         harness_mcp_no_event(),
         memory_mcp_empty(),
-        None,
     );
 
     sup.enroll_bot(10001);
@@ -941,7 +897,6 @@ async fn test_stop_aborts_stuck_tick_within_10s() {
         300.0,
         harness_mcp_no_event(),
         memory_mcp_empty(),
-        None,
     );
 
     sup.start(12001);

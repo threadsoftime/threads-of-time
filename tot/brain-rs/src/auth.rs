@@ -70,27 +70,10 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
         middleware,
-        response::IntoResponse,
         routing::get,
         Router,
     };
     use tower::ServiceExt;
-
-    /// Build a router with a single GET /test route, optionally protected by
-    /// bearer auth.
-    fn build_app(bearer: &str) -> Router {
-        let route = Router::new().route("/test", get(|| async { (StatusCode::OK, "ok") }));
-        if bearer.is_empty() {
-            // No auth — skip middleware (matches "auth disabled" semantics for tests
-            // where we want zero state)
-            route
-        } else {
-            route.layer(middleware::from_fn_with_state(
-                bearer.to_string(),
-                check_bearer,
-            ))
-        }
-    }
 
     /// Build a router that ALWAYS applies the middleware (even with empty bearer),
     /// testing the "auth disabled" passthrough path inside the middleware itself.

@@ -97,13 +97,6 @@ fn mock_memory_timeout() -> Arc<dyn McpCallable> {
     Arc::new(ErrorMcp) as Arc<dyn McpCallable>
 }
 
-fn mock_memory_no_calls() -> Arc<dyn McpCallable> {
-    // Returns valid empty response; tests verify memory was not called for SSE path.
-    MockMcp::with_response(serde_json::json!({
-        "result": { "items": [], "goals": [] }
-    }))
-}
-
 fn mock_memory_no_chat() -> Arc<dyn McpCallable> {
     MockMcp::with_response(serde_json::json!({
         "result": { "items": [], "goals": [] }

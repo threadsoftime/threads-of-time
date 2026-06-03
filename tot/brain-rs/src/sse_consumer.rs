@@ -331,13 +331,8 @@ mod tests {
     use axum::{
         Router,
         routing::get,
-        response::{
-            sse::{Event, Sse},
-            IntoResponse,
-        },
         http::HeaderMap,
     };
-    use futures_util::stream;
 
     use crate::dedup::{SeenMemoryIds, DEFAULT_CAPACITY};
     use crate::models::PersonalityCard;
@@ -381,29 +376,6 @@ mod tests {
             row_id,
             serde_json::to_string(&data).unwrap()
         )
-    }
-
-    /// Spawn a mock SSE server that streams the given frames then closes.
-    /// Returns the base URL.
-    async fn spawn_sse_server(frames: Vec<String>) -> String {
-        let app = Router::new().route(
-            "/v1/events/stream",
-            get(move || {
-                let frames = frames.clone();
-                async move {
-                    let s = stream::iter(
-                        frames
-                            .into_iter()
-                            .map(|f| Ok::<Event, std::convert::Infallible>(Event::default().data(f)))
-                    );
-                    Sse::new(s).into_response()
-                }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        format!("http://127.0.0.1:{}", addr.port())
     }
 
     /// Spawn a mock SSE server that serves raw SSE text (NOT through axum's Event

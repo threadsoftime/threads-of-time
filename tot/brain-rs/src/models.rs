@@ -83,14 +83,6 @@ impl TickState {
     }
 }
 
-/// A row from the living_bots table in the sqlite state store.
-/// Field names match the Python column names written by brain-sidecar.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LivingBotRow {
-    pub bot_guid: i64,
-    pub personality_json: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,15 +172,4 @@ mod tests {
         assert!(ts.last_decision_id.is_none());
     }
 
-    #[test]
-    fn test_living_bot_row_round_trips_json() {
-        let row = LivingBotRow {
-            bot_guid: 42,
-            personality_json: r#"{"name":"Tara"}"#.to_string(),
-        };
-        let json = serde_json::to_string(&row).unwrap();
-        let back: LivingBotRow = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.bot_guid, 42);
-        assert_eq!(back.personality_json, r#"{"name":"Tara"}"#);
-    }
 }

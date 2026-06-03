@@ -15,8 +15,12 @@ path = "src/main.rs"
 [dependencies]
 tokio    = { version = "1", features = ["full"] }
 axum     = "0.7"
-# reqwest 0.12 for brain-rs's own HTTP client (harness REST calls, etc.)
-# rmcp's internal transport uses its own bundled reqwest 0.13 — no conflict.
+# reqwest 0.12 — kept at 0.12 intentionally.
+# Unification to 0.13 (rmcp's version) requires non-trivial sse_consumer.rs changes:
+#   - `RequestBuilder::query()` removed/renamed in 0.13
+#   - `bytes_stream()` return type changed (unsized Bytes)
+# Deferred to a dedicated footprint pass. The dual-reqwest (0.12 + 0.13) is benign
+# for a Linux amd64 static binary: two compilations, not two runtime allocators.
 reqwest  = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 # client: Peer<RoleClient> + list_all_tools/call_tool methods (required)
 # transport-streamable-http-client-reqwest: reqwest-backed StreamableHttpClientTransport +

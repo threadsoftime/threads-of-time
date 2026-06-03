@@ -368,9 +368,6 @@ mod tests {
             })
         }
 
-        fn calls(&self) -> Vec<String> {
-            self.calls.lock().unwrap().clone()
-        }
     }
 
     impl McpCallable for MockMcp {
@@ -405,18 +402,6 @@ mod tests {
 
     fn make_gate(harness: Arc<dyn McpCallable>, memory: Arc<dyn McpCallable>) -> TriageGate {
         TriageGate::new_with_mocks(harness, memory)
-    }
-
-    fn harness_empty_state() -> Arc<dyn McpCallable> {
-        MockMcp::always_ok(serde_json::json!({
-            "result": { "self": { "pending_group_invite": null }, "level": 30 },
-        }))
-    }
-
-    fn harness_empty_combat() -> Arc<dyn McpCallable> {
-        MockMcp::always_ok(serde_json::json!({
-            "result": { "events": [] },
-        }))
     }
 
     fn harness_no_combat_no_invite() -> Arc<dyn McpCallable> {
