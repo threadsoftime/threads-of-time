@@ -36,7 +36,7 @@ use crate::state::StateStore;
 // ---------------------------------------------------------------------------
 
 /// Snapshot of a single online player. Mirrors Python `PlayerSnapshot`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlayerSnapshot {
     pub player_guid: i64,
     pub name: String,
@@ -51,7 +51,7 @@ pub struct PlayerSnapshot {
 }
 
 /// Snapshot of a single managed bot. Mirrors Python `BotSnapshot`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BotSnapshot {
     pub bot_guid: i64,
     pub name: String,
@@ -484,7 +484,7 @@ impl SubsetGate {
     // Internal: recompute_and_apply
     // ------------------------------------------------------------------
 
-    async fn _recompute_and_apply(&self) -> Result<SubsetDecision, anyhow::Error> {
+    pub async fn _recompute_and_apply(&self) -> Result<SubsetDecision, anyhow::Error> {
         let snapshot = (self.snapshot_fetcher)().await;
 
         // Read current gate state from the state store.

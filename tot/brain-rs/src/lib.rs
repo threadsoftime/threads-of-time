@@ -1,4 +1,6 @@
 // brain-rs library root — exposes modules for integration tests and future crate consumers.
+pub mod app;
+pub mod auth;
 pub mod config;
 pub mod decide;
 pub mod dedup;
