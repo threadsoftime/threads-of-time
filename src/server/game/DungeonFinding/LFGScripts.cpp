@@ -22,6 +22,7 @@
 #include "LFGScripts.h"
 #include "Group.h"
 #include "LFGMgr.h"
+#include "LfgIntentStore.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "ScriptMgr.h"
@@ -57,6 +58,10 @@ namespace lfg
         if (!player->GetGroup() || !player->GetGroup()->isLFGGroup())
         {
             player->GetSession()->SendLfgLfrList(false);
+            // Inc-2: if this player is queued in the Rust slice, signal a cancel so the
+            // slice removes them from its queue (idempotent — no-op if not slice-queued).
+            if (sLFGMgr->GetState(player->GetGUID()) == LFG_STATE_QUEUED)
+                HarnessBridge::RecordLfgCancel(player->GetGUID().GetCounter());
             sLFGMgr->LeaveLfg(player->GetGUID());
             sLFGMgr->LeaveAllLfgQueues(player->GetGUID(), true, player->GetGroup() ? player->GetGroup()->GetGUID() : ObjectGuid::Empty);
 

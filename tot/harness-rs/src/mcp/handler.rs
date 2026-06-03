@@ -1,4 +1,4 @@
-//! MCP ServerHandler with all 46 V1 tools.
+//! MCP ServerHandler with all 47 V1 tools.
 //!
 //! Port of `harness_daemon/mcp_server.py:build_mcp_server`.
 //!
@@ -9,7 +9,7 @@
 //!   `impl ServerHandler for HarnessMcp` sets `serverInfo`.
 //! - Every tool is a direct `#[tool]` fn that forwards to `self.forward(...)`.
 //!
-//! IMPORTANT: All 46 tool methods must be defined DIRECTLY in the
+//! IMPORTANT: All 47 tool methods must be defined DIRECTLY in the
 //! `#[tool_router] impl HarnessMcp` block with `#[tool(...)]` attributes on
 //! each function. The `#[tool_router]` proc macro detects `#[tool]` attributes
 //! in the token stream BEFORE macro_rules expansion — so `macro_rules!`
@@ -244,7 +244,7 @@ fn gen_mcp_request_id() -> String {
 }
 
 impl HarnessMcp {
-    /// Shared dispatch path for all 46 tool methods.
+    /// Shared dispatch path for all 47 tool methods.
     ///
     /// Steps (mirror mcp_server.py:111-150):
     /// 1. Resolve TokenRecord from Parts extensions → build AuthResult.
@@ -320,7 +320,7 @@ impl HarnessMcp {
     }
 }
 
-// ── 46-tool #[tool_router] impl ───────────────────────────────────────────────
+// ── 47-tool #[tool_router] impl ───────────────────────────────────────────────
 //
 // CRITICAL: Each tool method MUST be defined directly with `#[tool(...)]` on
 // the function. Do NOT use macro_rules! invocations here — the `#[tool_router]`
@@ -564,11 +564,16 @@ impl HarnessMcp {
         self.forward("memory.delete", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
     }
 
-    // ── lfg.* (1) ────────────────────────────────────────────────────────────
+    // ── lfg.* (2) ────────────────────────────────────────────────────────────
 
     #[tool(name = "lfg.form_group", description = "Force-create a server-side LFG group and teleport all members into the dungeon.")]
     async fn lfg_form_group(&self, Parameters(w): Parameters<schemas::LfgFormGroupWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
         self.forward("lfg.form_group", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
+    }
+
+    #[tool(name = "lfg.cancel", description = "Drain pending LFG cancel intents recorded when a player presses Leave; returns {\"cancelled\":[<guid_low>,...]} for the slice to remove from its queue.")]
+    async fn lfg_cancel(&self, Parameters(w): Parameters<schemas::LfgCancelWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
+        self.forward("lfg.cancel", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
     }
 }
 
@@ -617,7 +622,7 @@ mod tests {
     // FAIL TO BOOT.
     //
     // This test asserts the representative case (obs.ping).  The full suite
-    // covering all 46 wrappers lives in mcp::schemas::tests::all_46_wrappers_have_args_envelope.
+    // covering all 47 wrappers lives in mcp::schemas::tests::all_47_wrappers_have_args_envelope.
     // The live tools/list assertion lives in parity/run_parity.py (Fix C).
     #[test]
     fn obs_ping_wrapper_schema_has_args_key() {

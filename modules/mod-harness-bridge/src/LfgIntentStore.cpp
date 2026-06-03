@@ -44,4 +44,38 @@ namespace HarnessBridge
         return result;
     }
 
+    // ---------------------------------------------------------------------------
+    // Cancel queue — mirrors the join queue above.
+    // World-thread-only; no mutex (see header invariant: adding one would be a bug).
+    // ---------------------------------------------------------------------------
+    namespace
+    {
+        // Cancel guids queued by HandleLfgLeaveOpcode, drained by LfgCancelAdapter.
+        // Stores only the POD guid_low; Player* is never held here.
+        static std::vector<uint64_t> gCancelQueue;
+    }
+
+    void RecordLfgCancel(uint64_t guid_low)
+    {
+        gCancelQueue.push_back(guid_low);
+    }
+
+    std::vector<uint64_t> DrainLfgCancels(std::size_t max)
+    {
+        if (gCancelQueue.empty() || max == 0)
+            return {};
+
+        std::size_t const take = std::min(max, gCancelQueue.size());
+
+        std::vector<uint64_t> result;
+        result.reserve(take);
+        auto first = gCancelQueue.begin();
+        auto last  = first + static_cast<std::ptrdiff_t>(take);
+        for (auto it = first; it != last; ++it)
+            result.push_back(*it);
+
+        gCancelQueue.erase(first, last);
+        return result;
+    }
+
 } // namespace HarnessBridge

@@ -41,10 +41,11 @@ ENV CARGO_BUILD_JOBS=4
 
 WORKDIR /build
 
-# Workspace + ALL FIVE member manifests are needed for workspace resolution
+# Workspace + ALL SIX member manifests are needed for workspace resolution
 # (audited against tot/Cargo.toml [workspace.members]:
-# game-event-scheduler, harness-rs, lfg-matchmaker, memory-rs, slice-host).
+# brain-rs, game-event-scheduler, harness-rs, lfg-matchmaker, memory-rs, slice-host).
 COPY Cargo.toml Cargo.lock ./
+COPY brain-rs/Cargo.toml              ./brain-rs/
 COPY game-event-scheduler/Cargo.toml ./game-event-scheduler/
 COPY harness-rs/Cargo.toml            ./harness-rs/
 COPY lfg-matchmaker/Cargo.toml        ./lfg-matchmaker/
@@ -55,10 +56,14 @@ COPY slice-host/Cargo.toml            ./slice-host/
 # workspace and compile harness-rs's dependency crates without real sources.
 # memory-rs declares a lib + two bins (memory-rs, embed-stub) + a build.rs — all
 # are stubbed (memory-rs is NOT built by `-p harness-rs`, but its declared target
-# files must exist for workspace target discovery). The stubs are replaced by the
-# real harness-rs sources in the COPY step below.
-RUN mkdir -p game-event-scheduler/src harness-rs/src lfg-matchmaker/src \
+# files must exist for workspace target discovery). brain-rs declares a lib +
+# one bin (brain-rs) + a build.rs. The stubs are replaced by the real harness-rs
+# sources in the COPY step below.
+RUN mkdir -p brain-rs/src game-event-scheduler/src harness-rs/src lfg-matchmaker/src \
              memory-rs/src memory-rs/src/bin slice-host/src \
+    && echo 'pub fn _stub() {}' > brain-rs/src/lib.rs \
+    && echo 'fn main() {}'      > brain-rs/src/main.rs \
+    && echo 'fn main() {}'      > brain-rs/build.rs \
     && echo 'pub fn _stub() {}' > game-event-scheduler/src/lib.rs \
     && echo 'fn main() {}'      > game-event-scheduler/src/main.rs \
     && echo 'fn main() {}'      > harness-rs/src/main.rs \

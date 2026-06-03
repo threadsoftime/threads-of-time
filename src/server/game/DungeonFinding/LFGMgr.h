@@ -593,6 +593,11 @@ namespace lfg
         /// Called by harness lfg.form_group after force-creating a group.
         void InitGroupForDungeon(ObjectGuid gguid);
 
+        /// Sets the LFG state for a player or group. Public so external consumers
+        /// (LFGHandler, LfgVetoScript) can mirror state changes without going
+        /// through the full LFGMgr::JoinLfg / LeaveLfg paths.
+        void SetState(ObjectGuid guid, LfgState state);
+
     private:
         TeamId GetTeam(ObjectGuid guid);
         void RestoreState(ObjectGuid guid, char const* debugMsg);
@@ -600,7 +605,6 @@ namespace lfg
         void SetSelectedDungeons(ObjectGuid guid, LfgDungeonSet const& dungeons);
         void SetLockedDungeons(ObjectGuid guid, LfgLockMap const& lock);
         void DecreaseKicksLeft(ObjectGuid guid);
-        void SetState(ObjectGuid guid, LfgState state);
         void SetCanOverrideRBState(ObjectGuid guid, bool val);
         void GetCompatibleDungeons(LfgDungeonSet& dungeons, LfgGuidSet const& players, LfgLockPartyMap& lockMap, uint32 randomDungeonId = 0);
         void _SaveToDB(ObjectGuid guid);

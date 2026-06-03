@@ -22,6 +22,8 @@ add_executable(harness_bridge_tests
     test_dispatch.cpp
     test_console_capture_store.cpp
     ../src/ConsoleCaptureStore.cpp
+    test_lfg_intent_store.cpp
+    ../src/LfgIntentStore.cpp
 )
 
 target_include_directories(harness_bridge_tests PRIVATE
