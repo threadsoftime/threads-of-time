@@ -274,18 +274,26 @@ impl LoopSupervisor {
         // Await polling task (timeout 10s, then abort). Mirrors Python:
         //   try: await asyncio.wait_for(task, 10)
         //   except asyncio.TimeoutError: task.cancel()
+        //
+        // Key: save the AbortHandle BEFORE moving the JoinHandle into
+        // `timeout(...)`.  `tokio::time::timeout` consumes the JoinHandle —
+        // on timeout there is nothing left to abort() unless we kept the
+        // handle separately.  Without this, a mid-LLM-call tick (up to
+        // LLM_TIMEOUT_S=60s) would block stop() for the full 60s instead of
+        // the intended ≤10s.
         let poll_task = {
             let mut tasks = self.tasks.lock().unwrap();
             tasks.remove(&bot_guid)
         };
         if let Some(t) = poll_task {
             if !t.is_finished() {
+                let abort_handle = t.abort_handle();
                 match tokio::time::timeout(tokio::time::Duration::from_secs(10), t).await {
                     Ok(_) => {}
-                    Err(_) => {
-                        // Timeout — task was already moved into wait_for; no handle left
-                        // to call abort(). The stop_notify.notify_waiters() above will
-                        // cause the loop to exit on the next sleep boundary.
+                    Err(_timeout) => {
+                        // Task is still running after 10s — abort it, matching
+                        // Python's `task.cancel()` on asyncio.TimeoutError.
+                        abort_handle.abort();
                     }
                 }
             }
@@ -474,7 +482,15 @@ impl LoopSupervisor {
         });
 
         // Run the inner tick; whatever happens, emit the record afterward.
-        let result = self
+        //
+        // Python: try: ... except Exception as e: record["error"] = f"tick_exception: {e}"
+        //         finally: self._log(record)
+        //
+        // Rust: _one_tick_inner returns Result<TickState, anyhow::Error>.
+        // Errors bubble out via `?` (matching Python's implicit exception
+        // propagation), are caught here, written into record["error"], and then
+        // the record is always emitted (the `finally` equivalent).
+        let tick_result = self
             ._one_tick_inner(
                 bot_guid,
                 last_state,
@@ -484,6 +500,25 @@ impl LoopSupervisor {
                 &mut record,
             )
             .await;
+
+        // Mirror Python except + finally: on Err set the error field, then
+        // always emit the record.
+        let result = match tick_result {
+            Ok(state) => state,
+            Err(e) => {
+                // Python: except Exception as e: log.exception(...); record["error"] = ...
+                warn!("uncaught tick exception bot={} err={:?}", bot_guid, e);
+                record["error"] = Value::String(format!("tick_exception: {}", e));
+                // Return same TickState shape Python does: last_decision_id = record["event_id"]
+                // (i.e. current event_id, not the prior state's — Python always returns
+                // TickState(..., last_decision_id=record["event_id"]) at the outer level).
+                TickState {
+                    bot_guid,
+                    last_tick_ms: now_ms,
+                    last_decision_id: Some(event_id.clone()),
+                }
+            }
+        };
 
         // Always emit (Python `finally: self._log(record)`).
         self._log(record);
@@ -499,7 +534,7 @@ impl LoopSupervisor {
         now_ms: i64,
         event_id: &str,
         record: &mut Value,
-    ) -> TickState {
+    ) -> Result<TickState, anyhow::Error> {
         // ── Triage ──────────────────────────────────────────────────────
         let next_wakeup_at_ms = {
             let bots = self.bots.lock().unwrap();
@@ -514,11 +549,11 @@ impl LoopSupervisor {
         record["triage_reason"] = Value::String(triage.reason.clone());
 
         if !triage.should_decide {
-            return TickState {
+            return Ok(TickState {
                 bot_guid,
                 last_tick_ms: now_ms,
                 last_decision_id: last_state.last_decision_id.clone(),
-            };
+            });
         }
 
         // ── v0.2.2 Poll/SSE dedup fence ──────────────────────────────────
@@ -556,11 +591,11 @@ impl LoopSupervisor {
                 if filtered.is_empty() {
                     // All already decided via SSE → skip LLM.
                     record["triage_reason"] = Value::String("no_change".to_string());
-                    return TickState {
+                    return Ok(TickState {
                         bot_guid,
                         last_tick_ms: now_ms,
                         last_decision_id: last_state.last_decision_id.clone(),
-                    };
+                    });
                 }
 
                 // Mark survivors.
@@ -661,21 +696,13 @@ impl LoopSupervisor {
             .get_tier(bot_guid)
             .unwrap_or_else(|_| "full".to_string());
 
-        let dispatch_result = match self
+        // Mirror Python: dispatcher.dispatch raises → caught by outer except,
+        // record["error"] set, finally logs. We use `?` to propagate, which
+        // is caught by the outer _one_tick handler.
+        let dispatch_result = self
             .dispatcher
             .dispatch(bot_guid, &decision, &tier)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                record["error"] = Value::String(format!("tick_exception: {}", e));
-                return TickState {
-                    bot_guid,
-                    last_tick_ms: now_ms,
-                    last_decision_id: Some(event_id.to_string()),
-                };
-            }
-        };
+            .await?;
 
         record["dispatch_result"] =
             Value::String(dispatch_result.disposition.clone());
@@ -733,11 +760,11 @@ impl LoopSupervisor {
             }
         }
 
-        TickState {
+        Ok(TickState {
             bot_guid,
             last_tick_ms: now_ms,
             last_decision_id: Some(event_id.to_string()),
-        }
+        })
     }
 
     // ------------------------------------------------------------------
