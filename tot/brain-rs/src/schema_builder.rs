@@ -310,3 +310,104 @@ pub fn render_prompt_summary(per_tool: &BTreeMap<String, ToolEntry>) -> String {
     }
     lines.join("\n")
 }
+
+// ---------------------------------------------------------------------------
+// fetch_schemas — pull live tools/list from both MCPs
+// ---------------------------------------------------------------------------
+
+/// Pull tools/list from both MCPs, unwrap, and merge into one BTreeMap.
+///
+/// Mirrors Python `schema_builder.fetch_schemas(harness_mcp, memory_mcp)`.
+///
+/// Returns a `BTreeMap<tool_name, ToolEntry>` suitable for `compose_oneof` and
+/// `render_prompt_summary`. Tools from `memory` override tools from `harness`
+/// if names collide (matching Python dict update order).
+///
+/// Errors: propagates `anyhow::Error` from `list_tools()` on either MCP.
+/// The caller (app lifespan) is responsible for `sys.exit(1)` on failure.
+pub async fn fetch_schemas<H, M>(
+    harness_mcp: &H,
+    memory_mcp: &M,
+) -> Result<BTreeMap<String, ToolEntry>, anyhow::Error>
+where
+    H: ListTools,
+    M: ListTools,
+{
+    let harness_tools = harness_mcp.list_tools().await?;
+    let memory_tools = memory_mcp.list_tools().await?;
+
+    let mut per_tool: BTreeMap<String, ToolEntry> = BTreeMap::new();
+
+    for tool in harness_tools {
+        // input_schema is Arc<JsonObject> = Arc<serde_json::Map<String, Value>>
+        let schema_map: HashMap<String, serde_json::Value> =
+            tool.input_schema.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        match unwrap_fastmcp_args(&schema_map) {
+            Ok(schema) => {
+                per_tool.insert(
+                    tool.name.to_string(),
+                    ToolEntry {
+                        description: tool.description.as_deref().unwrap_or("").to_string(),
+                        schema,
+                        source_mcp: "harness".to_string(),
+                    },
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "fetch_schemas: skipping harness tool {} — unwrap_fastmcp_args failed: {}",
+                    tool.name, e
+                );
+            }
+        }
+    }
+
+    for tool in memory_tools {
+        let schema_map: HashMap<String, serde_json::Value> =
+            tool.input_schema.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        match unwrap_fastmcp_args(&schema_map) {
+            Ok(schema) => {
+                per_tool.insert(
+                    tool.name.to_string(),
+                    ToolEntry {
+                        description: tool.description.as_deref().unwrap_or("").to_string(),
+                        schema,
+                        source_mcp: "memory".to_string(),
+                    },
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "fetch_schemas: skipping memory tool {} — unwrap_fastmcp_args failed: {}",
+                    tool.name, e
+                );
+            }
+        }
+    }
+
+    Ok(per_tool)
+}
+
+/// Abstraction over MCP clients that can list tools.
+/// Allows `fetch_schemas` to be called in tests with a mock.
+///
+/// Uses `BoxFuture` for object-safety (stable async-fn-in-traits are not
+/// dyn-safe without this indirection on Rust stable as of 1.92).
+pub trait ListTools: Send + Sync {
+    fn list_tools(
+        &self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<Vec<rmcp::model::Tool>>> + Send + '_>,
+    >;
+}
+
+// Blanket impl for McpClient (which already has list_tools as an async fn)
+impl ListTools for crate::mcp_client::McpClient {
+    fn list_tools(
+        &self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<Vec<rmcp::model::Tool>>> + Send + '_>,
+    > {
+        Box::pin(async move { self.list_tools().await })
+    }
+}
