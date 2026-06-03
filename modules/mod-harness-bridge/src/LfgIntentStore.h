@@ -48,4 +48,13 @@ namespace HarnessBridge
     // Called by ObsLfgPendingAdapter on the world tick.
     std::vector<LfgIntent> DrainLfgIntents(std::size_t max);
 
+    // Record one cancel intent — called by HandleLfgLeaveOpcode (world thread).
+    // Stores only the POD guid_low; Player* is NEVER held here.
+    void RecordLfgCancel(uint64_t guid_low);
+
+    // Pop and return up to `max` cancel guids from the front of the queue.
+    // At-most-once semantics: returned entries are removed.
+    // Called by LfgCancelAdapter::LfgCancel on the world tick.
+    std::vector<uint64_t> DrainLfgCancels(std::size_t max);
+
 } // namespace HarnessBridge
