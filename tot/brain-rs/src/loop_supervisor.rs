@@ -30,7 +30,7 @@
 //! * Telemetry record emitted ALWAYS — even on early-return (no-decide) and
 //!   exception paths (Python `finally: self._log(record)`).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex as StdMutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1003,19 +1003,71 @@ fn _action_result_from_dispatch(
 
 /// Render the episode text written to memory.
 /// Mirrors Python `_episode_text` (max 4000 chars).
+///
+/// Python serialises with `json.dumps(payload, ensure_ascii=False, sort_keys=True)`.
+/// We match that by inserting into a `BTreeMap` (which iterates in key order) before
+/// serialising, giving alphabetical key order: decision_kind, disposition, reasoning,
+/// triage, tool.
 fn _episode_text(
     hot_inputs: &HashMap<String, Value>,
     decision: &Decision,
     result: &crate::dispatch::DispatchResult,
 ) -> String {
-    let payload = json!({
-        "decision_kind": serde_json::to_value(&decision.kind).unwrap_or_default(),
-        "tool": decision.tool,
-        "reasoning": decision.reasoning.chars().take(200).collect::<String>(),
-        "disposition": result.disposition,
-        "triage": hot_inputs.get("episode_type").and_then(|v| v.as_str()).unwrap_or("tick"),
-    });
-    payload.to_string().chars().take(4000).collect()
+    let mut payload: BTreeMap<String, Value> = BTreeMap::new();
+    payload.insert("decision_kind".to_string(), serde_json::to_value(&decision.kind).unwrap_or_default());
+    payload.insert("disposition".to_string(), Value::String(result.disposition.clone()));
+    payload.insert("reasoning".to_string(), Value::String(decision.reasoning.chars().take(200).collect::<String>()));
+    payload.insert("triage".to_string(), Value::String(
+        hot_inputs.get("episode_type").and_then(|v| v.as_str()).unwrap_or("tick").to_string()
+    ));
+    payload.insert("tool".to_string(), serde_json::to_value(&decision.tool).unwrap_or_default());
+    serde_json::to_string(&payload)
+        .unwrap_or_default()
+        .chars()
+        .take(4000)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{Decision, DecisionKind};
+    use crate::dispatch::DispatchResult;
+
+    #[test]
+    fn test_episode_text_keys_sorted_alphabetically() {
+        let hot_inputs: HashMap<String, Value> = [(
+            "episode_type".to_string(),
+            Value::String("fresh_chat".to_string()),
+        )]
+        .into_iter()
+        .collect();
+        let decision = Decision {
+            kind: DecisionKind::NoOp,
+            tool: None,
+            args: None,
+            confidence: 0.0,
+            reasoning: "test reason".to_string(),
+            wakeup_in_ms: None,
+        };
+        let dispatch_result = DispatchResult {
+            disposition: "skipped".to_string(),
+            tool: None,
+            result: None,
+            error: String::new(),
+        };
+        let text = _episode_text(&hot_inputs, &decision, &dispatch_result);
+        // Keys must appear in alphabetical order: decision_kind, disposition, reasoning, tool, triage
+        let dk = text.find("\"decision_kind\"").expect("decision_kind present");
+        let di = text.find("\"disposition\"").expect("disposition present");
+        let re = text.find("\"reasoning\"").expect("reasoning present");
+        let to = text.find("\"tool\"").expect("tool present");
+        let tr = text.find("\"triage\"").expect("triage present");
+        assert!(dk < di, "decision_kind must come before disposition");
+        assert!(di < re, "disposition must come before reasoning");
+        assert!(re < to, "reasoning must come before tool");
+        assert!(to < tr, "tool must come before triage");
+    }
 }
 
 /// Return true iff sse_inputs contains a non-empty fresh_chat list.

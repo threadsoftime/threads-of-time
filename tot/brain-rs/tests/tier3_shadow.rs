@@ -119,5 +119,6 @@ fn test_tier3_shadow_compare() {
     }
 
     eprintln!("tier3 shadow: {total} records compared, {} mismatches", mismatches.len());
+    assert!(total > 0, "tier3 shadow fixture is empty/comment-only — populate it before running");
     assert!(mismatches.is_empty(), "Tier-3 shadow mismatches:\n{}", mismatches.join("\n"));
 }

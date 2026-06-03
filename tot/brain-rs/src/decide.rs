@@ -1431,16 +1431,10 @@ mod tests {
             !rendered.contains("{{"),
             "rendered template must not contain '{{' — all double-open-braces must be unescaped"
         );
-        // Note: `}}` (two adjacent `}`) CAN legitimately remain in the output.
-        // The template has `}}}}` (four braces) for nested JSON object closes; Python
-        // .format() reduces `}}}}` → `}}` (two literal `}`), which appear adjacent.
-        // We do NOT assert on `}}` absence; that would be a false positive.
-        // Instead we verify the COUNT matches Python's expected 4 remaining.
-        let double_close_count = rendered.match_indices("}}").count();
-        assert_eq!(
-            double_close_count, 4,
-            "rendered template must have exactly 4 remaining '}}' sequences (from }}}} → }} unescaping), got {double_close_count}"
-        );
+        // Note: `}}` (two adjacent `}`) CAN legitimately remain in the output when the
+        // template uses `}}}}` escape sequences for literal `}}` in JSON examples.
+        // We do NOT assert on `}}` count — the template is meant to be edited freely
+        // and the number of literal `}}` in JSON examples may change innocently.
         // No unresolved named placeholders: check for { followed by alpha chars followed by }
         let unresolved: Vec<&str> = {
             let mut found = vec![];
