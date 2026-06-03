@@ -48,6 +48,20 @@ pub async fn run(state: Arc<AppState>, harness: Harness, cfg: Config) {
             }
         }
 
+        // Step 1b: drain lfg.cancel — remove players who pressed Leave. Runs
+        // unconditionally (outside cfg.enabled) so the queue stays consistent.
+        // Idempotent: an absent guid (formed / never queued) is a silent no-op.
+        match harness.lfg_cancel(50).await {
+            Ok(cancelled) => {
+                for guid in cancelled {
+                    state.queue.remove(guid);
+                }
+            }
+            Err(e) => {
+                eprintln!("[tick] lfg.cancel failed: {e}; continuing without cancel drain");
+            }
+        }
+
         // Steps 2 & 3 perform live game-object mutations (lfg.form_group,
         // bot.invite_to_group, bot.enter_instance). They are gated behind
         // cfg.enabled (env var LFG_ENABLED, default false) so that when
@@ -815,6 +829,206 @@ mod tests {
                 "pending_placements must be empty after successful retry"
             );
         }
+    }
+
+    // ── Cancel-drain tests (R2) ──────────────────────────────────────────────
+    //
+    // Shared helper: returns the given `cancel_guids` on the FIRST call to
+    // `lfg.cancel`, then `[]` on subsequent calls (drain semantics). All other
+    // tools return `{ok:true, result:{}}` except:
+    //   - `obs.lfg_pending` → empty pending (so no new queue entries are injected)
+    //   - `obs.list_bot_population` → 4 bots (10/20/30/40)
+    //   - `obs.get_state` → ungrouped, not in combat (enables real-player match path)
+    //
+    // The `cancelled` key is present in the first `lfg.cancel` response so the
+    // drain decodes correctly. Subsequent `lfg.cancel` calls return `cancelled: []`.
+    async fn spawn_cancel_drain_mock(
+        cancel_guids: Vec<u64>,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
+        let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_h = calls.clone();
+        let drained = Arc::new(Mutex::new(false));
+        let cancel_guids = Arc::new(cancel_guids);
+
+        let handler = move |Path(name): Path<String>, Json(args): Json<serde_json::Value>| {
+            let calls = calls_h.clone();
+            let drained = drained.clone();
+            let cancel_guids = cancel_guids.clone();
+            async move {
+                let bot = args.get("bot_guid").and_then(|v| v.as_u64()).unwrap_or(0);
+                let target = args.get("target_guid").and_then(|v| v.as_u64()).unwrap_or(0);
+                let id = if bot != 0 { bot } else { target };
+                calls.lock().unwrap().push(format!("{name}:{id}"));
+
+                if name == "obs.lfg_pending" {
+                    return Json(
+                        serde_json::json!({ "ok": true, "result": { "pending": [] } }),
+                    );
+                }
+                if name == "lfg.cancel" {
+                    let already = {
+                        let mut g = drained.lock().unwrap();
+                        let v = *g;
+                        *g = true;
+                        v
+                    };
+                    let guids_json = if already {
+                        serde_json::json!([])
+                    } else {
+                        serde_json::Value::Array(
+                            cancel_guids.iter().map(|&g| serde_json::json!(g)).collect(),
+                        )
+                    };
+                    return Json(
+                        serde_json::json!({ "ok": true, "result": { "cancelled": guids_json } }),
+                    );
+                }
+                if name == "obs.list_bot_population" {
+                    return Json(serde_json::json!({
+                        "ok": true,
+                        "result": { "bots": [
+                            { "bot_guid": 10u64 }, { "bot_guid": 20u64 },
+                            { "bot_guid": 30u64 }, { "bot_guid": 40u64 },
+                        ]}
+                    }));
+                }
+                if name == "obs.get_state" {
+                    return Json(serde_json::json!({
+                        "ok": true,
+                        "result": {
+                            "self": { "race": "human", "is_in_combat": false },
+                            "social": { "in_group": false }
+                        }
+                    }));
+                }
+                Json(serde_json::json!({ "ok": true, "result": {} }))
+            }
+        };
+        let app = Router::new().route("/v1/tools/:name", post(handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        (format!("http://{addr}"), calls)
+    }
+
+    // TC1: `lfg.cancel` returns [42]; the queued entry for guid 42 must be removed.
+    #[tokio::test]
+    async fn cancel_drain_removes_queued_guid() {
+        let (base, _calls) = spawn_cancel_drain_mock(vec![42u64]).await;
+        let state = Arc::new(AppState {
+            queue: crate::queue::Queue::new(),
+            pending_placements: crate::api::PendingPlacements::new(),
+        });
+        // Pre-upsert a real-player entry so guid 42 is in the queue.
+        state.queue.upsert(QueueEntry {
+            guid: 42,
+            role: Role::Tank,
+            dungeon_id: 4,
+            faction: Faction::Alliance,
+            is_real_player: true,
+        });
+        assert_eq!(state.queue.len(), 1);
+
+        let h = crate::harness::Harness::new(base.clone(), "tok".into());
+        let conf = cfg(base);
+        let handle = {
+            let state = state.clone();
+            tokio::spawn(async move { run(state, h, conf).await })
+        };
+        tokio::time::sleep(StdDuration::from_millis(150)).await;
+        handle.abort();
+
+        assert_eq!(state.queue.len(), 0, "cancelled guid 42 must be removed from queue");
+    }
+
+    // TC2: `lfg.cancel` returns [999] but guid 999 is NOT in the queue — must be
+    // a silent no-op (queue unchanged, no panic).
+    #[tokio::test]
+    async fn cancel_idempotent_when_guid_not_in_queue() {
+        let (base, _calls) = spawn_cancel_drain_mock(vec![999u64]).await;
+        let state = Arc::new(AppState {
+            queue: crate::queue::Queue::new(),
+            pending_placements: crate::api::PendingPlacements::new(),
+        });
+        // Only guid 1 is in the queue; cancel returns 999 (not present).
+        state.queue.upsert(QueueEntry {
+            guid: 1,
+            role: Role::Dps,
+            dungeon_id: 4,
+            faction: Faction::Alliance,
+            is_real_player: false,
+        });
+
+        let h = crate::harness::Harness::new(base.clone(), "tok".into());
+        let conf = cfg(base);
+        let handle = {
+            let state = state.clone();
+            tokio::spawn(async move { run(state, h, conf).await })
+        };
+        tokio::time::sleep(StdDuration::from_millis(150)).await;
+        handle.abort();
+
+        assert_eq!(state.queue.len(), 1, "guid 1 must remain untouched when cancel returns non-present guid");
+    }
+
+    // TC3: queue is empty; `lfg.cancel` returns [77] — no panic, queue stays empty.
+    #[tokio::test]
+    async fn cancel_after_form_is_noop() {
+        let (base, _calls) = spawn_cancel_drain_mock(vec![77u64]).await;
+        let state = Arc::new(AppState {
+            queue: crate::queue::Queue::new(),
+            pending_placements: crate::api::PendingPlacements::new(),
+        });
+        // Queue intentionally empty (simulates post-form state).
+
+        let h = crate::harness::Harness::new(base.clone(), "tok".into());
+        let conf = cfg(base);
+        let handle = {
+            let state = state.clone();
+            tokio::spawn(async move { run(state, h, conf).await })
+        };
+        tokio::time::sleep(StdDuration::from_millis(150)).await;
+        handle.abort();
+
+        assert_eq!(state.queue.len(), 0, "empty queue must stay empty; no panic on absent-guid cancel");
+    }
+
+    // TC4: cancel beats match — guid 99 (real player) would normally trigger
+    // lfg.form_group (4 bots available, ungrouped, not in combat), but
+    // `lfg.cancel` drains [99] FIRST, so the queue is empty before the match
+    // step and no lfg.form_group call must be made.
+    #[tokio::test]
+    async fn cancel_before_match_prevents_form_group() {
+        let (base, calls) = spawn_cancel_drain_mock(vec![99u64]).await;
+        let state = Arc::new(AppState {
+            queue: crate::queue::Queue::new(),
+            pending_placements: crate::api::PendingPlacements::new(),
+        });
+        // Pre-upsert guid 99 as a real player — it would match with the 4 bots
+        // returned by the mock's obs.list_bot_population handler.
+        state.queue.upsert(QueueEntry {
+            guid: 99,
+            role: Role::Tank,
+            dungeon_id: 4,
+            faction: Faction::Alliance,
+            is_real_player: true,
+        });
+
+        let h = crate::harness::Harness::new(base.clone(), "tok".into());
+        let conf = cfg(base);
+        let handle = {
+            let state = state.clone();
+            tokio::spawn(async move { run(state, h, conf).await })
+        };
+        tokio::time::sleep(StdDuration::from_millis(150)).await;
+        handle.abort();
+
+        let seq = calls.lock().unwrap().clone();
+        assert!(
+            !seq.iter().any(|c| c.starts_with("lfg.form_group")),
+            "lfg.form_group must NOT be called when guid was cancelled first: {seq:?}"
+        );
+        assert_eq!(state.queue.len(), 0, "cancelled guid must be absent from queue");
     }
 
     // T12: a persistently failing placement is dropped after MAX_PLACEMENT_ATTEMPTS.
