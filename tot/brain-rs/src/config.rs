@@ -105,6 +105,20 @@ fn env_bool(key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+/// Strict-true parser: only case-insensitive `"true"` → true; everything else → false.
+///
+/// Mirrors Python `os.getenv(...).lower() == "true"` — used for
+/// `TOT_SUBSET_GATE_ENABLED` where `"1"` and `"yes"` must yield `false`.
+fn parse_bool_strict_true(val: &str) -> bool {
+    val.trim().eq_ignore_ascii_case("true")
+}
+
+fn env_bool_strict_true(key: &str, default: bool) -> bool {
+    std::env::var(key)
+        .map(|v| parse_bool_strict_true(&v))
+        .unwrap_or(default)
+}
+
 // ---------------------------------------------------------------------------
 // impl Settings
 // ---------------------------------------------------------------------------
@@ -135,7 +149,7 @@ impl Settings {
             brain_sse_coalesce_ms:          env_usize("BRAIN_SSE_COALESCE_MS", 200) as u64,
             brain_sse_dedup_capacity:       env_usize("BRAIN_SSE_DEDUP_CAPACITY", 100),
             max_player_level:               env_u32("BRAIN_MAX_PLAYER_LEVEL", 25),
-            subset_gate_enabled:            env_bool("TOT_SUBSET_GATE_ENABLED", true),
+            subset_gate_enabled:            env_bool_strict_true("TOT_SUBSET_GATE_ENABLED", true),
             living_bot_count,
             subset_recompute_interval_s:    env_f64("TOT_SUBSET_RECOMPUTE_INTERVAL_S", 60.0),
             subset_hysteresis_out_ticks:    env_u32("TOT_SUBSET_HYSTERESIS_OUT_TICKS", 2),
@@ -246,5 +260,47 @@ mod tests {
             assert!(!s.brain_sse_enabled, "expected false for {v}");
             std::env::remove_var("BRAIN_SSE_ENABLED");
         }
+    }
+
+    /// Parity test: TOT_SUBSET_GATE_ENABLED uses strict `.lower() == "true"` like Python.
+    ///
+    /// Python: `os.getenv("TOT_SUBSET_GATE_ENABLED", "true").lower() == "true"`
+    /// → only "true" (case-insensitive) is truthy; "1" and "yes" must yield false.
+    #[test]
+    fn test_subset_gate_enabled_strict_true_parity() {
+        // Default (no env var) → true
+        std::env::remove_var("TOT_SUBSET_GATE_ENABLED");
+        let s = Settings::from_env_with_defaults();
+        assert!(s.subset_gate_enabled, "default should be true");
+
+        // "true" → true
+        std::env::set_var("TOT_SUBSET_GATE_ENABLED", "true");
+        let s = Settings::from_env_with_defaults();
+        std::env::remove_var("TOT_SUBSET_GATE_ENABLED");
+        assert!(s.subset_gate_enabled, r#""true" should be true"#);
+
+        // "TRUE" → true (case-insensitive)
+        std::env::set_var("TOT_SUBSET_GATE_ENABLED", "TRUE");
+        let s = Settings::from_env_with_defaults();
+        std::env::remove_var("TOT_SUBSET_GATE_ENABLED");
+        assert!(s.subset_gate_enabled, r#""TRUE" should be true"#);
+
+        // "1" → false (diverges from parse_bool; matches Python strict)
+        std::env::set_var("TOT_SUBSET_GATE_ENABLED", "1");
+        let s = Settings::from_env_with_defaults();
+        std::env::remove_var("TOT_SUBSET_GATE_ENABLED");
+        assert!(!s.subset_gate_enabled, r#""1" must be false (Python parity)"#);
+
+        // "yes" → false
+        std::env::set_var("TOT_SUBSET_GATE_ENABLED", "yes");
+        let s = Settings::from_env_with_defaults();
+        std::env::remove_var("TOT_SUBSET_GATE_ENABLED");
+        assert!(!s.subset_gate_enabled, r#""yes" must be false (Python parity)"#);
+
+        // "false" → false
+        std::env::set_var("TOT_SUBSET_GATE_ENABLED", "false");
+        let s = Settings::from_env_with_defaults();
+        std::env::remove_var("TOT_SUBSET_GATE_ENABLED");
+        assert!(!s.subset_gate_enabled, r#""false" should be false"#);
     }
 }
