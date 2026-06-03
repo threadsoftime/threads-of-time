@@ -622,6 +622,20 @@ pub struct ObsLfgPendingWrapper {
     pub args: ObsLfgPendingArgs,
 }
 
+// ── lfg.cancel ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct LfgCancelArgs {
+    /// Max cancel intents to drain in this call.
+    #[serde(default = "default_max")]
+    pub max: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct LfgCancelWrapper {
+    pub args: LfgCancelArgs,
+}
+
 // ── event.start ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -872,7 +886,7 @@ mod tests {
     }
 
     #[test]
-    fn all_46_wrappers_have_args_envelope() {
+    fn all_47_wrappers_have_args_envelope() {
         // gm (7)
         assert!(has_args_envelope(&schema_for!(GmAdditemWrapper)),     "gm.additem");
         assert!(has_args_envelope(&schema_for!(GmEquipAllWrapper)),    "gm.equip_all");
@@ -923,8 +937,9 @@ mod tests {
         assert!(has_args_envelope(&schema_for!(MemoryListWrapper)),   "memory.list");
         assert!(has_args_envelope(&schema_for!(MemoryUpdateWrapper)), "memory.update");
         assert!(has_args_envelope(&schema_for!(MemoryDeleteWrapper)), "memory.delete");
-        // lfg (1)
+        // lfg (2)
         assert!(has_args_envelope(&schema_for!(LfgFormGroupWrapper)), "lfg.form_group");
+        assert!(has_args_envelope(&schema_for!(LfgCancelWrapper)),    "lfg.cancel");  // NEW
     }
 
     // ── MCP default-fill parity tests ─────────────────────────────────────────
