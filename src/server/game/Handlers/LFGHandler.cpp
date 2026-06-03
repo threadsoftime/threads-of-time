@@ -95,6 +95,15 @@ void WorldSession::HandleLfgLeaveOpcode(WorldPackets::LFG::LFGLeave& /*packet*/)
             // the Rust slice to drain next tick (re-resolve Player* on the drain,
             // never here), send REMOVED_FROM_QUEUE so the client eye stops, and
             // clear local LFG state.
+            //
+            // Inc-4 deferral note: only the leader's cancel is recorded here, and
+            // only this session receives REMOVED_FROM_QUEUE. For a premade of
+            // multiple REAL players queued as a group the legacy LFGMgr path
+            // would broadcast REMOVED_FROM_QUEUE to all members; that broadcast is
+            // intentionally not replicated here because the Inc-2 slice fills SOLO
+            // real players with bots — a multi-real-player premade is out of scope
+            // until Inc-4. (The legacy per-member broadcast is available via the
+            // LeaveLfg / LeaveAllLfgQueues path below if ever needed.)
             HarnessBridge::RecordLfgCancel(guid.GetCounter());
 
             lfg::LfgUpdateData removed(lfg::LFG_UPDATETYPE_REMOVED_FROM_QUEUE);

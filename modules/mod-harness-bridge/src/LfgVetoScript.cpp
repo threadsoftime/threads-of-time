@@ -87,6 +87,13 @@ namespace
                 sess->SendLfgUpdatePlayer(joinQueue);
             }
 
+            // Mirror the server-side state native LFGMgr::JoinLfg would have set,
+            // so the player appears queued to GetState consumers AND the Inc-2 leave
+            // seam (HandleLfgLeaveOpcode) fires on CMSG_LFG_LEAVE. We do NOT add the
+            // player to any LFGQueue bucket — matchmaking is owned by the Rust slice —
+            // so native matching stays bypassed; only the state flag is set.
+            sLFGMgr->SetState(player->GetGUID(), lfg::LFG_STATE_QUEUED);
+
             // Return false: suppress native LFGMgr::JoinLfg matching.
             // The Rust matchmaker will handle the actual group formation.
             return false;
