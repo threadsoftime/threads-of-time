@@ -1,0 +1,140 @@
+# ── brain-rs Containerfile ────────────────────────────────────────────────────
+#
+# Multi-stage build → minimal-footprint fully-static binary on scratch.
+#
+# Build target: x86_64-unknown-linux-musl (static musl libc — no dynamic libc).
+# Runtime base: scratch (zero OS layer — just the binary).
+#
+# rusqlite (bundled) rationale: SQLite is statically compiled into the binary
+# via the bundled feature of rusqlite (libsqlite3-sys with `links = "sqlite3"`).
+# No system sqlite3.h or libsqlite3-dev is required; the scratch runtime base
+# is truly empty (bundled SQLite is inside the binary).
+#
+# TLS: reqwest uses rustls-tls (no OpenSSL). brain-rs connects to:
+#   - harness MCP at http://127.0.0.1:8099 (plain HTTP, no TLS at runtime)
+#   - memory MCP at http://127.0.0.1:8090  (plain HTTP, no TLS at runtime)
+#   - LLM at http://127.0.0.1:8080         (plain HTTP, no TLS at runtime)
+# rustls-tls is compiled in but never used at runtime in the standard LAN
+# deployment, so no CA bundle is needed on the scratch base.
+#
+# No vendored C amalgamation: unlike memory-rs (which builds the sqlite-vec
+# vendor/ amalgamation via build.rs + cc), brain-rs has no extra C sources.
+# musl-tools + clang are still included for rusqlite's bundled SQLite compile.
+#
+# build.rs embeds SQL migrations and the prompt template via include_str!.
+# The migration files live at tot/brain/migrations/ and the prompt at
+# tot/brain/prompts/ — both are COPY'd into the build context in Stage 2.
+#
+# Build on Heimdal (from tot/ workspace root):
+#   podman build -f brain-rs/Containerfile -t localhost/brain-sidecar:rust-<date> tot/
+#
+# ── Stage 1: dependency cache ─────────────────────────────────────────────────
+
+FROM rust:1-slim AS builder
+
+# Install musl target and linker, plus clang (cc crate / rusqlite bundled
+# compiles the SQLite amalgamation during dep-compile stage).
+RUN rustup target add x86_64-unknown-linux-musl \
+    && apt-get update -qq \
+    && apt-get install -y --no-install-recommends musl-tools clang \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CARGO_BUILD_TARGET=x86_64-unknown-linux-musl \
+    # Heimdal -j4 discipline: cap cargo's parallelism to 4 jobs so the build
+    # never saturates the always-on baseline (worldserver + 100 bots + llama).
+    CARGO_BUILD_JOBS=4
+
+WORKDIR /build
+
+# Copy workspace manifests first — dep-compile layer is reused when only
+# source files change. All six workspace members' manifests are needed for
+# dependency resolution (audited against tot/Cargo.toml [workspace.members]:
+# brain-rs, game-event-scheduler, harness-rs, lfg-matchmaker, memory-rs, slice-host).
+COPY Cargo.toml Cargo.lock ./
+COPY brain-rs/Cargo.toml             ./brain-rs/
+COPY game-event-scheduler/Cargo.toml ./game-event-scheduler/
+COPY harness-rs/Cargo.toml           ./harness-rs/
+COPY lfg-matchmaker/Cargo.toml       ./lfg-matchmaker/
+COPY memory-rs/Cargo.toml            ./memory-rs/
+COPY slice-host/Cargo.toml           ./slice-host/
+
+# Stub sources for ALL workspace members so `cargo build -p brain-rs`
+# can resolve and compile all dependency crates without real sources.
+# brain-rs declares a lib + bin + build.rs — all are stubbed.
+# memory-rs declares a lib + two bins (memory-rs, embed-stub) + a build.rs.
+# harness-rs declares only a bin (src/main.rs, no lib).
+# game-event-scheduler and lfg-matchmaker each declare a lib + bin.
+# slice-host declares only a bin.
+# The stubs are replaced by real brain-rs sources in the COPY steps below.
+RUN mkdir -p brain-rs/src \
+             game-event-scheduler/src \
+             harness-rs/src \
+             lfg-matchmaker/src \
+             memory-rs/src memory-rs/src/bin \
+             slice-host/src \
+    && echo 'pub fn _stub() {}' > brain-rs/src/lib.rs \
+    && echo 'fn main() {}'      > brain-rs/src/main.rs \
+    && echo 'fn main() {}'      > brain-rs/build.rs \
+    && echo 'pub fn _stub() {}' > game-event-scheduler/src/lib.rs \
+    && echo 'fn main() {}'      > game-event-scheduler/src/main.rs \
+    && echo 'fn main() {}'      > harness-rs/src/main.rs \
+    && echo 'pub fn _stub() {}' > lfg-matchmaker/src/lib.rs \
+    && echo 'fn main() {}'      > lfg-matchmaker/src/main.rs \
+    && echo 'pub fn _stub() {}' > memory-rs/src/lib.rs \
+    && echo 'fn main() {}'      > memory-rs/src/main.rs \
+    && echo 'fn main() {}'      > memory-rs/src/bin/embed_stub.rs \
+    && echo 'fn main() {}'      > memory-rs/build.rs \
+    && echo 'fn main() {}'      > slice-host/src/main.rs \
+    && cargo build --release -p brain-rs --bin brain-rs \
+    && rm -rf brain-rs/src brain-rs/build.rs
+
+# ── Stage 2: real source build ────────────────────────────────────────────────
+
+# Copy the build script and real Rust sources.
+# Also copy the brain/ migrations and prompt template referenced by include_str!
+# in src/state.rs ("../../brain/migrations/...") and src/app.rs
+# ("../../brain/prompts/decide_v1.txt"). These paths resolve relative to the
+# source file, which means relative to tot/ in the build context.
+COPY brain-rs/build.rs               ./brain-rs/build.rs
+COPY brain-rs/src/                   ./brain-rs/src/
+COPY brain/migrations/               ./brain/migrations/
+COPY brain/prompts/                  ./brain/prompts/
+
+# CRITICAL (T32 anti-stub fix — kb_87a7eade item 45):
+# Touch all .rs files AFTER COPY so Cargo's fingerprint detects them as
+# newer than the cached stub dep artifacts, forcing a full recompile.
+# Without this touch, `cargo build` emits `Finished` in 0.08s and ships
+# the stub `fn main() {}` binary — it links cleanly and passes ELF checks
+# but exits immediately and contains no startup log strings.
+RUN find /build/brain-rs/src -name "*.rs" -exec touch {} \+
+
+RUN cargo build --release -p brain-rs --bin brain-rs
+
+# Verify the binary is real: grep for the UNIQUE startup log string
+# "brain-rs listening on" (emitted by main.rs at startup).
+# A stub `fn main() {}` binary will not contain this string; the weak
+# "brain-rs" literal alone is insufficient (it appears in path strings even in
+# stub builds). If this grep fails, the anti-stub touch above did not work —
+# abort the build.
+RUN strings /build/target/x86_64-unknown-linux-musl/release/brain-rs \
+    | grep -q "brain-rs listening on" \
+    && echo "BINARY_REAL_OK" \
+    || (echo "ERROR: binary appears to be stub — touch did not force recompile" >&2 && exit 1)
+
+# ── Stage 3: runtime ──────────────────────────────────────────────────────────
+
+FROM scratch
+
+# Copy the fully-static binary.
+# rusqlite (bundled SQLite) and rustls are statically linked — no .so needed.
+COPY --from=builder \
+    /build/target/x86_64-unknown-linux-musl/release/brain-rs \
+    /brain-rs
+
+# Default env — all overridable via EnvironmentFile in the Quadlet.
+ENV BRAIN_BIND_HOST=0.0.0.0 \
+    BRAIN_BIND_PORT=8091
+
+EXPOSE 8091
+
+ENTRYPOINT ["/brain-rs"]
