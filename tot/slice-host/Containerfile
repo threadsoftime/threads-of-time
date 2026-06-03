@@ -71,8 +71,7 @@ RUN mkdir -p brain-rs/src game-event-scheduler/src harness-rs/src lfg-matchmaker
     && echo 'fn main() {}' > memory-rs/build.rs \
     && echo 'fn main() {}' > slice-host/src/main.rs \
     && cargo build --release -p slice-host \
-    && rm -rf brain-rs/src game-event-scheduler/src harness-rs/src lfg-matchmaker/src \
-              memory-rs/src slice-host/src
+    && rm -rf game-event-scheduler/src lfg-matchmaker/src slice-host/src
 
 # Now copy the real sources and rebuild.  Touch all .rs files AFTER copying
 # to ensure Cargo fingerprint detects them as newer than the cached stub
