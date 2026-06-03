@@ -14,5 +14,6 @@ pub mod schema_builder;
 pub mod sse_consumer;
 pub mod sse_parser;
 pub mod state;
+pub mod subset_gate;
 pub mod tool_policy;
 pub mod triage;
