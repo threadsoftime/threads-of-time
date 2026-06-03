@@ -1,0 +1,1 @@
+# populate this by running: python -m brain_sidecar.shadow_record --output tests/fixtures/shadow_replay.jsonl
