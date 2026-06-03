@@ -252,19 +252,6 @@ void MapMgr::Update(uint32 diff)
     for (uint8 i = 0; i < 4; ++i)
         i_timer[i].Update(diff);
 
-    // pussywizard: lfg compatibles update, schedule before maps so it is processed from the very beginning
-    //if (mapUpdateStep == 0)
-    {
-        if (m_updater.activated())
-        {
-            m_updater.schedule_lfg_update(diff);
-        }
-        else
-        {
-            sLFGMgr->Update(diff, 1);
-        }
-    }
-
     MapMapType::iterator iter = i_maps.begin();
     for (; iter != i_maps.end(); ++iter)
     {

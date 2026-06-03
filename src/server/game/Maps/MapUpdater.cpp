@@ -17,7 +17,6 @@
 
 #include "MapUpdater.h"
 #include "DatabaseEnv.h"
-#include "LFGMgr.h"
 #include "Log.h"
 #include "Map.h"
 #include "MapMgr.h"
@@ -73,21 +72,6 @@ public:
 private:
     uint32 _mapId;
     MapUpdater& _updater;
-};
-
-class LFGUpdateRequest : public UpdateRequest
-{
-public:
-    LFGUpdateRequest(MapUpdater& u, uint32 d) : m_updater(u), m_diff(d) {}
-
-    void call() override
-    {
-        sLFGMgr->Update(m_diff, 1);
-        m_updater.update_finished();
-    }
-private:
-    MapUpdater& m_updater;
-    uint32 m_diff;
 };
 
 MapUpdater::MapUpdater() : pending_requests(0), _cancelationToken(false)
@@ -146,11 +130,6 @@ void MapUpdater::schedule_update(Map& map, uint32 diff, uint32 s_diff)
 void MapUpdater::schedule_map_preload(uint32 mapid)
 {
     schedule_task(new MapPreloadRequest(mapid, *this));
-}
-
-void MapUpdater::schedule_lfg_update(uint32 diff)
-{
-    schedule_task(new LFGUpdateRequest(*this, diff));
 }
 
 bool MapUpdater::activated()

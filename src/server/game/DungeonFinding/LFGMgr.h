@@ -25,7 +25,6 @@
 #include "LFG.h"
 #include "LFGGroupData.h"
 #include "LFGPlayerData.h"
-#include "LFGQueue.h"
 #include "Map.h"
 
 class Group;
@@ -262,7 +261,6 @@ namespace lfg
     struct LfgProposalPlayer;
     struct LfgPlayerBoot;
 
-    typedef std::map<uint8, LFGQueue> LfgQueueContainer;
     typedef std::multimap<uint32, LfgReward const*> LfgRewardContainer;
     typedef std::pair<LfgRewardContainer::const_iterator, LfgRewardContainer::const_iterator> LfgRewardContainerBounds;
     typedef std::map<uint8, LfgDungeonSet> LfgCachedDungeonContainer;
@@ -440,9 +438,6 @@ namespace lfg
     public:
         static LFGMgr* instance();
 
-        // Functions used outside lfg namespace
-        void Update(uint32 diff, uint8 task);
-
         // World.cpp
         /// Finish the dungeon for the given group. All check are performed using internal lfg data
         void FinishDungeon(ObjectGuid gguid, uint32 dungeonId, const Map* currMap);
@@ -539,8 +534,6 @@ namespace lfg
         void UpdateBoot(ObjectGuid guid, bool accept);
         /// Updates proposal to join dungeon with player answer
         void UpdateProposal(uint32 proposalId, ObjectGuid guid, bool accept);
-        /// Updates the role check with player answer
-        void UpdateRoleCheck(ObjectGuid gguid, ObjectGuid guid = ObjectGuid::Empty, uint8 roles = PLAYER_ROLE_NONE);
         /// Sets player lfg roles
         void SetRoles(ObjectGuid guid, uint8 roles);
         /// Sets player lfr comment
@@ -574,10 +567,6 @@ namespace lfg
         uint8 GetPlayerCount(ObjectGuid guid);
         /// Add a new Proposal
         uint32 AddProposal(LfgProposal& proposal);
-        /// Checks if all players are queued
-        bool AllQueued(Lfg5Guids const& check);
-        /// Checks if given roles match, modifies given roles map with new roles
-        static uint8 CheckGroupRoles(LfgRolesMap& groles);
         /// Checks if given players are ignoring each other
         static bool HasIgnore(ObjectGuid guid1, ObjectGuid guid2);
         /// Sends queue status to player
@@ -606,7 +595,6 @@ namespace lfg
         void SetLockedDungeons(ObjectGuid guid, LfgLockMap const& lock);
         void DecreaseKicksLeft(ObjectGuid guid);
         void SetCanOverrideRBState(ObjectGuid guid, bool val);
-        void GetCompatibleDungeons(LfgDungeonSet& dungeons, LfgGuidSet const& players, LfgLockPartyMap& lockMap, uint32 randomDungeonId = 0);
         void _SaveToDB(ObjectGuid guid);
 
         // Proposals
@@ -614,7 +602,6 @@ namespace lfg
         void MakeNewGroup(LfgProposal const& proposal);
 
         // Generic
-        LFGQueue& GetQueue(ObjectGuid guid);
         LfgDungeonSet const& GetDungeonsByRandom(uint32 randomdungeon);
         LfgType GetDungeonType(uint32 dungeon);
 
@@ -631,11 +618,9 @@ namespace lfg
         // General variables
         uint32 m_lfgProposalId;                            ///< used as internal counter for proposals
         uint32 m_options;                                  ///< Stores config options
-        uint32 lastProposalId;                             ///< pussywizard, store it here because of splitting LFGMgr update into tasks
         uint32 m_raidBrowserUpdateTimer[2];                ///< pussywizard
         uint32 m_raidBrowserLastUpdatedDungeonId[2];       ///< pussywizard: for 2 factions
 
-        LfgQueueContainer QueuesStore;                     ///< Queues
         LfgCachedDungeonContainer CachedDungeonMapStore;   ///< Stores all dungeons by groupType
         // Reward System
         LfgRewardContainer RewardMapStore;                 ///< Stores rewards for random dungeons

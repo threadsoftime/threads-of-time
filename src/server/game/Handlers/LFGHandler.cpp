@@ -149,7 +149,8 @@ void WorldSession::HandleLfgSetRolesOpcode(WorldPacket& recvData)
     }
     ObjectGuid gguid = group->GetGUID();
     LOG_DEBUG("network", "CMSG_LFG_SET_ROLES: Group [{}], Player [{}], Roles: {}", gguid.ToString(), guid.ToString(), roles);
-    sLFGMgr->UpdateRoleCheck(gguid, guid, roles);
+    // Inc-3 C1: UpdateRoleCheck deleted; role-check state transitions owned by Rust slice.
+    // Handler reads + discards the packet (LOG above). Deleted with handler body in C2.
 }
 
 void WorldSession::HandleLfgSetCommentOpcode(WorldPacket&  recvData)
