@@ -4,6 +4,7 @@ pub mod decide;
 pub mod dedup;
 pub mod dispatch;
 pub mod llm_client;
+pub mod loop_supervisor;
 pub mod mcp_client;
 pub mod memory_client;
 pub mod models;
