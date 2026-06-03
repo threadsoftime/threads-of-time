@@ -617,7 +617,7 @@ mod tests {
     // FAIL TO BOOT.
     //
     // This test asserts the representative case (obs.ping).  The full suite
-    // covering all 46 wrappers lives in mcp::schemas::tests::all_46_wrappers_have_args_envelope.
+    // covering all 47 wrappers lives in mcp::schemas::tests::all_47_wrappers_have_args_envelope.
     // The live tools/list assertion lives in parity/run_parity.py (Fix C).
     #[test]
     fn obs_ping_wrapper_schema_has_args_key() {
