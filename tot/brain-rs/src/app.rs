@@ -518,7 +518,7 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
     let dispatcher = Arc::new(Dispatcher::new(
         harness_mcp.clone(),
         memory_mcp.clone(),
-        "say", // confirmation_channel — matches Python default
+        "whisper", // confirmation_channel — Python app.py uses the dispatch.py default "whisper"
         None,  // tool_policy
     ));
 
