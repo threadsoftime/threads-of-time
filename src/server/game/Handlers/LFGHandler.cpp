@@ -19,6 +19,7 @@
 #include "GameTime.h"
 #include "Group.h"
 #include "LFGMgr.h"
+#include "LfgIntentStore.h"
 #include "LFGPackets.h"
 #include "ObjectMgr.h"
 #include "Opcodes.h"
@@ -83,12 +84,35 @@ void WorldSession::HandleLfgLeaveOpcode(WorldPackets::LFG::LFGLeave& /*packet*/)
 
     LOG_DEBUG("network", "CMSG_LFG_LEAVE [{}] in group: {}", guid.ToString(), group ? 1 : 0);
 
-    // Check cheating - only leader can leave the queue
+    // Cheating guard: only the leader (or ungrouped player) may leave the queue.
     if (!group || group->GetLeaderGUID() == guid)
     {
-        sLFGMgr->LeaveLfg(sLFGMgr->GetState(guid) == lfg::LFG_STATE_RAIDBROWSER ? guid : gguid);
-        sLFGMgr->LeaveAllLfgQueues(guid, true, group ? group->GetGUID() : ObjectGuid::Empty);
+        lfg::LfgState const state = sLFGMgr->GetState(guid);
+
+        if (state == lfg::LFG_STATE_QUEUED)
+        {
+            // Strangler-fig leave seam (Inc-2): enqueue a POD cancel intent for
+            // the Rust slice to drain next tick (re-resolve Player* on the drain,
+            // never here), send REMOVED_FROM_QUEUE so the client eye stops, and
+            // clear local LFG state.
+            HarnessBridge::RecordLfgCancel(guid.GetCounter());
+
+            lfg::LfgUpdateData removed(lfg::LFG_UPDATETYPE_REMOVED_FROM_QUEUE);
+            SendLfgUpdatePlayer(removed);
+            if (group)
+                SendLfgUpdateParty(removed);
+
+            sLFGMgr->SetState(guid, lfg::LFG_STATE_NONE);
+        }
+        else
+        {
+            // DUNGEON / FINISHED_DUNGEON / BOOT / RAIDBROWSER / NONE: preserve
+            // legacy behavior (R6 — in-dungeon leave is a state-clear no-op).
+            sLFGMgr->LeaveLfg(state == lfg::LFG_STATE_RAIDBROWSER ? guid : gguid);
+            sLFGMgr->LeaveAllLfgQueues(guid, true, group ? group->GetGUID() : ObjectGuid::Empty);
+        }
     }
+
     GetPlayer()->UpdateLFGChannel();
 }
 
