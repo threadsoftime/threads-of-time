@@ -183,6 +183,25 @@ impl Harness {
         Ok(intents)
     }
 
+    /// Poll `lfg.cancel` for up to `max` pending cancellation intents.
+    /// Returns the low-32 guids of players who pressed Leave since the last
+    /// drain. Drain semantics: guids do NOT re-appear (same as obs.lfg_pending).
+    pub async fn lfg_cancel(&self, max: u32) -> Result<Vec<u64>, HarnessError> {
+        let result = self.call("lfg.cancel", json!({ "max": max })).await?;
+        let arr = result
+            .get("cancelled")
+            .and_then(Value::as_array)
+            .ok_or_else(|| HarnessError::Shape("lfg.cancel: missing cancelled array".into()))?;
+        let mut guids = Vec::with_capacity(arr.len());
+        for item in arr {
+            guids.push(
+                item.as_u64()
+                    .ok_or_else(|| HarnessError::Shape("lfg.cancel item is not a u64".into()))?,
+            );
+        }
+        Ok(guids)
+    }
+
     /// List the current bot population from `obs.list_bot_population`.
     /// Returns the raw result array (each element: `{bot_guid, level, map_id, name, …}`).
     pub async fn list_bot_population(&self) -> Result<Value, HarnessError> {
@@ -394,5 +413,82 @@ mod tests {
         let h = Harness::new(base, "tok".into());
         let res = h.list_bot_population().await.unwrap();
         assert_eq!(res["tool"], "obs.list_bot_population");
+    }
+
+    // T9: lfg_cancel decodes the cancelled guid array correctly.
+    #[tokio::test]
+    async fn lfg_cancel_decodes_guids() {
+        async fn spawn_lfg_cancel_mock() -> String {
+            let app = Router::new().route(
+                "/v1/tools/:name",
+                post(|Path(_): Path<String>, Json(_): Json<serde_json::Value>| async {
+                    Json(serde_json::json!({
+                        "ok": true,
+                        "result": { "cancelled": [101u64, 202u64] }
+                    }))
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+            format!("http://{addr}")
+        }
+
+        let base = spawn_lfg_cancel_mock().await;
+        let h = Harness::new(base, "tok".into());
+        assert_eq!(h.lfg_cancel(10).await.unwrap(), vec![101u64, 202u64]);
+    }
+
+    // T10: lfg_cancel returns an empty Vec when no players have cancelled.
+    #[tokio::test]
+    async fn lfg_cancel_returns_empty_on_no_cancellations() {
+        async fn spawn_lfg_cancel_empty_mock() -> String {
+            let app = Router::new().route(
+                "/v1/tools/:name",
+                post(|Path(_): Path<String>, Json(_): Json<serde_json::Value>| async {
+                    Json(serde_json::json!({
+                        "ok": true,
+                        "result": { "cancelled": [] }
+                    }))
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+            format!("http://{addr}")
+        }
+
+        let base = spawn_lfg_cancel_empty_mock().await;
+        let h = Harness::new(base, "tok".into());
+        let result = h.lfg_cancel(10).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    // T11: lfg_cancel returns Shape error when the cancelled key is absent.
+    #[tokio::test]
+    async fn lfg_cancel_shape_error_on_missing_key() {
+        async fn spawn_lfg_cancel_bad_mock() -> String {
+            let app = Router::new().route(
+                "/v1/tools/:name",
+                post(|Path(_): Path<String>, Json(_): Json<serde_json::Value>| async {
+                    Json(serde_json::json!({
+                        "ok": true,
+                        "result": { "not_cancelled": [] }
+                    }))
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+            format!("http://{addr}")
+        }
+
+        let base = spawn_lfg_cancel_bad_mock().await;
+        let h = Harness::new(base, "tok".into());
+        let err = h.lfg_cancel(5).await.unwrap_err();
+        match err {
+            HarnessError::Shape(msg) => assert!(msg.contains("cancelled"), "msg: {msg}"),
+            other => panic!("expected Shape error, got {other:?}"),
+        }
     }
 }
