@@ -1,21 +1,23 @@
 // LfgIntentStore — main-thread-only intent queue for the strangler-fig LFG slice
 //
 // THREAD SAFETY INVARIANT:
-//   This store is accessed ONLY on the world/main thread.  There are exactly
-//   two writers and one reader, all on the same thread:
+//   This store is accessed ONLY on the world/main thread.  Every writer and
+//   reader of both the join and cancel queues runs on that same thread:
 //     - Writer A: LfgVetoScript::OnPlayerCanJoinLfg (fires on CMSG_LFG_JOIN,
 //       handled PROCESS_THREADUNSAFE — i.e. on the world update thread).
 //     - Writer B: mod-agenticbots Stage-4 bot-queue (not yet wired; will call
 //       RecordLfgIntent directly after obtaining its Player* on the tick).
-//     - Reader:   ObsLfgPendingAdapter via DrainLfgIntents (runs in OnTickDrain,
-//       also on the world update thread).
+//     - Writer C: HandleLfgLeaveOpcode via RecordLfgCancel (fires on
+//       CMSG_LFG_LEAVE, PROCESS_THREADUNSAFE — Inc-2 leave seam).
+//     - Reader:   ObsLfgPendingAdapter via DrainLfgIntents and LfgCancelAdapter
+//       via DrainLfgCancels (both run in OnTickDrain, on the world update thread).
 //   No mutex is used.  Adding one would be a bug — it would create false safety
 //   that invites cross-thread use.  Mirror the same note in HarnessBridgeDispatch.h.
 //
 // PUBLIC SEAM:
-//   RecordLfgIntent and DrainLfgIntents are the only two entry points.
-//   Other modules (mod-agenticbots Stage 4) may #include this header and call
-//   RecordLfgIntent without pulling in the full HarnessBridge stack.
+//   RecordLfgIntent/DrainLfgIntents (join) and RecordLfgCancel/DrainLfgCancels
+//   (cancel) are the entry points.  Other modules may #include this header and
+//   call the Record* functions without pulling in the full HarnessBridge stack.
 
 #pragma once
 
