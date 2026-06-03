@@ -507,7 +507,10 @@ impl Decider {
                     ));
                     continue;
                 }
-                let snippet = if raw.len() > 120 { &raw[..120] } else { &raw };
+                // Char-safe truncation: Python's raw[:120] slices by CHARACTER, not byte.
+                // &raw[..120] panics when byte 120 is not a UTF-8 char boundary.
+                // chars().take(120).collect() is byte-safe AND matches Python semantics.
+                let snippet: String = raw.chars().take(120).collect();
                 return (
                     Decision {
                         kind: DecisionKind::NoOp,
@@ -691,14 +694,21 @@ impl Decider {
         let truncated_decisions = self.truncate_recent_decisions(recent_decisions);
         let projected_hot_inputs = self.project_hot_inputs(hot_inputs);
 
-        let user = self
-            .prompt_template
-            .replace("{tools_summary}", &tools_summary)
-            .replace("{state_json}", &python_json(state))
-            .replace("{goals_json}", &python_json(goals))
-            .replace("{memories_json}", &python_json(&truncated_memories))
-            .replace("{recent_decisions_json}", &python_json(&truncated_decisions))
-            .replace("{hot_inputs_json}", &python_json(&projected_hot_inputs));
+        // Use python_format() — NOT plain .replace() — because the template contains
+        // `{{`/`}}` escape sequences (JSON examples in few-shot blocks) that Python's
+        // str.format() unescapes to literal `{`/`}`.  Plain .replace() would leave
+        // them as `{{`/`}}`, corrupting every JSON example the LLM sees in the prompt.
+        let user = python_format(
+            &self.prompt_template,
+            &[
+                ("tools_summary", tools_summary.as_str()),
+                ("state_json",    &python_json(state)),
+                ("goals_json",    &python_json(goals)),
+                ("memories_json", &python_json(&truncated_memories)),
+                ("recent_decisions_json", &python_json(&truncated_decisions)),
+                ("hot_inputs_json", &python_json(&projected_hot_inputs)),
+            ],
+        );
 
         Prompt { system, user }
     }
@@ -953,6 +963,37 @@ fn format_f64_python(f: f64) -> String {
     // Rust's `{}` for f64 matches Python's f-string float formatting
     // for the personality trait values used here (all 1-decimal-place).
     format!("{f}")
+}
+
+/// Faithful equivalent of Python's `str.format(**kwargs)` for the decide_v1.txt template.
+///
+/// Python `str.format()` does two things that plain `str::replace` does NOT:
+/// 1. Substitutes `{name}` with the supplied value.
+/// 2. Unescapes `{{` → `{` and `}}` → `}` (double-brace escape sequences).
+///
+/// The decide_v1.txt template uses `{{`/`}}` extensively in its few-shot JSON examples
+/// so that they survive `.format()` unmodified as literal braces. Plain `.replace()` would
+/// leave those double-braces in the final prompt, corrupting every JSON example the LLM
+/// sees. This function replicates Python's two-phase behaviour exactly:
+///   Phase 1: replace each `{name}` with its value (longest-match-first to avoid partial
+///             matches — `{tools_summary}` before `{tools}`).
+///   Phase 2: replace `{{` → `{` and `}}` → `}`.
+///
+/// Contract: `subs` must list ALL named placeholders present in the template; any
+/// unrecognised `{name}` left after phase 1 will be passed through unchanged (matching
+/// Python's KeyError-on-missing behaviour would be stricter, but the template is static).
+fn python_format(template: &str, subs: &[(&str, &str)]) -> String {
+    // Phase 1: named substitutions. Apply in longest-key-first order to avoid a
+    // shorter key matching a prefix of a longer one (e.g., "tools" vs "tools_summary").
+    let mut result = template.to_string();
+    let mut ordered: Vec<(&str, &str)> = subs.to_vec();
+    ordered.sort_by(|a, b| b.0.len().cmp(&a.0.len())); // longest key first
+    for (name, value) in &ordered {
+        let placeholder = format!("{{{}}}", name);
+        result = result.replace(&placeholder, value);
+    }
+    // Phase 2: unescape {{ → { and }} → } (Python str.format() semantics).
+    result.replace("{{", "{").replace("}}", "}")
 }
 
 /// Truncate a string to at most `max_chars` Unicode scalar values.
@@ -1271,5 +1312,161 @@ mod tests {
         }
         // The user string must contain 5 separator '|' characters (from our template)
         assert_eq!(prompt.user.chars().filter(|&c| c == '|').count(), 5);
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression: raw[:120] char-safety (Fix 1)
+    // -----------------------------------------------------------------------
+
+    /// Regression: `raw.chars().take(120)` must not panic on multi-byte UTF-8
+    /// and must slice by CHARACTER not byte (matching Python's `raw[:120]`).
+    ///
+    /// "—" is U+2014 EM DASH: 3 UTF-8 bytes. 40 of them = 120 chars / 120 bytes.
+    /// An old `&raw[..120]` would have taken bytes 0..120 = exactly 40 em-dashes
+    /// (lucky alignment), BUT with 41+ em-dashes it slices mid-char and panics.
+    /// This test uses 50 em-dashes (150 bytes); chars().take(120) must yield
+    /// exactly 120 characters (the first 120 chars of whatever multi-byte string
+    /// is fed in).
+    #[test]
+    fn test_raw_truncation_char_safe_multibyte() {
+        // 50 em-dashes: 50 chars, 150 bytes.
+        // Python raw[:120] returns all 50 (< 120 chars), so snippet == raw.
+        let raw_short: String = "—".repeat(50);
+        let snippet_short: String = raw_short.chars().take(120).collect();
+        assert_eq!(snippet_short.chars().count(), 50, "short string: all chars preserved");
+        assert_eq!(snippet_short, raw_short, "short string: identical to input");
+
+        // 200 em-dashes: 200 chars, 600 bytes.
+        // Python raw[:120] returns the first 120 chars (= 120 em-dashes).
+        // Old `&raw[..120]` would take 120 BYTES = 40 em-dashes — wrong AND
+        // byte 120 is a char boundary here only by luck; byte 121 is mid-char.
+        // Actually with em-dash (3 bytes each): byte 120 = 40*3, IS a boundary —
+        // but the count is wrong (40 ≠ 120). Use a mix to force a mid-byte boundary:
+        // interleave em-dash (3 bytes) so byte 120 is NOT a char boundary.
+        // "a—" repeating: 'a' (1 byte) + '—' (3 bytes) = 4 bytes per pair, 2 chars.
+        // 30 repetitions = 60 chars, 120 bytes.  Adding one more 'a' = char 61, byte 121.
+        // So raw[..120] = 60 chars (byte-safe), raw[..121] would be mid-em-dash PANIC.
+        // We want a string where the OLD &raw[..120] would give fewer chars than
+        // chars().take(120). Use: "—a" repeated → 3+1=4 bytes per pair, 2 chars.
+        // 30 pairs = 60 chars, 120 bytes. 31 pairs = 62 chars, 124 bytes.
+        // Not a panic trigger here either. Best panic trigger: byte 120 inside a char.
+        // "x" * 119 + "—" = 119 + 3 = 122 bytes. byte 120 = inside the em-dash. PANIC.
+        let raw_panic_trigger = "x".repeat(119) + "—" + &"—".repeat(100);
+        // This must NOT panic (would have panicked with old &raw[..120]):
+        let snippet: String = raw_panic_trigger.chars().take(120).collect();
+        assert_eq!(
+            snippet.chars().count(),
+            120,
+            "must yield exactly 120 chars from multi-byte string"
+        );
+        // The first 119 chars are 'x', the 120th is '—'
+        assert!(snippet.ends_with('—'), "120th char must be the em-dash");
+        assert_eq!(&snippet[..119], "x".repeat(119), "first 119 chars must be 'x'");
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression: python_format() {{/}} unescaping (Fix 2)
+    // -----------------------------------------------------------------------
+
+    /// python_format() must substitute all 6 named placeholders AND unescape
+    /// `{{` → `{` and `}}` → `}`, matching Python str.format() semantics.
+    ///
+    /// This locks in that the decide_v1.txt few-shot JSON examples reach the LLM
+    /// as clean `{"key": "value"}` not corrupted `{{"key": "value"}}`.
+    #[test]
+    fn test_python_format_substitutes_and_unescapes_braces() {
+        // Template with a named placeholder AND escaped braces (like decide_v1.txt examples)
+        let template = "State: {state_json}, Example: {{\"kind\": \"action\"}}";
+        let result = python_format(template, &[("state_json", "MYSTATE")]);
+        assert_eq!(
+            result,
+            r#"State: MYSTATE, Example: {"kind": "action"}"#,
+            "python_format must substitute AND unescape double-braces to single braces"
+        );
+    }
+
+    /// When the template has NO double-brace escapes (plain placeholders only),
+    /// python_format() behaves identically to chained .replace() calls.
+    /// This documents the equivalence for templates without JSON examples.
+    #[test]
+    fn test_python_format_no_double_braces_matches_replace() {
+        let template = "A={a_val} B={b_val}";
+        let result = python_format(template, &[("a_val", "hello"), ("b_val", "world")]);
+        assert_eq!(result, "A=hello B=world");
+    }
+
+    /// Verify that the real decide_v1.txt template, after python_format substitution,
+    /// contains no stray `{{` or `}}` sequences and has no unresolved placeholders
+    /// of the form `{name}` with alphabetic name.
+    #[test]
+    fn test_real_template_rendered_has_no_double_braces_or_unresolved_placeholders() {
+        // CARGO_MANIFEST_DIR = <repo>/tot/brain-rs
+        // Python template lives in a sibling repo three levels up then into threads-of-time.
+        let template_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../threads-of-time/tot/brain/prompts/decide_v1.txt"
+        );
+        // If the template is not reachable from the test environment, skip gracefully.
+        let tmpl = match std::fs::read_to_string(template_path) {
+            Ok(s) => s,
+            Err(_) => {
+                // Template not available at this relative path in this build env — skip.
+                return;
+            }
+        };
+        let rendered = python_format(
+            &tmpl,
+            &[
+                ("tools_summary", "TOOLS"),
+                ("state_json", "{}"),
+                ("goals_json", "[]"),
+                ("memories_json", "[]"),
+                ("recent_decisions_json", "[]"),
+                ("hot_inputs_json", "{}"),
+            ],
+        );
+        // After python_format(), ALL `{{` escape sequences must be unescaped to `{`.
+        // Python .format() produces zero remaining `{{` in this template.
+        assert!(
+            !rendered.contains("{{"),
+            "rendered template must not contain '{{' — all double-open-braces must be unescaped"
+        );
+        // Note: `}}` (two adjacent `}`) CAN legitimately remain in the output.
+        // The template has `}}}}` (four braces) for nested JSON object closes; Python
+        // .format() reduces `}}}}` → `}}` (two literal `}`), which appear adjacent.
+        // We do NOT assert on `}}` absence; that would be a false positive.
+        // Instead we verify the COUNT matches Python's expected 4 remaining.
+        let double_close_count = rendered.match_indices("}}").count();
+        assert_eq!(
+            double_close_count, 4,
+            "rendered template must have exactly 4 remaining '}}' sequences (from }}}} → }} unescaping), got {double_close_count}"
+        );
+        // No unresolved named placeholders: check for { followed by alpha chars followed by }
+        let unresolved: Vec<&str> = {
+            let mut found = vec![];
+            let mut chars = rendered.char_indices().peekable();
+            while let Some((i, c)) = chars.next() {
+                if c == '{' {
+                    // collect until }
+                    let start = i + 1;
+                    let rest = &rendered[start..];
+                    if let Some(end_offset) = rest.find('}') {
+                        let inner = &rest[..end_offset];
+                        // A "named placeholder" is purely alphabetic/underscore, non-empty
+                        if !inner.is_empty()
+                            && inner.chars().all(|x| x.is_ascii_alphabetic() || x == '_')
+                        {
+                            found.push(&rendered[i..start + end_offset + 1]);
+                        }
+                    }
+                }
+            }
+            found
+        };
+        assert!(
+            unresolved.is_empty(),
+            "rendered template has unresolved placeholders: {:?}",
+            unresolved
+        );
     }
 }

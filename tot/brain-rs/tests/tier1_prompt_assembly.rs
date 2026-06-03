@@ -160,3 +160,70 @@ fn test_schema_literal_exact() {
     let expected = r#"{"kind": "action"|"no_op", "tool": "<tool_name>"|null, "args": {<tool-specific>}|null, "confidence": 0.0..1.0, "reasoning": "<one sentence>", "wakeup_in_ms": <60000..600000>}"#;
     assert_eq!(_DECISION_SCHEMA_LITERAL, expected, "_DECISION_SCHEMA_LITERAL must match Python exactly");
 }
+
+/// Tier-1: the real decide_v1.txt template, when rendered by assemble_prompt, must
+/// contain no `{{` / `}}` double-brace artifacts and no unresolved `{name}` placeholders.
+///
+/// This locks in parity with Python str.format(): the LLM sees clean JSON examples
+/// like `{"kind": "action"}`, not corrupted `{{"kind": "action"}}`.
+///
+/// Uses the Python template at the sibling `threads-of-time` repo path; skips gracefully
+/// if the file is not present in this build environment.
+#[test]
+fn test_user_prompt_with_real_template_no_double_braces() {
+    let template_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../threads-of-time/tot/brain/prompts/decide_v1.txt"
+    );
+    let tmpl = match std::fs::read_to_string(template_path) {
+        Ok(s) => s,
+        Err(_) => return, // template not reachable in this build env — skip
+    };
+
+    let card = fixture_card();
+    let decider = Decider::new_test(1001, card.clone(), &tmpl);
+    let prompt = decider.assemble_prompt_test(
+        &card,
+        &serde_json::json!({}),
+        &[],
+        &[],
+        &[],
+        &HashMap::new(),
+        1001,
+        None,
+    );
+
+    // After python_format(), ALL `{{` escape sequences must be unescaped to `{`.
+    // Python .format() produces zero remaining `{{` in this template.
+    assert!(
+        !prompt.user.contains("{{"),
+        "user prompt must not contain '{{' — decide_v1.txt double-open-braces must be unescaped"
+    );
+    // Note: `}}` (two adjacent `}`) can legitimately remain — the template has `}}}}`
+    // for nested JSON closes; Python .format() reduces `}}}}` → `}}` (two literal `}`).
+    // We verify the count matches Python's expected 4.
+    let double_close_count = prompt.user.match_indices("}}").count();
+    assert_eq!(
+        double_close_count, 4,
+        "user prompt must have exactly 4 remaining '}}' sequences matching Python .format() output, got {double_close_count}"
+    );
+
+    // All 6 named placeholders must be resolved (none of {tools_summary} etc. remain)
+    for placeholder in [
+        "{tools_summary}", "{state_json}", "{goals_json}",
+        "{memories_json}", "{recent_decisions_json}", "{hot_inputs_json}",
+    ] {
+        assert!(
+            !prompt.user.contains(placeholder),
+            "user prompt must not contain unresolved placeholder: {placeholder}"
+        );
+    }
+
+    // The rendered user prompt must contain clean JSON example fragments
+    // (single-brace, not double-brace) — spot-check one from EXAMPLE A.
+    assert!(
+        prompt.user.contains(r#"{"party_invite_received""#)
+            || prompt.user.contains(r#"{"kind": "action""#),
+        "user prompt must contain unescaped JSON example fragments from decide_v1.txt"
+    );
+}
