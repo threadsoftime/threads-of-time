@@ -1,0 +1,63 @@
+[package]
+name = "brain-rs"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0"
+
+[lib]
+name = "brain_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "brain-rs"
+path = "src/main.rs"
+
+[dependencies]
+tokio    = { version = "1", features = ["full"] }
+axum     = "0.7"
+# reqwest 0.12 — kept at 0.12 intentionally.
+# Unification to 0.13 (rmcp's version) requires non-trivial sse_consumer.rs changes:
+#   - `RequestBuilder::query()` removed/renamed in 0.13
+#   - `bytes_stream()` return type changed (unsized Bytes)
+# Deferred to a dedicated footprint pass. The dual-reqwest (0.12 + 0.13) is benign
+# for a Linux amd64 static binary: two compilations, not two runtime allocators.
+reqwest  = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# client: Peer<RoleClient> + list_all_tools/call_tool methods (required)
+# transport-streamable-http-client-reqwest: reqwest-backed StreamableHttpClientTransport +
+#   from_uri / from_config convenience ctors (required for the spike)
+rmcp     = { version = "1.7", default-features = false, features = [
+    "client",
+    "transport-streamable-http-client-reqwest",
+] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde        = { version = "1", features = ["derive"] }
+# preserve_order: serde_json::Map uses IndexMap, preserving insertion order.
+# Required for compose_oneof to produce JSON key order identical to Python
+# (which preserves dict insertion order since 3.7). This is the byte-parity
+# guarantee for the LLM grammar fed to llama-server.
+serde_json   = { version = "1", features = ["preserve_order"] }
+thiserror    = "2"
+anyhow       = "1"
+tracing      = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+clap         = { version = "4", features = ["derive", "env"] }
+uuid         = { version = "1", features = ["v4"] }
+tower        = "0.5"
+http         = "1"
+tokio-util   = { version = "0.7", features = ["io"] }
+lru          = "0.18"
+rand         = "0.8"
+async-stream  = "0.3"
+futures-util  = "0.3"
+regex        = "1"
+once_cell    = "1"
+
+[dev-dependencies]
+tokio    = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"
+axum     = "0.7"
+tokio-stream = "0.1"
+
+[[example]]
+name = "rmcp_client_spike"
+path = "examples/rmcp_client_spike.rs"

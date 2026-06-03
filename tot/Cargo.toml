@@ -3,6 +3,7 @@ resolver = "2"
 # All strangler-fig slices in one workspace. The shared release profile below
 # applies to all members; individual crates must NOT define their own [profile.*].
 members = [
+    "brain-rs",
     "game-event-scheduler",
     "harness-rs",
     "lfg-matchmaker",

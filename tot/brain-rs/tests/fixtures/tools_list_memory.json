@@ -1,0 +1,36 @@
+[
+  {
+    "name": "memory.write",
+    "description": "Write a memory entry",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": "object",
+          "properties": {
+            "key": { "type": "string" },
+            "value": { "type": "string" },
+            "ttl_ms": { "type": "integer" }
+          },
+          "required": ["key", "value"]
+        }
+      }
+    }
+  },
+  {
+    "name": "memory.read",
+    "description": "Read a memory entry",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": "object",
+          "properties": {
+            "key": { "type": "string" }
+          },
+          "required": ["key"]
+        }
+      }
+    }
+  }
+]

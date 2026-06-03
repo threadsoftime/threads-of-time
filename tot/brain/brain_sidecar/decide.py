@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -17,6 +18,30 @@ from brain_sidecar.personality import PersonalityCache
 from brain_sidecar.state import StateStore
 
 log = logging.getLogger(__name__)
+
+
+def _shadow_record(*, bot_guid, card, state, triage_reason, max_level,
+                   raw, system_prompt, decision):
+    """Opt-in Tier-3 fixture recorder. No-op unless BRAIN_SHADOW_RECORD_PATH is set.
+
+    Emits one JSON line matching the Rust ShadowRecord struct (tests/tier3_shadow.rs).
+    """
+    path = os.getenv("BRAIN_SHADOW_RECORD_PATH")
+    if not path:
+        return
+    rec = {
+        "bot_guid": bot_guid,
+        "card": json.loads(card.model_dump_json(by_alias=True)),
+        "state": state,
+        "triage_reason": triage_reason,
+        "max_player_level": max_level,
+        "llm_response_raw": raw,
+        "expected_system_prompt": system_prompt,
+        "expected_decision": json.loads(decision.model_dump_json()),
+    }
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n")
+
 
 # Initial allowlist for V3-MVP. Covers V1.4 bot.* family + memory MCP family.
 # Tool names match the live MCP registries exactly (dot-notation as registered).
@@ -206,6 +231,12 @@ class Decider:
                     at_cap,
                 )
             # Unknown-tool validation belongs in C5 (spec §5.1). Pass through intact.
+            _shadow_record(
+                bot_guid=bot_guid, card=card,
+                state=hot_inputs.get("state_summary", {}),
+                triage_reason=triage_reason, max_level=max_level,
+                raw=last_raw, system_prompt=prompt["system"], decision=decision,
+            )
             return decision, last_latency_ms, at_cap
 
         # Should not be reached
