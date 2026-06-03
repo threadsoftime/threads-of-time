@@ -1,0 +1,39 @@
+[
+  {
+    "name": "obs.get_state",
+    "description": "Get bot state",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "args": {
+          "$ref": "#/$defs/ObsGetStateArgs"
+        }
+      },
+      "$defs": {
+        "ObsGetStateArgs": {
+          "type": "object",
+          "properties": { "target_guid": { "type": "integer" } },
+          "required": ["target_guid"]
+        }
+      }
+    }
+  },
+  {
+    "name": "bot.send_chat",
+    "description": "Send a chat message",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": "object",
+          "properties": {
+            "bot_guid": { "type": "integer" },
+            "channel": { "type": "string" },
+            "message": { "type": "string" }
+          },
+          "required": ["bot_guid", "channel", "message"]
+        }
+      }
+    }
+  }
+]

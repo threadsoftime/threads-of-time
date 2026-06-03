@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0"
 
+[lib]
+name = "brain_rs"
+path = "src/lib.rs"
+
 [[bin]]
 name = "brain-rs"
 path = "src/main.rs"
@@ -23,7 +27,11 @@ rmcp     = { version = "1.7", default-features = false, features = [
 ] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde        = { version = "1", features = ["derive"] }
-serde_json   = "1"
+# preserve_order: serde_json::Map uses IndexMap, preserving insertion order.
+# Required for compose_oneof to produce JSON key order identical to Python
+# (which preserves dict insertion order since 3.7). This is the byte-parity
+# guarantee for the LLM grammar fed to llama-server.
+serde_json   = { version = "1", features = ["preserve_order"] }
 thiserror    = "2"
 anyhow       = "1"
 tracing      = "0.1"
