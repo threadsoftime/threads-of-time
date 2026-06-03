@@ -183,9 +183,13 @@ impl Harness {
         Ok(intents)
     }
 
-    /// Poll `lfg.cancel` for up to `max` pending cancellation intents.
-    /// Returns the low-32 guids of players who pressed Leave since the last
-    /// drain. Drain semantics: guids do NOT re-appear (same as obs.lfg_pending).
+    /// Poll `lfg.cancel` for up to `max` pending cancellation intents. Returns
+    /// the guids of players who cancelled their LFG queue entry (pressed Leave)
+    /// since the last drain. Drain semantics: guids do NOT re-appear on the next
+    /// call (same as `obs.lfg_pending`).
+    ///
+    /// NOTE: The `lfg.cancel` adapter ships in Inc 2 (C++ lane). This method is
+    /// tested against a mock here; it will not be live until Inc 2 deploys.
     pub async fn lfg_cancel(&self, max: u32) -> Result<Vec<u64>, HarnessError> {
         let result = self.call("lfg.cancel", json!({ "max": max })).await?;
         let arr = result
