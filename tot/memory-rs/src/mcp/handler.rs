@@ -21,7 +21,7 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use serde_json::{Map, Value};
-use tot_schema_transform::{strip_top_level_nulls, transform_nullable_types};
+use tot_schema_transform::transform_nullable_types;
 
 use crate::auth::TokenRecord;
 use crate::core::{
