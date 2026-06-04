@@ -2673,6 +2673,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tot-mcp-bearer-auth"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "bytes",
+ "http",
+ "http-body-util",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "tot-schema-transform"
 version = "0.1.0"
 dependencies = [

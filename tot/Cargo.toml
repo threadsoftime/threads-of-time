@@ -10,6 +10,7 @@ members = [
     "memory-rs",
     "slice-host",
     "tot-harness-client",
+    "tot-mcp-bearer-auth",
     "tot-schema-transform",
 ]
 
