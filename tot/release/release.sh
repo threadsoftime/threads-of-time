@@ -12,8 +12,8 @@
 #   --skip-images  Skip step 5 (image build). Use when the build host is
 #                  unavailable (the -j4 worldserver build cannot run
 #                  locally). Implied by --dry-run on hosts without podman.
-#   --skip-tests   Skip step 3 (pytest suite). Use when brain_sidecar or
-#                  other packages are not installed in the local env (CI
+#   --skip-tests   Skip step 3 (cargo test + pytest suites). Use when the Rust
+#                  toolchain or pytest deps are not available locally (CI
 #                  installs everything; local smoke may not have all deps).
 #
 # Usage:
@@ -85,12 +85,13 @@ step "2/11 UPSTREAMS.toml AC SHA"
 grep -A2 '^\[ac\]' "${REPO}/UPSTREAMS.toml" | grep '^sha'
 
 # ---------------------------------------------------------------------------
-step "3/11 full test suite"
+step "3/11 full test suite (cargo + surviving pytest suites)"
 if [ "${SKIP_TESTS}" = "1" ]; then
-  echo "  SKIPPED (--skip-tests). Run manually on a host with all deps installed:"
-  echo "    pip install -e tot/memory -e tot/brain && python3 -m pytest tot/ tests/ -q"
+  echo "  SKIPPED (--skip-tests). Run manually on a host with the Rust toolchain + pytest:"
+  echo "    ( cd tot && cargo test --workspace ) && python3 -m pytest tests/ tot/client-patch -q"
 else
-  ( cd "${REPO}" && python3 -m pytest tot/ tests/ -q )
+  ( cd "${REPO}/tot" && cargo test --workspace )
+  ( cd "${REPO}" && python3 -m pytest tests/ tot/client-patch -q )
 fi
 
 # ---------------------------------------------------------------------------

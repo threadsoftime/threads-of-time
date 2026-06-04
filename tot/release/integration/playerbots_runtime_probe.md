@@ -164,8 +164,8 @@ free-roaming random bots spawned by mod-playerbots.  This is the size of
 `RandomPlayerbotMgr.playerBots` at steady state and the expected count returned by
 `obs.list_bot_population`.
 
-`TOT_LIVING_BOT_COUNT` (`.env.example:45`, env var read by the brain-sidecar at
-`tot/brain/brain_sidecar/settings.py:56`, default `10`, range 5-15) is the number
+`TOT_LIVING_BOT_COUNT` (`.env.example:45`, env var read by the brain-sidecar
+(brain-rs) config, default `10`, range 5-15) is the number
 of bots the SubsetGate targets for FULL or REDUCED tier — the brain-managed subset.
 This is always a subset of `TOT_BOT_POPULATION`.
 

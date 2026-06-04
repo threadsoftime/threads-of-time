@@ -623,7 +623,8 @@ mod tests {
     //
     // This test asserts the representative case (obs.ping).  The full suite
     // covering all 47 wrappers lives in mcp::schemas::tests::all_47_wrappers_have_args_envelope.
-    // The live tools/list assertion lives in parity/run_parity.py (Fix C).
+    // (A live tools/list assertion previously lived in the Python parity gate,
+    // retired along with the Python sidecars.)
     #[test]
     fn obs_ping_wrapper_schema_has_args_key() {
         let schema = schemars::schema_for!(schemas::ObsPingWrapper);
