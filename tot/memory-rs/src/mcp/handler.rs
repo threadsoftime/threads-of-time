@@ -21,6 +21,7 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use serde_json::{Map, Value};
+use tot_schema_transform::transform_nullable_types;
 
 use crate::auth::TokenRecord;
 use crate::core::{
@@ -29,96 +30,9 @@ use crate::core::{
 };
 use crate::mcp::schemas;
 
-// ── Schema-transform helpers (copied verbatim from harness-rs handler.rs) ─────
-//
-// These are MANDATORY at the serving boundary.  The brain client's
-// `schema_builder.py:_render_arg` calls `_JSON_TO_PY_TYPE.get(schema.get("type"))`
-// and crashes with `TypeError: unhashable type: 'list'` when `type` is a JSON
-// array — the schemars 1.x draft-2020-12 form for nullable fields.
-
-/// Convert schemars draft-2020-12 nullable form to pydantic-v2 `anyOf` form.
-///
-/// Wherever a node's `"type"` key is a JSON array (possibly containing `"null"`),
-/// rewrite as `"anyOf": [{"type":"T"}, {"type":"null"}]`.
-/// Keys that are structural type descriptors are moved into the first branch;
-/// documentation keys (`description`, `default`, `title`) stay at the outer level.
-pub fn transform_nullable_types(v: Value) -> Value {
-    match v {
-        Value::Object(map) => transform_nullable_object(map),
-        Value::Array(arr)  => Value::Array(arr.into_iter().map(transform_nullable_types).collect()),
-        other              => other,
-    }
-}
-
-/// Structural keys that belong INSIDE an `anyOf` branch (not at the outer level).
-const STRUCTURAL_KEYS: &[&str] = &["format", "minimum", "maximum", "minLength", "maxLength",
-                                   "pattern", "enum", "const", "items", "prefixItems",
-                                   "properties", "required", "additionalProperties",
-                                   "allOf", "anyOf", "oneOf", "not",
-                                   "$ref", "$defs", "$schema"];
-
-fn transform_nullable_object(mut map: Map<String, Value>) -> Value {
-    // Recursively transform all nested values first.
-    for v in map.values_mut() {
-        *v = transform_nullable_types(std::mem::replace(v, Value::Null));
-    }
-
-    let type_is_array = map.get("type").map(|t| t.is_array()).unwrap_or(false);
-    if !type_is_array {
-        return Value::Object(map);
-    }
-
-    let type_arr: Vec<Value> = match map.remove("type") {
-        Some(Value::Array(a)) => a,
-        other => {
-            if let Some(t) = other { map.insert("type".into(), t); }
-            return Value::Object(map);
-        }
-    };
-
-    let non_null_types: Vec<&Value> = type_arr.iter().filter(|t| t != &&Value::String("null".into())).collect();
-    let has_null = type_arr.iter().any(|t| t == &Value::String("null".into()));
-
-    let mut first_branch_extra: Map<String, Value> = Map::new();
-    for &key in STRUCTURAL_KEYS {
-        if key == "anyOf" || key == "oneOf" || key == "allOf" {
-            continue;
-        }
-        if let Some(v) = map.remove(key) {
-            first_branch_extra.insert(key.to_string(), v);
-        }
-    }
-
-    let mut branches: Vec<Value> = Vec::new();
-    let mut is_first = true;
-    for type_val in &non_null_types {
-        let mut branch: Map<String, Value> = Map::new();
-        branch.insert("type".into(), (*type_val).clone());
-        if is_first {
-            branch.extend(first_branch_extra.clone());
-            is_first = false;
-        }
-        branches.push(Value::Object(branch));
-    }
-    if has_null {
-        branches.push(Value::Object({
-            let mut m = Map::new();
-            m.insert("type".into(), Value::String("null".into()));
-            m
-        }));
-    }
-
-    if !has_null && non_null_types.len() == 1 {
-        map.insert("type".into(), non_null_types[0].clone());
-        for (k, v) in first_branch_extra {
-            map.insert(k, v);
-        }
-        return Value::Object(map);
-    }
-
-    map.insert("anyOf".into(), Value::Array(branches));
-    Value::Object(map)
-}
+// ── Schema transforms: imported from tot-schema-transform ─────────────────────
+// (transform_nullable_types + strip_top_level_nulls are re-exported from
+// tot-schema-transform; transform_tools_schemas is the local application layer)
 
 /// Apply `transform_nullable_types` to every tool in a `ListToolsResult`.
 fn transform_tools_schemas(mut result: ListToolsResult) -> ListToolsResult {
@@ -158,20 +72,6 @@ impl MemoryMcp {
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
-
-/// Strips every top-level key whose value is `Value::Null`.
-///
-/// Mirrors Python `args.model_dump(exclude_none=True)`.
-/// Must NOT recurse — pydantic `exclude_none` only strips the model's own level.
-pub fn strip_top_level_nulls(obj: Value) -> Value {
-    match obj {
-        Value::Object(mut map) => {
-            map.retain(|_, v| !v.is_null());
-            Value::Object(map)
-        }
-        other => other,
-    }
-}
 
 /// Serialize a value to JSON string; fallback on error.
 fn to_json_str(v: &impl serde::Serialize) -> String {
@@ -693,75 +593,14 @@ impl ServerHandler for MemoryMcp {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{Value, json};
+    use serde_json::Value;
+    use tot_schema_transform::transform_nullable_types;
 
-    use super::{MemoryMcp, strip_top_level_nulls, transform_nullable_types};
+    use super::MemoryMcp;
     use crate::mcp::schemas;
 
-    // ── strip_top_level_nulls ─────────────────────────────────────────────────
-
-    #[test]
-    fn removes_top_level_nulls() {
-        let input = json!({ "a": null, "b": 1, "c": "hello" });
-        let out = strip_top_level_nulls(input);
-        assert!(out.get("a").is_none());
-        assert_eq!(out["b"], 1);
-        assert_eq!(out["c"], "hello");
-    }
-
-    #[test]
-    fn does_not_recurse_into_nested_objects() {
-        let input = json!({ "a": null, "b": 1, "c": { "d": null, "e": 2 } });
-        let out = strip_top_level_nulls(input);
-        assert!(out.get("a").is_none());
-        assert_eq!(out["b"], 1);
-        assert_eq!(out["c"]["d"], json!(null));
-        assert_eq!(out["c"]["e"], 2);
-    }
-
-    #[test]
-    fn non_object_value_passed_through() {
-        let arr = json!([1, null, 3]);
-        assert_eq!(strip_top_level_nulls(arr.clone()), arr);
-    }
-
-    // ── transform_nullable_types ──────────────────────────────────────────────
-
-    #[test]
-    fn transform_nullable_integer() {
-        let input = json!({ "type": ["integer", "null"], "description": "A nullable int", "default": null });
-        let out = transform_nullable_types(input);
-        assert!(out.get("type").is_none());
-        let branches = out["anyOf"].as_array().unwrap();
-        assert_eq!(branches.len(), 2);
-        assert_eq!(branches[0], json!({"type": "integer"}));
-        assert_eq!(branches[1], json!({"type": "null"}));
-        assert_eq!(out.get("description"), Some(&json!("A nullable int")));
-    }
-
-    #[test]
-    fn transform_non_nullable_not_changed() {
-        let input = json!({ "type": "integer", "description": "required int" });
-        let out = transform_nullable_types(input.clone());
-        assert_eq!(out, input);
-    }
-
-    #[test]
-    fn transform_recurses_into_properties() {
-        let input = json!({
-            "type": "object",
-            "properties": {
-                "since_ts": { "type": ["integer", "null"] },
-                "required_field": { "type": "integer" },
-            },
-        });
-        let out = transform_nullable_types(input);
-        assert_eq!(out.get("type"), Some(&json!("object")));
-        let props = out["properties"].as_object().unwrap();
-        assert!(props["since_ts"].get("type").is_none());
-        assert!(props["since_ts"].get("anyOf").is_some());
-        assert_eq!(props["required_field"]["type"], json!("integer"));
-    }
+    // ── Pure-transform unit tests live in tot-schema-transform crate ──────────
+    // (strip_top_level_nulls + transform_nullable_types behavioural tests moved there)
 
     /// After transform, NO node anywhere in the schema tree should have "type" as an array.
     /// Use MemoryRecallWrapper (several Option fields) as the test input.

@@ -13,9 +13,9 @@
 /// This is DISTINCT from McpClient — memory_client.py uses direct HTTP, NOT MCP.
 /// Matches the Python client's request shape, response unwrap, and error handling
 /// exactly.
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use std::time::Duration;
+use tot_harness_client::HarnessClient;
 
 // ---------------------------------------------------------------------------
 // RecalledEpisode
@@ -46,8 +46,7 @@ pub struct RecalledEpisode {
 /// `MemoryClient::from_env()` in production (reads `HARNESS_BASE_URL` and
 /// `HARNESS_BEARER_TOKEN`).
 pub struct MemoryClient {
-    base_url: String,
-    http: Client,
+    client: HarnessClient,
 }
 
 impl MemoryClient {
@@ -59,21 +58,8 @@ impl MemoryClient {
         bearer_token: impl Into<String>,
         timeout_s: f64,
     ) -> anyhow::Result<Self> {
-        let token = bearer_token.into();
-        let mut headers = reqwest::header::HeaderMap::new();
-        if !token.is_empty() {
-            let hv = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
-                .map_err(|e| anyhow::anyhow!("MemoryClient: invalid bearer token: {e}"))?;
-            headers.insert(reqwest::header::AUTHORIZATION, hv);
-        }
-        let http = Client::builder()
-            .timeout(std::time::Duration::from_secs_f64(timeout_s))
-            .default_headers(headers)
-            .build()
-            .map_err(|e| anyhow::anyhow!("MemoryClient: failed to build HTTP client: {e}"))?;
         Ok(Self {
-            base_url: base_url.into().trim_end_matches('/').to_string(),
-            http,
+            client: HarnessClient::new(base_url, bearer_token, Duration::from_secs_f64(timeout_s)),
         })
     }
 
@@ -105,29 +91,16 @@ impl MemoryClient {
         query_text: &str,
         top_k: usize,
     ) -> anyhow::Result<Vec<RecalledEpisode>> {
-        let url = format!("{}/v1/tools/memory.recall", self.base_url);
         let body = serde_json::json!({
             "bot_guid": bot_guid,
             "query_text": query_text,
             "top_k": top_k,
         });
-        let resp = self
-            .http
-            .post(&url)
-            .json(&body)
-            .send()
+        let result = self
+            .client
+            .call("memory.recall", body)
             .await
-            .map_err(|e| anyhow::anyhow!("MemoryClient.recall HTTP error: {e}"))?;
-        resp.error_for_status_ref()
-            .map_err(|e| anyhow::anyhow!("MemoryClient.recall HTTP status: {e}"))?;
-
-        let payload: Value = resp
-            .json()
-            .await
-            .map_err(|e| anyhow::anyhow!("MemoryClient.recall body parse: {e}"))?;
-
-        // Unwrap the harness envelope: {"ok":true,"result":{...}}
-        let result = unwrap_harness_result(&payload)?;
+            .map_err(|e| anyhow::anyhow!("MemoryClient.recall: {e}"))?;
         let results = result
             .get("results")
             .and_then(|v| v.as_array())
@@ -174,7 +147,6 @@ impl MemoryClient {
         timestamp_iso: &str,
         salience_score: f64,
     ) -> anyhow::Result<i64> {
-        let url = format!("{}/v1/tools/memory.write", self.base_url);
         let body = serde_json::json!({
             "bot_guid": bot_guid,
             "content_text": content_text,
@@ -183,49 +155,15 @@ impl MemoryClient {
             "salience_score": salience_score,
             "entities": [],
         });
-        let resp = self
-            .http
-            .post(&url)
-            .json(&body)
-            .send()
+        let result = self
+            .client
+            .call("memory.write", body)
             .await
-            .map_err(|e| anyhow::anyhow!("MemoryClient.write_episode HTTP error: {e}"))?;
-        resp.error_for_status_ref()
-            .map_err(|e| anyhow::anyhow!("MemoryClient.write_episode HTTP status: {e}"))?;
-
-        let payload: Value = resp
-            .json()
-            .await
-            .map_err(|e| anyhow::anyhow!("MemoryClient.write_episode body parse: {e}"))?;
-
-        let result = unwrap_harness_result(&payload)?;
+            .map_err(|e| anyhow::anyhow!("MemoryClient.write_episode: {e}"))?;
         result["episode_id"]
             .as_i64()
             .ok_or_else(|| anyhow::anyhow!("MemoryClient.write_episode: missing episode_id"))
     }
-}
-
-// ---------------------------------------------------------------------------
-// Harness envelope unwrap
-// ---------------------------------------------------------------------------
-
-/// Unwrap the harness `{"ok": true/false, "result": {...}}` envelope.
-/// Returns Err if `ok` is false.
-fn unwrap_harness_result(payload: &Value) -> anyhow::Result<&Value> {
-    let ok = payload
-        .get("ok")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if !ok {
-        let msg = payload
-            .get("error")
-            .or_else(|| payload.get("message"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown error");
-        return Err(anyhow::anyhow!("harness returned ok=false: {msg}"));
-    }
-    // Fall back to the whole payload if "result" key is absent (lenient).
-    Ok(payload.get("result").unwrap_or(payload))
 }
 
 // ---------------------------------------------------------------------------
@@ -420,8 +358,10 @@ mod tests {
         let url = spawn_mock_harness(response, serde_json::json!({}), None, None).await;
         let client = MemoryClient::new(url, "", 5.0).unwrap();
         let err = client.recall("bot-1", "q", 5).await.unwrap_err();
+        // HarnessClient surfaces ok:false as a tool error; the anyhow context
+        // wraps it so the error string mentions the tool or the error code.
         assert!(
-            err.to_string().contains("ok=false"),
+            err.to_string().contains("bot not found") || err.to_string().contains("memory.recall"),
             "error message: {err}"
         );
     }
@@ -472,30 +412,4 @@ mod tests {
         assert_eq!(auth, "Bearer my-secret");
     }
 
-    // -----------------------------------------------------------------------
-    // Pure helper tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_unwrap_harness_result_ok_true() {
-        let payload = serde_json::json!({"ok": true, "result": {"episode_id": 7}});
-        let result = unwrap_harness_result(&payload).unwrap();
-        assert_eq!(result["episode_id"], 7);
-    }
-
-    #[test]
-    fn test_unwrap_harness_result_ok_false() {
-        let payload = serde_json::json!({"ok": false, "error": "not found"});
-        let err = unwrap_harness_result(&payload).unwrap_err();
-        assert!(err.to_string().contains("ok=false"));
-        assert!(err.to_string().contains("not found"));
-    }
-
-    #[test]
-    fn test_unwrap_harness_result_fallback_no_result_key() {
-        // Lenient: if "result" key absent, return the whole payload
-        let payload = serde_json::json!({"ok": true, "episode_id": 5});
-        let result = unwrap_harness_result(&payload).unwrap();
-        assert_eq!(result["episode_id"], 5);
-    }
 }

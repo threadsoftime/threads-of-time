@@ -331,6 +331,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tot-harness-client",
  "tower",
  "tracing",
  "tracing-subscriber",
@@ -844,6 +845,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tot-harness-client",
 ]
 
 [[package]]
@@ -946,6 +948,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "tokio",
+ "tot-schema-transform",
  "tower",
  "tracing",
  "tracing-subscriber",
@@ -1340,6 +1343,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tot-harness-client",
 ]
 
 [[package]]
@@ -1472,6 +1476,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tot-schema-transform",
  "tower",
  "tracing",
  "tracing-subscriber",
@@ -2655,6 +2660,23 @@ dependencies = [
  "futures-sink",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "tot-harness-client"
+version = "0.1.0"
+dependencies = [
+ "axum 0.7.9",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "tot-schema-transform"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn strip_nulls_top_level_only() {
-        use super::handler::strip_top_level_nulls;
+        use tot_schema_transform::strip_top_level_nulls;
         let input = json!({"a": null, "b": 1, "c": {"d": null}});
         let out = strip_top_level_nulls(input);
         assert!(out.get("a").is_none(), "'a' must be stripped");

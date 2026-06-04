@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn recall_wrapper_has_no_type_arrays_after_transform() {
         use super::MemoryRecallWrapper;
-        use crate::mcp::handler::transform_nullable_types;
+        use tot_schema_transform::transform_nullable_types;
 
         let raw_schema = schemars::schema_for!(MemoryRecallWrapper);
         let v: Value = serde_json::to_value(&raw_schema).unwrap();
