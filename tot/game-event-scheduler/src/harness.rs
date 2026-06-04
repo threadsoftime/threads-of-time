@@ -31,63 +31,22 @@
 //!
 //! [`HarnessError::Tool`] preserves the `detail` string so callers can log it.
 
-use reqwest::Client;
 use serde_json::{json, Value};
+use std::time::Duration;
+use tot_harness_client::HarnessClient;
+pub use tot_harness_client::HarnessError;
 
 use crate::events::{GroundTruth, QueryDbResult};
 use crate::resolve::GameEventInput;
-
-// ── Error type ────────────────────────────────────────────────────────────────
-
-/// Errors surfaced by the harness client.
-#[derive(Debug)]
-pub enum HarnessError {
-    /// The HTTP transport failed (connection refused, timeout, DNS, TLS…).
-    Http(reqwest::Error),
-    /// The harness returned `ok:false` (tool-level error).
-    /// The `detail` field from the JSON envelope is preserved.
-    Tool { detail: String },
-    /// The JSON response shape was unexpected (parse/type mismatch).
-    Shape(String),
-}
-
-impl std::fmt::Display for HarnessError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Http(e) => write!(f, "harness HTTP error: {e}"),
-            Self::Tool { detail } => write!(f, "harness tool error: {detail}"),
-            Self::Shape(msg) => write!(f, "harness shape error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for HarnessError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Http(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<reqwest::Error> for HarnessError {
-    fn from(e: reqwest::Error) -> Self {
-        Self::Http(e)
-    }
-}
 
 // ── Harness client ────────────────────────────────────────────────────────────
 
 /// HTTP client that speaks the `{ok,result}` harness wire protocol.
 ///
-/// Construct with [`Harness::new`]; the underlying [`reqwest::Client`] is shared
+/// Construct with [`Harness::new`]; the underlying [`HarnessClient`] is shared
 /// (connection pool reused across calls).
 #[derive(Clone)]
-pub struct Harness {
-    client: Client,
-    base_url: String,
-    bearer: String,
-}
+pub struct Harness(HarnessClient);
 
 impl Harness {
     /// Create a new client.
@@ -95,55 +54,11 @@ impl Harness {
     /// `base_url` — e.g. `"http://192.168.1.3:8099"` (no trailing slash).
     /// `bearer`   — the raw token, WITHOUT the `Bearer ` prefix.
     pub fn new(base_url: impl Into<String>, bearer: impl Into<String>) -> Self {
-        Self {
-            client: Client::new(),
-            base_url: base_url.into(),
-            bearer: bearer.into(),
-        }
+        Harness(HarnessClient::new(base_url, bearer, Duration::from_secs(10)))
     }
 
-    /// Call a harness tool and return the `result` value on success.
-    ///
-    /// `tool`  — e.g. `"obs.game_events"`.
-    /// `args`  — a JSON object that is the POST body (use `json!({})` for empty).
-    ///
-    /// Maps harness failures to typed [`HarnessError`] variants without
-    /// short-circuiting on HTTP status — reads the JSON envelope first and
-    /// maps `ok:false` to [`HarnessError::Tool`] (preserving `detail`).
-    /// Non-2xx responses that are NOT JSON are surfaced as [`HarnessError::Shape`].
     pub async fn call(&self, tool: &str, args: Value) -> Result<Value, HarnessError> {
-        let url = format!("{}/v1/tools/{}", self.base_url, tool);
-        let resp = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.bearer))
-            .json(&args)
-            .send()
-            .await?;
-
-        // Read the body regardless of HTTP status; the envelope determines success.
-        let body: Value = resp
-            .json()
-            .await
-            .map_err(|e| HarnessError::Shape(format!("failed to parse response JSON: {e}")))?;
-
-        let ok = body
-            .get("ok")
-            .and_then(Value::as_bool)
-            .ok_or_else(|| HarnessError::Shape("response missing boolean 'ok' field".to_string()))?;
-
-        if !ok {
-            let detail = body
-                .get("detail")
-                .and_then(Value::as_str)
-                .unwrap_or("<no detail>")
-                .to_string();
-            return Err(HarnessError::Tool { detail });
-        }
-
-        body.get("result")
-            .cloned()
-            .ok_or_else(|| HarnessError::Shape("response missing 'result' field".to_string()))
+        self.0.call(tool, args).await
     }
 
     // ── Typed methods ─────────────────────────────────────────────────────────
@@ -480,8 +395,9 @@ mod tests {
         let h = Harness::new(base_url, "test-token");
         let err = h.call("fail.tool", json!({})).await.expect_err("should be an error");
         match err {
-            HarnessError::Tool { detail } => {
-                assert_eq!(detail, "missing required param");
+            HarnessError::Tool { tool, message } => {
+                assert!(message.contains("missing required param"), "detail lost: {message}");
+                assert_eq!(tool, "fail.tool");
             }
             other => panic!("expected HarnessError::Tool, got {other:?}"),
         }
@@ -500,16 +416,18 @@ mod tests {
         );
     }
 
-    // ── HarnessError::Shape (missing ok field) ────────────────────────────────
+    // ── HarnessError::Tool (missing ok field — shared client treats ok-absent as false) ──
 
     #[tokio::test]
-    async fn shape_error_on_missing_ok_field() {
+    async fn tool_error_on_missing_ok_field() {
+        // The shared HarnessClient treats a missing/non-bool `ok` as false
+        // (unwrap_or(false)), so {"garbage": true} surfaces as Tool, not Shape.
         let base_url = spawn_mock().await;
         let h = Harness::new(base_url, "test-token");
-        let err = h.call("shape.bad", json!({})).await.expect_err("should be a shape error");
+        let err = h.call("shape.bad", json!({})).await.expect_err("should be an error");
         assert!(
-            matches!(err, HarnessError::Shape(_)),
-            "expected HarnessError::Shape, got {err:?}"
+            matches!(err, HarnessError::Tool { .. }),
+            "expected HarnessError::Tool, got {err:?}"
         );
     }
 
@@ -546,10 +464,11 @@ mod tests {
         let h = Harness::new(base_url, "test-token");
         let err = h.event_start(9999).await.expect_err("should return an error for ok:false");
         match err {
-            HarnessError::Tool { detail } => {
+            HarnessError::Tool { tool, message } => {
+                assert_eq!(tool, "event.start");
                 assert!(
-                    detail.contains("9999") || detail.contains("event_id"),
-                    "detail should mention event_id or the id: {detail}"
+                    message.contains("9999") || message.contains("event_id") || message.contains("event_not_found"),
+                    "message should mention the error: {message}"
                 );
             }
             other => panic!("expected HarnessError::Tool, got {other:?}"),

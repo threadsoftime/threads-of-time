@@ -844,6 +844,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tot-harness-client",
 ]
 
 [[package]]
