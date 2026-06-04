@@ -9,6 +9,7 @@ members = [
     "lfg-matchmaker",
     "memory-rs",
     "slice-host",
+    "tot-schema-transform",
 ]
 
 # Shared release profile: minimal-footprint single static binary (Steam Deck).
