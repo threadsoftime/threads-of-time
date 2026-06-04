@@ -53,7 +53,7 @@ use crate::triage::TriageGate;
 /// Default prompt template embedded at compile time.
 /// Runtime override: set BRAIN_PROMPT_PATH env var.
 const DEFAULT_PROMPT_TEMPLATE: &str =
-    include_str!("../../brain/prompts/decide_v1.txt");
+    include_str!("../prompts/decide_v1.txt");
 
 // ---------------------------------------------------------------------------
 // Shared app state — injected into route handlers
