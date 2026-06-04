@@ -464,7 +464,6 @@ impl ServerHandler for HarnessMcp {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use tot_schema_transform::transform_nullable_types;
     use crate::mcp::schemas;
 
