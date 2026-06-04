@@ -9,15 +9,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust workspace tests
+        run: cargo test --workspace
+        working-directory: tot
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install deps
-        run: |
-          pip install -e tot/memory pytest
-          pip install -r tot/brain/requirements.txt || true
-      - name: Unit + parity + memory + firstboot
-        run: python -m pytest tot/ tests/ -q
+        run: pip install pytest
+      - name: Firstboot + install tests
+        run: python -m pytest tests/ -q
       - name: Client-patch compositor suite (53 tests, must stay green)
         run: python -m pytest tot/client-patch -q
       - name: shellcheck
