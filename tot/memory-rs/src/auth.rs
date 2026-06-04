@@ -104,6 +104,13 @@ impl TokenStore {
     }
 }
 
+impl tot_mcp_bearer_auth::TokenLookup for TokenStore {
+    type Record = TokenRecord;
+    fn lookup(&self, token: &str) -> Option<&Self::Record> {
+        self.verify(token)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
