@@ -26,14 +26,14 @@ use crate::models::{Decision, PersonalityCard};
 
 /// 0001_living_bots.sql — creates living_bots, decisions_recent,
 /// schema_version; idempotent (all IF NOT EXISTS + INSERT OR IGNORE).
-const MIG_0001: &str = include_str!("../../brain/migrations/0001_living_bots.sql");
+const MIG_0001: &str = include_str!("../migrations/0001_living_bots.sql");
 
 /// 0002_add_last_event_id.sql — ALTER TABLE + INSERT OR IGNORE INTO schema_version.
-const MIG_0002: &str = include_str!("../../brain/migrations/0002_add_last_event_id.sql");
+const MIG_0002: &str = include_str!("../migrations/0002_add_last_event_id.sql");
 
 /// 0004_subset_tier.sql — ALTER TABLE (tier, hysteresis, pin) + CREATE INDEX.
 /// Note: there is no 0003 migration.
-const MIG_0004: &str = include_str!("../../brain/migrations/0004_subset_tier.sql");
+const MIG_0004: &str = include_str!("../migrations/0004_subset_tier.sql");
 
 /// Ordered list of `(file_version, sql)` pairs.  Version 1 is always applied
 /// (safe because it uses `IF NOT EXISTS` / `INSERT OR IGNORE` everywhere);
