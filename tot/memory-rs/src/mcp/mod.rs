@@ -24,7 +24,7 @@ use handler::MemoryMcp;
 
 /// Build the MCP service ready to be nested at `/mcp/mcp`.
 ///
-/// Returns a `BearerAuthService<StreamableHttpService<MemoryMcp, LocalSessionManager>>`
+/// Returns a `BearerAuthService<TokenStore, StreamableHttpService<MemoryMcp, LocalSessionManager>>`
 /// — a tower [`Service`] that:
 /// - Runs bearer-auth (from the daemon's `TokenStore`).
 /// - On valid bearer: injects `auth::TokenRecord` into request extensions.

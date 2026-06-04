@@ -24,7 +24,7 @@ use handler::HarnessMcp;
 
 /// Build the MCP service ready to be nested at `/mcp/mcp`.
 ///
-/// Returns a `BearerAuthService<StreamableHttpService<HarnessMcp, LocalSessionManager>>`
+/// Returns a `BearerAuthService<TokenStore, StreamableHttpService<HarnessMcp, LocalSessionManager>>`
 /// — a tower [`Service`] that:
 /// - Runs bearer-auth (from the daemon's `TokenStore`).
 /// - On valid bearer: injects `config::TokenRecord` into request extensions.
