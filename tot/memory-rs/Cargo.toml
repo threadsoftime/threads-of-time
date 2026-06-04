@@ -23,7 +23,7 @@ path = "src/bin/embed_stub.rs"
 [dependencies]
 # Async runtime + HTTP server — match workspace pinned majors.
 tokio       = { version = "1", features = ["full"] }
-axum        = "0.7"
+axum        = "0.8"
 reqwest     = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # MCP transport (Tasks 6.3-6.5): rmcp 1.7 with StreamableHTTP server + macros.
