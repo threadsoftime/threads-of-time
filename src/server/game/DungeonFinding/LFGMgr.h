@@ -25,7 +25,6 @@
 #include "LFG.h"
 #include "LFGGroupData.h"
 #include "LFGPlayerData.h"
-#include "LFGQueue.h"
 #include "Map.h"
 
 class Group;
@@ -39,7 +38,7 @@ namespace lfg
     enum LfgOptions
     {
         LFG_OPTION_ENABLE_DUNGEON_FINDER             = 0x01,
-        LFG_OPTION_ENABLE_RAID_BROWSER               = 0x02,
+        // LFG_OPTION_ENABLE_RAID_BROWSER = 0x02 — deleted in Inc-3 C3 (Raid Browser retired)
         LFG_OPTION_ENABLE_SEASONAL_BOSSES            = 0x04
     };
 
@@ -130,18 +129,7 @@ namespace lfg
         LFG_ROLECHECK_NO_ROLE                        = 6       // Someone selected no role
     };
 
-    enum LfgUpdateFlag // pussywizard: for raid browser
-    {
-        LFG_UPDATE_FLAG_NONE          = 0x00,
-        LFG_UPDATE_FLAG_CHARACTERINFO = 0x01,
-        LFG_UPDATE_FLAG_COMMENT       = 0x02,
-        LFG_UPDATE_FLAG_GROUPLEADER   = 0x04,
-        LFG_UPDATE_FLAG_GROUPGUID     = 0x08,
-        LFG_UPDATE_FLAG_ROLES         = 0x10,
-        LFG_UPDATE_FLAG_AREA          = 0x20,
-        LFG_UPDATE_FLAG_STATUS        = 0x40,
-        LFG_UPDATE_FLAG_BINDED        = 0x80
-    };
+    // LfgUpdateFlag — deleted in Inc-3 C4 (only consumer was Raid Browser machinery, deleted in C3)
 
     enum LfgSeasonalDungeons
     {
@@ -151,126 +139,26 @@ namespace lfg
         LFG_DUNGEON_CROWN_CHEMICAL_CO   = 288
     };
 
-    struct RBEntryInfo
-    {
-        RBEntryInfo() = default;
-        RBEntryInfo(uint8 _roles, std::string  _comment) : roles(_roles), comment(std::move(_comment)) {}
-        uint8 roles;
-        std::string comment;
-    };
-
-    struct RBInternalInfo
-    {
-        ObjectGuid guid;
-        std::string comment;
-        bool isGroupLeader;
-        ObjectGuid groupGuid;
-        uint8 roles;
-        uint32 encounterMask;
-        ObjectGuid instanceGuid;
-
-        // additional character info parameters:
-        uint8 _online;
-        uint8 _level;
-        uint8 _class;
-        uint8 _race;
-        float _avgItemLevel;
-        // --
-        uint8 _talents0;
-        uint8 _talents1;
-        uint8 _talents2;
-        uint32 _area;
-        uint32 _armor;
-        uint32 _spellDamage;
-        uint32 _spellHeal;
-        // --
-        uint32 _critRatingMelee;
-        uint32 _critRatingRanged;
-        uint32 _critRatingSpell;
-        float _mp5;
-        float _mp5combat;
-        // --
-        uint32 _attackPower;
-        uint32 _agility;
-        uint32 _health;
-        uint32 _mana;
-        uint32 _defenseSkill;
-        // --
-        uint32 _dodgeRating;
-        uint32 _blockRating;
-        uint32 _parryRating;
-        uint32 _hasteRating;
-        uint32 _expertiseRating;
-
-        RBInternalInfo() = default;
-        RBInternalInfo(ObjectGuid guid, std::string  comment, bool isGroupLeader, ObjectGuid groupGuid, uint8 roles, uint32 encounterMask, ObjectGuid instanceGuid,
-                       uint8 _online, uint8 _level, uint8 _class, uint8 _race, float _avgItemLevel,
-                       uint8 (&_talents)[3], uint32 _area, uint32 _armor, uint32 _spellDamage, uint32 _spellHeal,
-                       uint32 _critRatingMelee, uint32 _critRatingRanged, uint32 _critRatingSpell, float _mp5, float _mp5combat,
-                       uint32 _attackPower, uint32 _agility, uint32 _health, uint32 _mana, uint32 _defenseSkill,
-                       uint32 _dodgeRating, uint32 _blockRating, uint32 _parryRating, uint32 _hasteRating, uint32 _expertiseRating)
-            : guid(guid), comment(std::move(comment)), isGroupLeader(isGroupLeader), groupGuid(groupGuid), roles(roles), encounterMask(encounterMask), instanceGuid(instanceGuid),
-              _online(_online), _level(_level), _class(_class), _race(_race), _avgItemLevel(_avgItemLevel),
-              _talents0(_talents[0]), _talents1(_talents[1]), _talents2(_talents[2]), _area(_area), _armor(_armor), _spellDamage(_spellDamage), _spellHeal(_spellHeal),
-              _critRatingMelee(_critRatingMelee), _critRatingRanged(_critRatingRanged), _critRatingSpell(_critRatingSpell), _mp5(_mp5), _mp5combat(_mp5combat),
-              _attackPower(_attackPower), _agility(_agility), _health(_health), _mana(_mana), _defenseSkill(_defenseSkill),
-              _dodgeRating(_dodgeRating), _blockRating(_blockRating), _parryRating(_parryRating), _hasteRating(_hasteRating), _expertiseRating(_expertiseRating)
-        {}
-        [[nodiscard]] bool PlayerSameAs(RBInternalInfo const& i) const
-        {
-            return isGroupLeader == i.isGroupLeader && groupGuid == i.groupGuid && roles == i.roles && (isGroupLeader || (comment == i.comment && encounterMask == i.encounterMask && instanceGuid == i.instanceGuid))
-                   && _online == i._online && _level == i._level && _class == i._class && _race == i._race && std::fabs(_avgItemLevel - i._avgItemLevel) < 0.01f
-                   && _talents0 == i._talents0 && _talents1 == i._talents1 && _talents2 == i._talents2 && _area == i._area && _armor == i._armor && _spellDamage == i._spellDamage && _spellHeal == i._spellHeal
-                   && _critRatingMelee == i._critRatingMelee && _critRatingRanged == i._critRatingRanged && _critRatingSpell == i._critRatingSpell && std::fabs(_mp5 - i._mp5) < 0.01f && std::fabs(_mp5combat - i._mp5combat) < 0.01f
-                   && _attackPower == i._attackPower && _agility == i._agility && _health == i._health && _mana == i._mana && _defenseSkill == i._defenseSkill
-                   && _dodgeRating == i._dodgeRating && _blockRating == i._blockRating && _parryRating == i._parryRating && _hasteRating == i._hasteRating && _expertiseRating == i._expertiseRating;
-        }
-        void CopyStats(RBInternalInfo const& i)
-        {
-            _avgItemLevel = i._avgItemLevel;
-            _talents0 = i._talents0;
-            _talents1 = i._talents1;
-            _talents2 = i._talents2;
-            _area = i._area;
-            _armor = i._armor;
-            _spellDamage = i._spellDamage;
-            _spellHeal = i._spellHeal;
-            _critRatingMelee = i._critRatingMelee;
-            _critRatingRanged = i._critRatingRanged;
-            _critRatingSpell = i._critRatingSpell;
-            _mp5 = i._mp5;
-            _mp5combat = i._mp5combat;
-            _attackPower = i._attackPower;
-            _agility = i._agility;
-            _health = i._health;
-            _mana = i._mana;
-            _defenseSkill = i._defenseSkill;
-            _dodgeRating = i._dodgeRating;
-            _blockRating = i._blockRating;
-            _parryRating = i._parryRating;
-            _hasteRating = i._hasteRating;
-            _expertiseRating = i._expertiseRating;
-        }
-    };
+    // RBEntryInfo — deleted in Inc-3 C3 (Raid Browser retired)
+    // RBInternalInfo — deleted in Inc-3 C3
 
     // Forward declaration (just to have all typedef together)
     struct LFGDungeonData;
     struct LfgReward;
-    struct LfgQueueInfo;
-    struct LfgRoleCheck;
-    struct LfgProposal;
-    struct LfgProposalPlayer;
-    struct LfgPlayerBoot;
+    // LfgQueueInfo — unused; forward decl only, no definition (Inc-3 C4 cleanup)
+    // LfgRoleCheck — deleted in Inc-3 C2 (role-check machinery removed)
+    // LfgProposal — deleted in Inc-3 C2 (proposal machinery removed)
+    // LfgProposalPlayer — deleted in Inc-3 C2 (proposal machinery removed)
+    // LfgPlayerBoot — deleted in Inc-3 C2 (boot vote machinery removed)
 
-    typedef std::map<uint8, LFGQueue> LfgQueueContainer;
     typedef std::multimap<uint32, LfgReward const*> LfgRewardContainer;
     typedef std::pair<LfgRewardContainer::const_iterator, LfgRewardContainer::const_iterator> LfgRewardContainerBounds;
     typedef std::map<uint8, LfgDungeonSet> LfgCachedDungeonContainer;
-    typedef std::map<ObjectGuid, LfgAnswer> LfgAnswerContainer;
-    typedef std::map<ObjectGuid, LfgRoleCheck> LfgRoleCheckContainer;
-    typedef std::map<uint32, LfgProposal> LfgProposalContainer;
-    typedef std::map<ObjectGuid, LfgProposalPlayer> LfgProposalPlayerContainer;
-    typedef std::map<ObjectGuid, LfgPlayerBoot> LfgPlayerBootContainer;
+    // LfgAnswerContainer — deleted in Inc-3 C4 (only consumer was LfgPlayerBoot, deleted in C2)
+    // LfgRoleCheckContainer — deleted in Inc-3 C2 (role-check machinery removed)
+    // LfgProposalContainer — deleted in Inc-3 C2 (proposal machinery removed)
+    // LfgProposalPlayerContainer — deleted in Inc-3 C2 (proposal machinery removed)
+    // LfgPlayerBootContainer — deleted in Inc-3 C2 (boot vote machinery removed)
     typedef std::map<ObjectGuid, LfgGroupData> LfgGroupDataContainer;
     typedef std::map<ObjectGuid, LfgPlayerData> LfgPlayerDataContainer;
     typedef std::unordered_map<uint32, LFGDungeonData> LFGDungeonContainer;
@@ -341,54 +229,10 @@ namespace lfg
         uint32 otherQuest;
     };
 
-    // Stores player data related to proposal to join
-    struct LfgProposalPlayer
-    {
-        LfgProposalPlayer() = default;
-        uint8 role{0};                                         ///< Proposed role
-        LfgAnswer accept{LFG_ANSWER_PENDING};                  ///< Accept status (-1 not answer | 0 Not agree | 1 agree)
-        ObjectGuid group;                                      ///< Original group guid. 0 if no original group
-    };
-
-    // Stores group data related to proposal to join
-    struct LfgProposal
-    {
-        LfgProposal(uint32 dungeon = 0):  dungeonId(dungeon)
-        { }
-
-        uint32 id{0};                                          ///< Proposal Id
-        uint32 dungeonId;                                      ///< Dungeon to join
-        LfgProposalState state{LFG_PROPOSAL_INITIATING};       ///< State of the proposal
-        ObjectGuid group;                                      ///< Proposal group (0 if new)
-        ObjectGuid leader;                                     ///< Leader guid.
-        time_t cancelTime{0};                                  ///< Time when we will cancel this proposal
-        uint32 encounters{0};                                  ///< Dungeon Encounters
-        bool isNew{true};                                      ///< Determines if it's new group or not
-        Lfg5Guids queues;                                      ///< Queue Ids to remove/readd
-        LfgGuidList showorder;                                 ///< Show order in update window
-        LfgProposalPlayerContainer players;                    ///< Players data
-    };
-
-    // Stores all rolecheck info of a group that wants to join
-    struct LfgRoleCheck
-    {
-        time_t cancelTime;                                     ///< Time when the rolecheck will fail
-        LfgRolesMap roles;                                     ///< Player selected roles
-        LfgRoleCheckState state;                               ///< State of the rolecheck
-        LfgDungeonSet dungeons;                                ///< Dungeons group is applying for (expanded random dungeons)
-        uint32 rDungeonId;                                     ///< Random Dungeon Id.
-        ObjectGuid leader;                                     ///< Leader of the group
-    };
-
-    // Stores information of a current vote to kick someone from a group
-    struct LfgPlayerBoot
-    {
-        time_t cancelTime;                                     ///< Time left to vote
-        bool inProgress;                                       ///< Vote in progress
-        LfgAnswerContainer votes;                              ///< Player votes (-1 not answer | 0 Not agree | 1 agree)
-        ObjectGuid victim;                                     ///< Player guid to be kicked (can't vote)
-        std::string reason;                                    ///< kick reason
-    };
+    // LfgProposalPlayer — deleted in Inc-3 C2 (proposal machinery removed)
+    // LfgProposal — deleted in Inc-3 C2 (proposal machinery removed)
+    // LfgRoleCheck — deleted in Inc-3 C2 (role-check machinery removed)
+    // LfgPlayerBoot — deleted in Inc-3 C2 (boot vote machinery removed)
 
     struct LFGDungeonData
     {
@@ -421,27 +265,13 @@ namespace lfg
     private:
         LFGMgr();
         ~LFGMgr();
-
-        // pussywizard: RAIDBROWSER
-        typedef std::unordered_map<ObjectGuid /*playerGuid*/, RBEntryInfo> RBEntryInfoMap;
-        typedef std::unordered_map<uint32 /*dungeonId*/, RBEntryInfoMap> RBStoreMap;
-        RBStoreMap RaidBrowserStore[2]; // for 2 factions
-        typedef std::unordered_map<ObjectGuid /*playerGuid*/, uint32 /*dungeonId*/> RBSearchersMap;
-        RBSearchersMap RBSearchersStore[2]; // for 2 factions
-        typedef std::unordered_map<uint32 /*dungeonId*/, WorldPacket> RBCacheMap;
-        RBCacheMap RBCacheStore[2]; // for 2 factions
-        typedef std::unordered_map<ObjectGuid /*guid*/, RBInternalInfo> RBInternalInfoMap;
-        typedef std::unordered_map<uint32 /*dungeonId*/, RBInternalInfoMap> RBInternalInfoMapMap;
-        RBInternalInfoMapMap RBInternalInfoStorePrev[2]; // for 2 factions
-        RBInternalInfoMapMap RBInternalInfoStoreCurr[2]; // for 2 factions
-        typedef std::set<uint32 /*dungeonId*/> RBUsedDungeonsSet; // needs to be ordered
-        RBUsedDungeonsSet RBUsedDungeonsStore[2]; // for 2 factions
+        // RB typedefs/stores (RBEntryInfoMap, RBStoreMap, RaidBrowserStore[2], RBSearchersMap,
+        // RBSearchersStore[2], RBCacheMap, RBCacheStore[2], RBInternalInfoMap,
+        // RBInternalInfoMapMap, RBInternalInfoStorePrev[2], RBInternalInfoStoreCurr[2],
+        // RBUsedDungeonsSet, RBUsedDungeonsStore[2]) — deleted in Inc-3 C3 (Raid Browser retired)
 
     public:
         static LFGMgr* instance();
-
-        // Functions used outside lfg namespace
-        void Update(uint32 diff, uint8 task);
 
         // World.cpp
         /// Finish the dungeon for the given group. All check are performed using internal lfg data
@@ -533,14 +363,7 @@ namespace lfg
         LfgDungeonSet GetRandomAndSeasonalDungeons(uint8 level, uint8 expansion);
         /// Teleport a player to/from selected dungeon
         void TeleportPlayer(Player* player, bool out, WorldLocation const* teleportLocation = nullptr);
-        /// Inits new proposal to boot a player
-        void InitBoot(ObjectGuid gguid, ObjectGuid kicker, ObjectGuid victim, std::string const& reason);
-        /// Updates player boot proposal with new player answer
-        void UpdateBoot(ObjectGuid guid, bool accept);
-        /// Updates proposal to join dungeon with player answer
-        void UpdateProposal(uint32 proposalId, ObjectGuid guid, bool accept);
-        /// Updates the role check with player answer
-        void UpdateRoleCheck(ObjectGuid gguid, ObjectGuid guid = ObjectGuid::Empty, uint8 roles = PLAYER_ROLE_NONE);
+        // InitBoot/UpdateBoot/UpdateProposal — deleted in Inc-3 C2
         /// Sets player lfg roles
         void SetRoles(ObjectGuid guid, uint8 roles);
         /// Sets player lfr comment
@@ -551,19 +374,9 @@ namespace lfg
         void LeaveLfg(ObjectGuid guid);
         /// pussywizard: cleans all queues' data
         void LeaveAllLfgQueues(ObjectGuid guid, bool allowgroup, ObjectGuid groupguid = ObjectGuid::Empty);
-        /// pussywizard: Raid Browser
-        void JoinRaidBrowser(Player* player, uint8 roles, LfgDungeonSet& dungeons, std::string comment);
-        void LeaveRaidBrowser(ObjectGuid guid);
-        void LfrSearchAdd(Player* p, uint32 dungeonId);
-        void LfrSearchRemove(Player* p);
-        void SendRaidBrowserCachedList(Player* player, uint32 dungeonId);
-        void UpdateRaidBrowser(uint32 diff);
-        void LfrSetComment(Player* p, std::string comment);
-        void SendRaidBrowserJoinedPacket(Player* p, LfgDungeonSet& dungeons, std::string comment);
-        void RBPacketAppendGroup(const RBInternalInfo& info, ByteBuffer& buffer);
-        void RBPacketAppendPlayer(const RBInternalInfo& info, ByteBuffer& buffer);
-        void RBPacketBuildDifference(WorldPacket& differencePacket, uint32 dungeonId, uint32 deletedCounter, ByteBuffer& buffer_deleted, uint32 groupCounter, ByteBuffer& buffer_groups, uint32 playerCounter, ByteBuffer& buffer_players);
-        void RBPacketBuildFull(WorldPacket& fullPacket, uint32 dungeonId, RBInternalInfoMap& infoMap);
+        // JoinRaidBrowser/LeaveRaidBrowser/LfrSearchAdd/LfrSearchRemove/SendRaidBrowserCachedList/
+        // UpdateRaidBrowser/LfrSetComment/SendRaidBrowserJoinedPacket/RBPacket* —
+        // deleted in Inc-3 C3 (Raid Browser retired; NOT LFR)
 
         // LfgQueue
         /// Get last lfg state (NONE, DUNGEON or FINISHED_DUNGEON)
@@ -572,12 +385,7 @@ namespace lfg
         bool IsLfgGroup(ObjectGuid guid);
         /// Gets the player count of given group
         uint8 GetPlayerCount(ObjectGuid guid);
-        /// Add a new Proposal
-        uint32 AddProposal(LfgProposal& proposal);
-        /// Checks if all players are queued
-        bool AllQueued(Lfg5Guids const& check);
-        /// Checks if given roles match, modifies given roles map with new roles
-        static uint8 CheckGroupRoles(LfgRolesMap& groles);
+        // AddProposal — deleted in Inc-3 C2
         /// Checks if given players are ignoring each other
         static bool HasIgnore(ObjectGuid guid1, ObjectGuid guid2);
         /// Sends queue status to player
@@ -605,45 +413,40 @@ namespace lfg
         void SetSelectedDungeons(ObjectGuid guid, LfgDungeonSet const& dungeons);
         void SetLockedDungeons(ObjectGuid guid, LfgLockMap const& lock);
         void DecreaseKicksLeft(ObjectGuid guid);
-        void SetCanOverrideRBState(ObjectGuid guid, bool val);
-        void GetCompatibleDungeons(LfgDungeonSet& dungeons, LfgGuidSet const& players, LfgLockPartyMap& lockMap, uint32 randomDungeonId = 0);
+        // SetCanOverrideRBState — deleted in Inc-3 C3 (Raid Browser retired)
         void _SaveToDB(ObjectGuid guid);
 
         // Proposals
-        void RemoveProposal(LfgProposalContainer::iterator itProposal, LfgUpdateType type);
-        void MakeNewGroup(LfgProposal const& proposal);
+        // RemoveProposal — deleted in Inc-3 C2
+        // MakeNewGroup — deleted in Inc-3 C2
 
         // Generic
-        LFGQueue& GetQueue(ObjectGuid guid);
         LfgDungeonSet const& GetDungeonsByRandom(uint32 randomdungeon);
         LfgType GetDungeonType(uint32 dungeon);
 
-        void SendLfgBootProposalUpdate(ObjectGuid guid, LfgPlayerBoot const& boot);
+        // SendLfgBootProposalUpdate — deleted in Inc-3 C2
         void SendLfgJoinResult(ObjectGuid guid, LfgJoinResultData const& data);
-        void SendLfgRoleChosen(ObjectGuid guid, ObjectGuid pguid, uint8 roles);
-        void SendLfgRoleCheckUpdate(ObjectGuid guid, LfgRoleCheck const& roleCheck);
+        // SendLfgRoleChosen — deleted in Inc-3 C2
+        // SendLfgRoleCheckUpdate — deleted in Inc-3 C2
         void SendLfgUpdateParty(ObjectGuid guid, LfgUpdateData const& data);
         void SendLfgUpdatePlayer(ObjectGuid guid, LfgUpdateData const& data);
-        void SendLfgUpdateProposal(ObjectGuid guid, LfgProposal const& proposal);
+        // SendLfgUpdateProposal — deleted in Inc-3 C2
 
         LfgGuidSet const& GetPlayers(ObjectGuid guid);
 
         // General variables
-        uint32 m_lfgProposalId;                            ///< used as internal counter for proposals
+        // m_lfgProposalId — deleted in Inc-3 C2 (used only by AddProposal, now removed)
+        // m_raidBrowserUpdateTimer[2] — deleted in Inc-3 C3 (Raid Browser retired)
+        // m_raidBrowserLastUpdatedDungeonId[2] — deleted in Inc-3 C3
         uint32 m_options;                                  ///< Stores config options
-        uint32 lastProposalId;                             ///< pussywizard, store it here because of splitting LFGMgr update into tasks
-        uint32 m_raidBrowserUpdateTimer[2];                ///< pussywizard
-        uint32 m_raidBrowserLastUpdatedDungeonId[2];       ///< pussywizard: for 2 factions
 
-        LfgQueueContainer QueuesStore;                     ///< Queues
         LfgCachedDungeonContainer CachedDungeonMapStore;   ///< Stores all dungeons by groupType
         // Reward System
         LfgRewardContainer RewardMapStore;                 ///< Stores rewards for random dungeons
         LFGDungeonContainer  LfgDungeonStore;
-        // Rolecheck - Proposal - Vote Kicks
-        LfgRoleCheckContainer RoleChecksStore;             ///< Current Role checks
-        LfgProposalContainer ProposalsStore;               ///< Current Proposals
-        LfgPlayerBootContainer BootsStore;                 ///< Current player kicks
+        // RoleChecksStore — deleted in Inc-3 C2 (role-check machinery removed)
+        // ProposalsStore — deleted in Inc-3 C2 (proposal machinery removed)
+        // BootsStore — deleted in Inc-3 C2 (boot vote machinery removed)
         LfgPlayerDataContainer PlayersStore;               ///< Player data
         LfgGroupDataContainer GroupsStore;                 ///< Group data
         bool m_Testing;

@@ -62,11 +62,11 @@ struct TradeStatusInfo;
 namespace lfg
 {
     struct LfgJoinResultData;
-    struct LfgPlayerBoot;
-    struct LfgProposal;
+    // LfgPlayerBoot — deleted in Inc-3 C2 (boot vote machinery removed)
+    // LfgProposal — deleted in Inc-3 C2 (proposal machinery removed)
     struct LfgQueueStatusData;
     struct LfgPlayerRewardData;
-    struct LfgRoleCheck;
+    // LfgRoleCheck — deleted in Inc-3 C2 (role-check machinery removed)
     struct LfgUpdateData;
 }
 
@@ -1054,24 +1054,24 @@ public:                                                 // opcodes handlers
     void HandleLfgPartyLockInfoRequestOpcode(WorldPacket& recvData);
     void HandleLfgJoinOpcode(WorldPackets::LFG::LFGJoin& lfgJoin);
     void HandleLfgLeaveOpcode(WorldPackets::LFG::LFGLeave& lfgleave);
-    void HandleLfgSetRolesOpcode(WorldPacket& recvData);
-    void HandleLfgProposalResultOpcode(WorldPacket& recvData);
-    void HandleLfgSetBootVoteOpcode(WorldPacket& recvData);
+    // HandleLfgSetRolesOpcode — deleted in Inc-3 C2
+    // HandleLfgProposalResultOpcode — deleted in Inc-3 C2
+    // HandleLfgSetBootVoteOpcode — deleted in Inc-3 C2
     void HandleLfgTeleportOpcode(WorldPacket& recvData);
-    void HandleLfrSearchJoinOpcode(WorldPacket& recvData);
-    void HandleLfrSearchLeaveOpcode(WorldPacket& recvData);
+    // HandleLfrSearchJoinOpcode — deleted in Inc-3 C3 (Raid Browser retired)
+    // HandleLfrSearchLeaveOpcode — deleted in Inc-3 C3
     void HandleLfgGetStatus(WorldPacket& recvData);
 
     void SendLfgUpdatePlayer(lfg::LfgUpdateData const& updateData);
     void SendLfgUpdateParty(lfg::LfgUpdateData const& updateData);
-    void SendLfgRoleChosen(ObjectGuid guid, uint8 roles);
-    void SendLfgRoleCheckUpdate(lfg::LfgRoleCheck const& pRoleCheck);
-    void SendLfgLfrList(bool update);
+    // SendLfgRoleChosen — deleted in Inc-3 C2
+    // SendLfgRoleCheckUpdate — deleted in Inc-3 C2
+    // SendLfgLfrList — deleted in Inc-3 C3 (Raid Browser retired)
     void SendLfgJoinResult(lfg::LfgJoinResultData const& joinData);
     void SendLfgQueueStatus(lfg::LfgQueueStatusData const& queueData);
     void SendLfgPlayerReward(lfg::LfgPlayerRewardData const& lfgPlayerRewardData);
-    void SendLfgBootProposalUpdate(lfg::LfgPlayerBoot const& boot);
-    void SendLfgUpdateProposal(lfg::LfgProposal const& proposal);
+    // SendLfgBootProposalUpdate — deleted in Inc-3 C2
+    // SendLfgUpdateProposal — deleted in Inc-3 C2
     void SendLfgDisabled();
     void SendLfgOfferContinue(uint32 dungeonEntry);
     void SendLfgTeleportError(uint8 err);
