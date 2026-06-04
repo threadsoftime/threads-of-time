@@ -167,13 +167,12 @@ fn test_schema_literal_exact() {
 /// This locks in parity with Python str.format(): the LLM sees clean JSON examples
 /// like `{"kind": "action"}`, not corrupted `{{"kind": "action"}}`.
 ///
-/// Uses the Python template at the sibling `threads-of-time` repo path; skips gracefully
-/// if the file is not present in this build environment.
+/// Uses the in-crate `brain-rs/prompts/decide_v1.txt` template.
 #[test]
 fn test_user_prompt_with_real_template_no_double_braces() {
     let template_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../../threads-of-time/tot/brain/prompts/decide_v1.txt"
+        "/prompts/decide_v1.txt"
     );
     let tmpl = match std::fs::read_to_string(template_path) {
         Ok(s) => s,

@@ -1,0 +1,9 @@
+# Rust build output
+/target/
+**/target/
+
+# Python virtualenvs + caches (legacy sidecar tooling)
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/

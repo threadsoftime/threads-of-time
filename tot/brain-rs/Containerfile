@@ -22,8 +22,8 @@
 # musl-tools + clang are still included for rusqlite's bundled SQLite compile.
 #
 # build.rs embeds SQL migrations and the prompt template via include_str!.
-# The migration files live at tot/brain/migrations/ and the prompt at
-# tot/brain/prompts/ — both are COPY'd into the build context in Stage 2.
+# The migration files live at tot/brain-rs/migrations/ and the prompt at
+# tot/brain-rs/prompts/ — both are COPY'd into the build context in Stage 2.
 #
 # Build on Heimdal (from tot/ workspace root):
 #   podman build -f brain-rs/Containerfile -t localhost/brain-sidecar:rust-<date> tot/
@@ -91,14 +91,13 @@ RUN mkdir -p brain-rs/src \
 # ── Stage 2: real source build ────────────────────────────────────────────────
 
 # Copy the build script and real Rust sources.
-# Also copy the brain/ migrations and prompt template referenced by include_str!
-# in src/state.rs ("../../brain/migrations/...") and src/app.rs
-# ("../../brain/prompts/decide_v1.txt"). These paths resolve relative to the
-# source file, which means relative to tot/ in the build context.
+# The migration SQL and prompt template are now in-crate (brain-rs/migrations,
+# brain-rs/prompts), referenced by include_str! in src/state.rs ("../migrations/...")
+# and src/app.rs ("../prompts/decide_v1.txt").
 COPY brain-rs/build.rs               ./brain-rs/build.rs
 COPY brain-rs/src/                   ./brain-rs/src/
-COPY brain/migrations/               ./brain/migrations/
-COPY brain/prompts/                  ./brain/prompts/
+COPY brain-rs/migrations/            ./brain-rs/migrations/
+COPY brain-rs/prompts/               ./brain-rs/prompts/
 
 # CRITICAL (T32 anti-stub fix — kb_87a7eade item 45):
 # Touch all .rs files AFTER COPY so Cargo's fingerprint detects them as

@@ -1400,11 +1400,10 @@ mod tests {
     /// of the form `{name}` with alphabetic name.
     #[test]
     fn test_real_template_rendered_has_no_double_braces_or_unresolved_placeholders() {
-        // CARGO_MANIFEST_DIR = <repo>/tot/brain-rs
-        // Python template lives in a sibling repo three levels up then into threads-of-time.
+        // CARGO_MANIFEST_DIR = <repo>/tot/brain-rs; the template now lives in-crate.
         let template_path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../threads-of-time/tot/brain/prompts/decide_v1.txt"
+            "/prompts/decide_v1.txt"
         );
         // If the template is not reachable from the test environment, skip gracefully.
         let tmpl = match std::fs::read_to_string(template_path) {

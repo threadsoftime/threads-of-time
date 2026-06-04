@@ -8,9 +8,9 @@
 // the embedded files change.
 fn main() {
     // Migrations embedded in src/state.rs
-    println!("cargo:rerun-if-changed=../brain/migrations/0001_living_bots.sql");
-    println!("cargo:rerun-if-changed=../brain/migrations/0002_add_last_event_id.sql");
-    println!("cargo:rerun-if-changed=../brain/migrations/0004_subset_tier.sql");
+    println!("cargo:rerun-if-changed=migrations/0001_living_bots.sql");
+    println!("cargo:rerun-if-changed=migrations/0002_add_last_event_id.sql");
+    println!("cargo:rerun-if-changed=migrations/0004_subset_tier.sql");
     // Prompt template embedded in src/app.rs (Phase 4)
-    println!("cargo:rerun-if-changed=../brain/prompts/decide_v1.txt");
+    println!("cargo:rerun-if-changed=prompts/decide_v1.txt");
 }

@@ -44,13 +44,16 @@ podman build \
   -f "${REPO}/apps/docker/Dockerfile" \
   "${REPO}"
 
-echo "== [3/4] harness brain memory =="
+echo "== [3/4] harness brain memory (Rust -rs crates) =="
+# These are the Rust rewrites (live on Heimdal since Phases 16-18). The -rs
+# Containerfiles build from the workspace root context (tot/), not tot/${svc}/.
+# Image NAMES stay harness/brain/memory so deploy quadlets + compose.yml are unchanged.
 for svc in harness brain memory; do
-  echo "   -- ${svc}"
+  echo "   -- ${svc} (from ${svc}-rs)"
   podman build \
     -t "${NS}/${svc}:${VERSION}" \
-    -f "${REPO}/tot/${svc}/Containerfile" \
-    "${REPO}/tot/${svc}"
+    -f "${REPO}/tot/${svc}-rs/Containerfile" \
+    "${REPO}/tot"
 done
 
 echo "== [4/4] push=${PUSH} =="

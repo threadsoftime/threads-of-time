@@ -12,8 +12,39 @@ use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+
+// ── canonicalize ──────────────────────────────────────────────────────────────
+
+/// Recursively rebuild a `Value` with object keys sorted at every nesting level.
+///
+/// This is the Rust equivalent of Python's `json.dumps(body, sort_keys=True)`:
+/// - Object keys are sorted lexicographically at EVERY depth.
+/// - Array element ORDER is preserved (arrays are NOT sorted).
+/// - Scalar values (bool, null, number, string) are cloned byte-for-byte.
+///
+/// This makes `sha256_args` produce the same digest regardless of whether
+/// `serde_json` is compiled with `preserve_order` (IndexMap) or without
+/// (BTreeMap). With `preserve_order` active, `Value::Object` retains
+/// insertion order on serialization, which diverges from Python's
+/// `sort_keys=True` output. Canonicalization restores parity.
+fn canonicalize(v: &Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            let mut sorted: Map<String, Value> = Map::new();
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            for k in keys {
+                sorted.insert(k.clone(), canonicalize(&map[k]));
+            }
+            Value::Object(sorted)
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(canonicalize).collect()),
+        // Scalars: bool, null, number, string — clone as-is.
+        scalar => scalar.clone(),
+    }
+}
 
 // ── sha256_args ───────────────────────────────────────────────────────────────
 
@@ -22,15 +53,17 @@ use sha2::{Digest, Sha256};
 /// MUST equal Python:
 /// `hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",",":")).encode()).hexdigest()`
 ///
-/// serde_json's `Value::Object` uses BTreeMap (sorted keys); `to_string()` emits
-/// compact JSON with no spaces — identical to Python's `sort_keys=True, separators=(",",":")`.
+/// `canonicalize` sorts object keys recursively before serialization, matching
+/// Python's `sort_keys=True` at every nesting depth. This is robust whether
+/// `serde_json` is compiled with `preserve_order` (IndexMap) or without (BTreeMap):
+/// the canonical form is always sorted, so the digest is always stable.
 ///
-/// NOTE: `body` must already be a `serde_json::Value`. Python's `json.dumps(default=str)`
-/// coerced non-JSON-native types (e.g. `datetime`) to strings before hashing, so callers
-/// must serialize such values to strings before constructing `args_body`, or the digest
-/// will diverge from Python.
+/// NOTE: Python's `json.dumps(default=str)` coerced non-JSON-native types (e.g.
+/// `datetime`) to strings before hashing, so callers must serialize such values
+/// to strings before constructing `args_body`, or the digest will diverge from
+/// Python.
 pub fn sha256_args(body: &Value) -> String {
-    let canonical = body.to_string();
+    let canonical = canonicalize(body).to_string();
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
     format!("{:x}", hasher.finalize())
@@ -155,7 +188,7 @@ mod tests {
 
     #[test]
     fn sha256_empty_object() {
-        // Python: hashlib.sha256(json.dumps({}, sort_keys=True, separators=(",",":")).encode()).hexdigest()
+        // python3 -c 'import hashlib,json; print(hashlib.sha256(json.dumps({}, sort_keys=True, separators=(",",":")).encode()).hexdigest())'
         assert_eq!(
             sha256_args(&json!({})),
             "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
@@ -164,9 +197,12 @@ mod tests {
 
     #[test]
     fn sha256_b1_a2_sorted() {
-        // Python sorts keys: {"a":2,"b":1}
+        // Python sorts keys: json.dumps({"b":1,"a":2}, sort_keys=True, ...) → '{"a":2,"b":1}'
+        // python3 -c 'import hashlib,json; print(hashlib.sha256(json.dumps({"b":1,"a":2}, sort_keys=True, separators=(",",":")).encode()).hexdigest())'
+        // Also exercises canonicalize() on a Value built from wire JSON (insertion order).
+        let wire: Value = serde_json::from_str(r#"{"b":1,"a":2}"#).unwrap();
         assert_eq!(
-            sha256_args(&json!({"b": 1, "a": 2})),
+            sha256_args(&wire),
             "d3626ac30a87e6f7a6428233b3c68299976865fa5508e4267c5415c76af7a772"
         );
     }
@@ -175,10 +211,38 @@ mod tests {
     fn sha256_float_1_0() {
         // Python: json.dumps({"x":1.0}, ...) → '{"x":1.0}'
         // serde_json: json!({"x": 1.0_f64}) → '{"x":1.0}' (preserves trailing .0)
-        // Expected: bf32f56236899e13ef54db875d136c6cbcc65244464829c54911aa9069b0ae25
+        // python3 -c 'import hashlib,json; print(hashlib.sha256(json.dumps({"x":1.0}, sort_keys=True, separators=(",",":")).encode()).hexdigest())'
         assert_eq!(
             sha256_args(&json!({"x": 1.0_f64})),
             "bf32f56236899e13ef54db875d136c6cbcc65244464829c54911aa9069b0ae25"
+        );
+    }
+
+    #[test]
+    fn sha256_nested_objects_sorted_recursively() {
+        // Regression: canonicalize must sort keys at EVERY nesting level, not
+        // just the top level. Python's sort_keys=True is recursive.
+        //
+        // Canonical string: '{"a":{"c":3,"d":4},"b":1}'
+        // python3 -c 'import hashlib,json; print(hashlib.sha256(json.dumps({"b":1,"a":{"d":4,"c":3}}, sort_keys=True, separators=(",",":")).encode()).hexdigest())'
+        let wire: Value = serde_json::from_str(r#"{"b":1,"a":{"d":4,"c":3}}"#).unwrap();
+        assert_eq!(
+            sha256_args(&wire),
+            "943d56ce0b02b80a8afcd12d849426226b68f2d8cd2840af8f6f93067f14c360"
+        );
+    }
+
+    #[test]
+    fn sha256_array_preserves_order_but_object_keys_sorted() {
+        // Arrays keep their element order (Python does NOT sort array contents);
+        // object keys nested inside array elements are still sorted.
+        //
+        // Canonical string: '{"arr":[{"x":1,"y":2}]}'
+        // python3 -c 'import hashlib,json; print(hashlib.sha256(json.dumps({"arr":[{"y":2,"x":1}]}, sort_keys=True, separators=(",",":")).encode()).hexdigest())'
+        let wire: Value = serde_json::from_str(r#"{"arr":[{"y":2,"x":1}]}"#).unwrap();
+        assert_eq!(
+            sha256_args(&wire),
+            "e3ca0879bddffc9b8f5e08dbb44d9c90238d375daf4b798a0cc2dfbb4e6ff3a2"
         );
     }
 
