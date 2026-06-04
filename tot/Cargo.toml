@@ -9,6 +9,7 @@ members = [
     "lfg-matchmaker",
     "memory-rs",
     "slice-host",
+    "tot-harness-client",
     "tot-schema-transform",
 ]
 
