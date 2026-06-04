@@ -50,7 +50,7 @@ void BuildPartyLockDungeonBlock(WorldPacket& data, const lfg::LfgLockPartyMap& l
 
 void WorldSession::HandleLfgJoinOpcode(WorldPackets::LFG::LFGJoin& packet)
 {
-    if (!sLFGMgr->isOptionEnabled(lfg::LFG_OPTION_ENABLE_DUNGEON_FINDER | lfg::LFG_OPTION_ENABLE_RAID_BROWSER | lfg::LFG_OPTION_ENABLE_SEASONAL_BOSSES) ||
+    if (!sLFGMgr->isOptionEnabled(lfg::LFG_OPTION_ENABLE_DUNGEON_FINDER | lfg::LFG_OPTION_ENABLE_SEASONAL_BOSSES) ||
         (GetPlayer()->GetGroup() && GetPlayer()->GetGroup()->GetLeaderGUID() != GetPlayer()->GetGUID() &&
          (GetPlayer()->GetGroup()->GetMembersCount() == MAXGROUPSIZE || !GetPlayer()->GetGroup()->isLFGGroup())))
         return;
@@ -137,7 +137,7 @@ void WorldSession::HandleLfgSetCommentOpcode(WorldPacket&  recvData)
     LOG_DEBUG("network", "CMSG_LFG_SET_COMMENT [{}] comment: {}", guid.ToString(), comment);
 
     sLFGMgr->SetComment(GetPlayer()->GetGUID(), comment);
-    sLFGMgr->LfrSetComment(GetPlayer(), comment);
+    // LfrSetComment deleted in Inc-3 C3 (Raid Browser retired)
 }
 
 // HandleLfgSetBootVoteOpcode — deleted in Inc-3 C2 (boot machinery removed)
@@ -264,21 +264,8 @@ void WorldSession::HandleLfgPartyLockInfoRequestOpcode(WorldPacket&  /*recvData*
     SendPacket(&data);
 }
 
-void WorldSession::HandleLfrSearchJoinOpcode(WorldPacket& recvData)
-{
-    uint32 dungeonId;
-    recvData >> dungeonId;
-    dungeonId = (dungeonId & 0x00FFFFFF); // remove the type from the dungeon entry
-    sLFGMgr->LfrSearchAdd(GetPlayer(), dungeonId);
-    sLFGMgr->SendRaidBrowserCachedList(GetPlayer(), dungeonId);
-}
-
-void WorldSession::HandleLfrSearchLeaveOpcode(WorldPacket& recvData)
-{
-    uint32 dungeonId;
-    recvData >> dungeonId;
-    sLFGMgr->LfrSearchRemove(GetPlayer());
-}
+// HandleLfrSearchJoinOpcode — deleted in Inc-3 C3 (Raid Browser retired; NOT LFR)
+// HandleLfrSearchLeaveOpcode — deleted in Inc-3 C3
 
 void WorldSession::HandleLfgGetStatus(WorldPacket& /*recvData*/)
 {
@@ -460,13 +447,7 @@ void WorldSession::SendLfgPlayerReward(lfg::LfgPlayerRewardData const& rewardDat
 // SendLfgBootProposalUpdate — deleted in Inc-3 C2 (boot machinery removed)
 // SendLfgUpdateProposal — deleted in Inc-3 C2 (proposal machinery removed)
 
-void WorldSession::SendLfgLfrList(bool update)
-{
-    LOG_DEBUG("network", "SMSG_LFG_LFR_LIST [{}] update: {}", GetPlayer()->GetGUID().ToString(), update ? 1 : 0);
-    WorldPacket data(SMSG_LFG_UPDATE_SEARCH, 1);
-    data << uint8(update);                                 // In Lfg Queue?
-    SendPacket(&data);
-}
+// SendLfgLfrList — deleted in Inc-3 C3 (Raid Browser retired)
 
 void WorldSession::SendLfgDisabled()
 {

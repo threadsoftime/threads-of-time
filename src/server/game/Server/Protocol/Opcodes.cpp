@@ -990,8 +990,8 @@ void OpcodeTable::Initialize()
     /*0x35B*/ DEFINE_SERVER_OPCODE_HANDLER(SMSG_ARENA_TEAM_STATS,                                   STATUS_NEVER);
     /*0x35C*/ DEFINE_HANDLER(CMSG_LFG_JOIN,                                                         STATUS_LOGGEDIN,   PROCESS_THREADUNSAFE,   &WorldSession::HandleLfgJoinOpcode                      );
     /*0x35D*/ DEFINE_HANDLER(CMSG_LFG_LEAVE,                                                        STATUS_LOGGEDIN,   PROCESS_THREADUNSAFE,   &WorldSession::HandleLfgLeaveOpcode                     );
-    /*0x35E*/ DEFINE_HANDLER(CMSG_SEARCH_LFG_JOIN,                                                  STATUS_LOGGEDIN,   PROCESS_THREADUNSAFE,   &WorldSession::HandleLfrSearchJoinOpcode                );
-    /*0x35F*/ DEFINE_HANDLER(CMSG_SEARCH_LFG_LEAVE,                                                 STATUS_LOGGEDIN,   PROCESS_THREADUNSAFE,   &WorldSession::HandleLfrSearchLeaveOpcode               );
+    /*0x35E*/ DEFINE_HANDLER(CMSG_SEARCH_LFG_JOIN,                                                  STATUS_NEVER,      PROCESS_INPLACE,        &WorldSession::Handle_NULL                              ); // Inc-3 C3: Raid Browser handler deleted
+    /*0x35F*/ DEFINE_HANDLER(CMSG_SEARCH_LFG_LEAVE,                                                 STATUS_NEVER,      PROCESS_INPLACE,        &WorldSession::Handle_NULL                              ); // Inc-3 C3: Raid Browser handler deleted
     /*0x360*/ DEFINE_SERVER_OPCODE_HANDLER(SMSG_UPDATE_LFG_LIST,                                    STATUS_NEVER);
     /*0x361*/ DEFINE_SERVER_OPCODE_HANDLER(SMSG_LFG_PROPOSAL_UPDATE,                                STATUS_NEVER);
     /*0x362*/ DEFINE_HANDLER(CMSG_LFG_PROPOSAL_RESULT,                                              STATUS_NEVER,      PROCESS_INPLACE,        &WorldSession::Handle_NULL                              ); // Inc-3 C2: proposal handler deleted

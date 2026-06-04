@@ -1058,15 +1058,15 @@ public:                                                 // opcodes handlers
     // HandleLfgProposalResultOpcode — deleted in Inc-3 C2
     // HandleLfgSetBootVoteOpcode — deleted in Inc-3 C2
     void HandleLfgTeleportOpcode(WorldPacket& recvData);
-    void HandleLfrSearchJoinOpcode(WorldPacket& recvData);
-    void HandleLfrSearchLeaveOpcode(WorldPacket& recvData);
+    // HandleLfrSearchJoinOpcode — deleted in Inc-3 C3 (Raid Browser retired)
+    // HandleLfrSearchLeaveOpcode — deleted in Inc-3 C3
     void HandleLfgGetStatus(WorldPacket& recvData);
 
     void SendLfgUpdatePlayer(lfg::LfgUpdateData const& updateData);
     void SendLfgUpdateParty(lfg::LfgUpdateData const& updateData);
     // SendLfgRoleChosen — deleted in Inc-3 C2
     // SendLfgRoleCheckUpdate — deleted in Inc-3 C2
-    void SendLfgLfrList(bool update);
+    // SendLfgLfrList — deleted in Inc-3 C3 (Raid Browser retired)
     void SendLfgJoinResult(lfg::LfgJoinResultData const& joinData);
     void SendLfgQueueStatus(lfg::LfgQueueStatusData const& queueData);
     void SendLfgPlayerReward(lfg::LfgPlayerRewardData const& lfgPlayerRewardData);
