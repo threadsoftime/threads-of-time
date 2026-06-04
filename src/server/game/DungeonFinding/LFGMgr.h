@@ -129,18 +129,7 @@ namespace lfg
         LFG_ROLECHECK_NO_ROLE                        = 6       // Someone selected no role
     };
 
-    enum LfgUpdateFlag // pussywizard: for raid browser
-    {
-        LFG_UPDATE_FLAG_NONE          = 0x00,
-        LFG_UPDATE_FLAG_CHARACTERINFO = 0x01,
-        LFG_UPDATE_FLAG_COMMENT       = 0x02,
-        LFG_UPDATE_FLAG_GROUPLEADER   = 0x04,
-        LFG_UPDATE_FLAG_GROUPGUID     = 0x08,
-        LFG_UPDATE_FLAG_ROLES         = 0x10,
-        LFG_UPDATE_FLAG_AREA          = 0x20,
-        LFG_UPDATE_FLAG_STATUS        = 0x40,
-        LFG_UPDATE_FLAG_BINDED        = 0x80
-    };
+    // LfgUpdateFlag — deleted in Inc-3 C4 (only consumer was Raid Browser machinery, deleted in C3)
 
     enum LfgSeasonalDungeons
     {
@@ -156,20 +145,20 @@ namespace lfg
     // Forward declaration (just to have all typedef together)
     struct LFGDungeonData;
     struct LfgReward;
-    struct LfgQueueInfo;
-    struct LfgRoleCheck;
-    struct LfgProposal;
-    struct LfgProposalPlayer;
-    struct LfgPlayerBoot;
+    // LfgQueueInfo — unused; forward decl only, no definition (Inc-3 C4 cleanup)
+    // LfgRoleCheck — deleted in Inc-3 C2 (role-check machinery removed)
+    // LfgProposal — deleted in Inc-3 C2 (proposal machinery removed)
+    // LfgProposalPlayer — deleted in Inc-3 C2 (proposal machinery removed)
+    // LfgPlayerBoot — deleted in Inc-3 C2 (boot vote machinery removed)
 
     typedef std::multimap<uint32, LfgReward const*> LfgRewardContainer;
     typedef std::pair<LfgRewardContainer::const_iterator, LfgRewardContainer::const_iterator> LfgRewardContainerBounds;
     typedef std::map<uint8, LfgDungeonSet> LfgCachedDungeonContainer;
-    typedef std::map<ObjectGuid, LfgAnswer> LfgAnswerContainer;
-    typedef std::map<ObjectGuid, LfgRoleCheck> LfgRoleCheckContainer;
-    typedef std::map<uint32, LfgProposal> LfgProposalContainer;
-    typedef std::map<ObjectGuid, LfgProposalPlayer> LfgProposalPlayerContainer;
-    typedef std::map<ObjectGuid, LfgPlayerBoot> LfgPlayerBootContainer;
+    // LfgAnswerContainer — deleted in Inc-3 C4 (only consumer was LfgPlayerBoot, deleted in C2)
+    // LfgRoleCheckContainer — deleted in Inc-3 C2 (role-check machinery removed)
+    // LfgProposalContainer — deleted in Inc-3 C2 (proposal machinery removed)
+    // LfgProposalPlayerContainer — deleted in Inc-3 C2 (proposal machinery removed)
+    // LfgPlayerBootContainer — deleted in Inc-3 C2 (boot vote machinery removed)
     typedef std::map<ObjectGuid, LfgGroupData> LfgGroupDataContainer;
     typedef std::map<ObjectGuid, LfgPlayerData> LfgPlayerDataContainer;
     typedef std::unordered_map<uint32, LFGDungeonData> LFGDungeonContainer;
@@ -240,54 +229,10 @@ namespace lfg
         uint32 otherQuest;
     };
 
-    // Stores player data related to proposal to join
-    struct LfgProposalPlayer
-    {
-        LfgProposalPlayer() = default;
-        uint8 role{0};                                         ///< Proposed role
-        LfgAnswer accept{LFG_ANSWER_PENDING};                  ///< Accept status (-1 not answer | 0 Not agree | 1 agree)
-        ObjectGuid group;                                      ///< Original group guid. 0 if no original group
-    };
-
-    // Stores group data related to proposal to join
-    struct LfgProposal
-    {
-        LfgProposal(uint32 dungeon = 0):  dungeonId(dungeon)
-        { }
-
-        uint32 id{0};                                          ///< Proposal Id
-        uint32 dungeonId;                                      ///< Dungeon to join
-        LfgProposalState state{LFG_PROPOSAL_INITIATING};       ///< State of the proposal
-        ObjectGuid group;                                      ///< Proposal group (0 if new)
-        ObjectGuid leader;                                     ///< Leader guid.
-        time_t cancelTime{0};                                  ///< Time when we will cancel this proposal
-        uint32 encounters{0};                                  ///< Dungeon Encounters
-        bool isNew{true};                                      ///< Determines if it's new group or not
-        Lfg5Guids queues;                                      ///< Queue Ids to remove/readd
-        LfgGuidList showorder;                                 ///< Show order in update window
-        LfgProposalPlayerContainer players;                    ///< Players data
-    };
-
-    // Stores all rolecheck info of a group that wants to join
-    struct LfgRoleCheck
-    {
-        time_t cancelTime;                                     ///< Time when the rolecheck will fail
-        LfgRolesMap roles;                                     ///< Player selected roles
-        LfgRoleCheckState state;                               ///< State of the rolecheck
-        LfgDungeonSet dungeons;                                ///< Dungeons group is applying for (expanded random dungeons)
-        uint32 rDungeonId;                                     ///< Random Dungeon Id.
-        ObjectGuid leader;                                     ///< Leader of the group
-    };
-
-    // Stores information of a current vote to kick someone from a group
-    struct LfgPlayerBoot
-    {
-        time_t cancelTime;                                     ///< Time left to vote
-        bool inProgress;                                       ///< Vote in progress
-        LfgAnswerContainer votes;                              ///< Player votes (-1 not answer | 0 Not agree | 1 agree)
-        ObjectGuid victim;                                     ///< Player guid to be kicked (can't vote)
-        std::string reason;                                    ///< kick reason
-    };
+    // LfgProposalPlayer — deleted in Inc-3 C2 (proposal machinery removed)
+    // LfgProposal — deleted in Inc-3 C2 (proposal machinery removed)
+    // LfgRoleCheck — deleted in Inc-3 C2 (role-check machinery removed)
+    // LfgPlayerBoot — deleted in Inc-3 C2 (boot vote machinery removed)
 
     struct LFGDungeonData
     {

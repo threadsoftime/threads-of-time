@@ -62,11 +62,11 @@ struct TradeStatusInfo;
 namespace lfg
 {
     struct LfgJoinResultData;
-    struct LfgPlayerBoot;
-    struct LfgProposal;
+    // LfgPlayerBoot — deleted in Inc-3 C2 (boot vote machinery removed)
+    // LfgProposal — deleted in Inc-3 C2 (proposal machinery removed)
     struct LfgQueueStatusData;
     struct LfgPlayerRewardData;
-    struct LfgRoleCheck;
+    // LfgRoleCheck — deleted in Inc-3 C2 (role-check machinery removed)
     struct LfgUpdateData;
 }
 
