@@ -35,6 +35,13 @@ impl TokenStore {
     }
 }
 
+impl tot_mcp_bearer_auth::TokenLookup for TokenStore {
+    type Record = crate::config::TokenRecord;
+    fn lookup(&self, token: &str) -> Option<&Self::Record> {
+        self.find(token)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum AuthError {
     #[error("unauthorized")]
