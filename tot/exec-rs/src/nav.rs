@@ -71,7 +71,7 @@ pub async fn find_path(
         .call(
             "nav.find_path",
             json!({
-                "bot_guid": bot_guid as i64,
+                "bot_guid": bot_guid,
                 "dest_x": dest.x,
                 "dest_y": dest.y,
                 "dest_z": dest.z,

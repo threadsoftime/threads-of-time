@@ -692,7 +692,6 @@ name = "exec-rs"
 version = "0.1.0"
 dependencies = [
  "axum 0.7.9",
- "reqwest 0.12.28",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
