@@ -159,4 +159,37 @@ mod tests {
         assert!((score_neg - score_zero).abs() < 1e-12,
             "salience -0.5 should clamp to 0; neg={score_neg} zero={score_zero}");
     }
+
+    /// A corrupt zero-norm stored embedding must NOT produce NaN, which serde_json
+    /// would serialise as `null`, silently corrupting the score on the wire.
+    ///
+    /// cosine() guards zero-norm → 0.0, mirroring Python recall.py::cosine:
+    ///   `if na == 0.0 or nb == 0.0: return 0.0`
+    /// (Python `numpy.dot / (norm_a * norm_b)` would produce NaN without this guard.)
+    ///
+    /// Oracle:
+    ///   python3 -c "
+    ///   import math
+    ///   w_rel, w_rec, w_imp = 0.5, 0.2, 0.3
+    ///   tau = 604800
+    ///   relevance = 0.0  # cosine guard fires on zero-norm
+    ///   recency = math.exp(0)  # age=0 → exp(0) = 1.0
+    ///   importance = 0.5       # salience=0.5, clamped
+    ///   score = w_rel * relevance + w_rec * recency + w_imp * importance
+    ///   print(f'score={score}, finite={math.isfinite(score)}')
+    ///   "
+    ///   # score=0.35000000000000003, finite=True
+    #[test]
+    fn score_memory_zero_norm_embedding_stays_finite() {
+        let w = weights();
+        let now = 1_000_000i64;
+        let q = vec![1.0f32, 2.0, 3.0];
+        let zero = vec![0.0f32; 3];
+        let s = score_memory(Some(&zero), &q, 0.5, now, now, &w);
+        assert!(s.is_finite(), "zero-norm embedding must yield a finite score, got {s}");
+        // Spot-check the value: relevance=0 (cosine guard), recency=exp(0)=1, importance=0.5
+        // score = 0.5*0 + 0.2*1 + 0.3*0.5 = 0.35
+        let expected = 0.5f64 * 0.0 + 0.2 * 1.0 + 0.3 * 0.5;
+        assert!((s - expected).abs() < 1e-12, "expected {expected}, got {s}");
+    }
 }
