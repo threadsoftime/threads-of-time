@@ -7,7 +7,7 @@
 //! `Serialize` is required by the MCP handler to call `serde_json::to_value(&w.args)`
 //! (the exclude_none path in `forward()`).
 //!
-//! All 47 tools from `TOOL_SCHEMAS` are represented here.
+//! All 48 tools from `TOOL_SCHEMAS` are represented here.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -849,6 +849,25 @@ pub struct MemoryDeleteWrapper {
     pub args: MemoryDeleteArgs,
 }
 
+// ── nav.find_path ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct NavFindPathArgs {
+    /// Low-32 GUID of the bot whose position anchors the path query.
+    pub bot_guid: i64,
+    /// Destination X coordinate (WoW world-space).
+    pub dest_x: f64,
+    /// Destination Y coordinate (WoW world-space).
+    pub dest_y: f64,
+    /// Destination Z coordinate (WoW world-space).
+    pub dest_z: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct NavFindPathWrapper {
+    pub args: NavFindPathArgs,
+}
+
 // ── lfg.form_group ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -886,7 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn all_47_wrappers_have_args_envelope() {
+    fn all_48_wrappers_have_args_envelope() {
         // gm (7)
         assert!(has_args_envelope(&schema_for!(GmAdditemWrapper)),     "gm.additem");
         assert!(has_args_envelope(&schema_for!(GmEquipAllWrapper)),    "gm.equip_all");
@@ -937,6 +956,8 @@ mod tests {
         assert!(has_args_envelope(&schema_for!(MemoryListWrapper)),   "memory.list");
         assert!(has_args_envelope(&schema_for!(MemoryUpdateWrapper)), "memory.update");
         assert!(has_args_envelope(&schema_for!(MemoryDeleteWrapper)), "memory.delete");
+        // nav (1)
+        assert!(has_args_envelope(&schema_for!(NavFindPathWrapper)), "nav.find_path");
         // lfg (2)
         assert!(has_args_envelope(&schema_for!(LfgFormGroupWrapper)), "lfg.form_group");
         assert!(has_args_envelope(&schema_for!(LfgCancelWrapper)),    "lfg.cancel");  // NEW
