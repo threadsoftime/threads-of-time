@@ -9,7 +9,7 @@
 //!   `impl ServerHandler for HarnessMcp` sets `serverInfo`.
 //! - Every tool is a direct `#[tool]` fn that forwards to `self.forward(...)`.
 //!
-//! IMPORTANT: All 48 tool methods must be defined DIRECTLY in the
+//! IMPORTANT: All 49 tool methods must be defined DIRECTLY in the
 //! `#[tool_router] impl HarnessMcp` block with `#[tool(...)]` attributes on
 //! each function. The `#[tool_router]` proc macro detects `#[tool]` attributes
 //! in the token stream BEFORE macro_rules expansion — so `macro_rules!`

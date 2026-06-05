@@ -135,6 +135,7 @@ mod tests {
                     "event.*".to_string(),
                     "memory.*".to_string(),
                     "lfg.*".to_string(),
+                    "nav.*".to_string(),
                 ],
                 augmented:     false,
                 bound_to_guid: None,
