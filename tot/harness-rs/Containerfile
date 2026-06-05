@@ -95,13 +95,22 @@ RUN mkdir -p brain-rs/src exec-rs/src game-event-scheduler/src harness-rs/src \
 
 # ── Stage 2: real source build ────────────────────────────────────────────────
 
+# Copy ALL local workspace crates that harness-rs depends on (not just harness-rs
+# itself). harness-rs path-deps: tot-mcp-bearer-auth, tot-schema-transform.
+# Without these COPY steps the dep-cache stub artifacts are used for these crates
+# even when compiling harness-rs with real sources, causing:
+#   "cannot find trait `TokenLookup` in crate `tot_mcp_bearer_auth`"
 COPY harness-rs/src/ ./harness-rs/src/
+COPY tot-mcp-bearer-auth/src/ ./tot-mcp-bearer-auth/src/
+COPY tot-schema-transform/src/ ./tot-schema-transform/src/
 
 # CRITICAL (anti-stub fix — kb_87a7eade item 45): touch all .rs AFTER COPY so
 # Cargo's fingerprint sees them as newer than the cached stub artifacts and forces
 # a full recompile. Without this, `cargo build` finishes in ~0.1s and ships the
 # stub `fn main() {}` binary (links clean, passes ELF checks, exits immediately).
-RUN find /build/harness-rs/src -name "*.rs" -exec touch {} \+
+# Also touch the path-dep sources so their stubs are overwritten.
+RUN find /build/harness-rs/src /build/tot-mcp-bearer-auth/src /build/tot-schema-transform/src \
+        -name "*.rs" -exec touch {} \+
 
 RUN cargo zigbuild --release --target x86_64-unknown-linux-musl -p harness-rs --bin harness-rs
 
