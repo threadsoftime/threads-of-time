@@ -3,7 +3,7 @@ use crate::config::Config;
 use crate::harness::Harness;
 use crate::matcher::{build_real_player_proposal, find_matches};
 use crate::orchestrator::{form_via_lfg, fulfill};
-use crate::roster::select_fill_bots;
+use crate::roster::{is_eligible, select_fill_bots};
 use crate::types::QueueEntry;
 use std::sync::Arc;
 use std::time::Duration;
@@ -177,6 +177,50 @@ pub async fn run(state: Arc<AppState>, harness: Harness, cfg: Config) {
         }
         for p in find_matches(&snapshot) {
             let taken = state.queue.take_many(&p.members());
+
+            // Reconciliation pre-form poll (spec §5/§7): probe every member's
+            // live state via obs.get_state before committing to fulfill.
+            // A member is "stale" when it is no longer eligible (in_group,
+            // in_combat) OR when get_state itself errors (offline/unreachable).
+            // If ANY member is stale:
+            //   - Re-queue the eligible members so they rematch next tick.
+            //   - DROP the stale members (busy/offline — do not requeue).
+            //   - Skip fulfill for this proposal.
+            // If ALL members are eligible, continue to fulfill as before.
+            {
+                let members = p.members();
+                let mut stale: Vec<u64> = Vec::new();
+                let mut eligible_entries: Vec<QueueEntry> = Vec::new();
+
+                for entry in &taken {
+                    match harness.get_state(entry.guid).await {
+                        Ok(state_val) => {
+                            if is_eligible(&state_val) {
+                                eligible_entries.push(entry.clone());
+                            } else {
+                                stale.push(entry.guid);
+                            }
+                        }
+                        Err(e) => {
+                            // get_state error → treat as stale (offline/unreachable).
+                            tracing::warn!(guid = entry.guid, error = %e, "reconciliation get_state failed; treating as stale");
+                            stale.push(entry.guid);
+                        }
+                    }
+                }
+
+                if !stale.is_empty() {
+                    tracing::info!(?stale, members = ?members, "reconciliation dropped stale candidates");
+                    // Re-queue eligible members so they rematch next tick.
+                    for entry in eligible_entries {
+                        state.queue.upsert(entry);
+                    }
+                    // Stale members are dropped (no requeue).
+                    continue;
+                }
+                // All members eligible — fall through to fulfill.
+            }
+
             let res = fulfill(&harness, &p, &cfg.dungeon).await;
             if !res.formed {
                 // Re-queue innocent members; evict the poison-pill bot that
@@ -405,6 +449,18 @@ mod tests {
                                 {"guid": 1u64}, {"guid": 2u64}, {"guid": 3u64},
                                 {"guid": 4u64}, {"guid": 5u64}, {"guid": 6u64}, {"guid": 7u64},
                             ]
+                        }
+                    }));
+                }
+
+                // obs.get_state: return eligible state (in_group=false, not in combat)
+                // so the reconciliation pre-form poll does not abort the match.
+                if name == "obs.get_state" {
+                    return Json(serde_json::json!({
+                        "ok": true,
+                        "result": {
+                            "self": { "race": "human", "is_in_combat": false },
+                            "social": { "in_group": false }
                         }
                     }));
                 }
@@ -785,6 +841,18 @@ mod tests {
                         }));
                     }
 
+                    // obs.get_state: return eligible state so the reconciliation
+                    // pre-form poll passes and fulfill proceeds normally.
+                    if name == "obs.get_state" {
+                        return Json(serde_json::json!({
+                            "ok": true,
+                            "result": {
+                                "self": { "race": "human", "is_in_combat": false },
+                                "social": { "in_group": false }
+                            }
+                        }));
+                    }
+
                     // Fail bot.enter_instance for guid 5 on its first invocation.
                     if name == "bot.enter_instance" && bot == 5 {
                         let mut count = fail_count.lock().unwrap();
@@ -1082,6 +1150,18 @@ mod tests {
                         );
                     }
 
+                    // obs.get_state: return eligible state so the reconciliation
+                    // pre-form poll passes and fulfill proceeds normally.
+                    if name == "obs.get_state" {
+                        return Json(serde_json::json!({
+                            "ok": true,
+                            "result": {
+                                "self": { "race": "human", "is_in_combat": false },
+                                "social": { "in_group": false }
+                            }
+                        }));
+                    }
+
                     // Always fail bot.enter_instance for guid 5.
                     if name == "bot.enter_instance" && bot == 5 {
                         return Json(serde_json::json!({
@@ -1143,6 +1223,122 @@ mod tests {
                 MAX_PLACEMENT_ATTEMPTS
             );
         }
+    }
+
+    // T14: reconciliation — when one member turns stale (in_group=true) between
+    // take_many and fulfill, the tick loop must NOT call bot.invite_to_group,
+    // must re-queue the 4 eligible members, and must NOT re-queue the stale one.
+    //
+    // Setup: 5 bots queued (1T/1H/3D, all Alliance, all bot-only).
+    //   find_matches yields one proposal for all 5.
+    //   obs.get_state for guid 3 returns social.in_group:true  (stale).
+    //   obs.get_state for guids 1,2,4,5 returns eligible.
+    // Assert:
+    //   - Zero bot.invite_to_group calls (fulfill never entered).
+    //   - Guids 1,2,4,5 are back in queue.
+    //   - Guid 3 is NOT in queue.
+    #[tokio::test]
+    async fn tick_reconciliation_aborts_form_when_a_member_went_stale() {
+        let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_h = calls.clone();
+        // stale_guid is the one member that went stale between snapshot and fulfill.
+        let stale_guid: u64 = 3;
+
+        let handler = move |Path(name): Path<String>, Json(args): Json<serde_json::Value>| {
+            let calls = calls_h.clone();
+            async move {
+                let bot = args.get("bot_guid").and_then(|v| v.as_u64()).unwrap_or(0);
+                let target = args.get("target_guid").and_then(|v| v.as_u64()).unwrap_or(0);
+                let id = if bot != 0 { bot } else { target };
+                calls.lock().unwrap().push(format!("{name}:{id}"));
+
+                if name == "obs.lfg_pending" {
+                    return Json(
+                        serde_json::json!({ "ok": true, "result": { "pending": [] } }),
+                    );
+                }
+                if name == "lfg.cancel" {
+                    return Json(
+                        serde_json::json!({ "ok": true, "result": { "cancelled": [] } }),
+                    );
+                }
+                // Reconciliation get_state: guid 3 is stale (in_group:true); others eligible.
+                if name == "obs.get_state" {
+                    let tgt = args.get("target_guid").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let in_group = tgt == stale_guid;
+                    return Json(serde_json::json!({
+                        "ok": true,
+                        "result": {
+                            "self": { "race": "human", "is_in_combat": false },
+                            "social": { "in_group": in_group }
+                        }
+                    }));
+                }
+                Json(serde_json::json!({ "ok": true, "result": {} }))
+            }
+        };
+
+        let app = Router::new().route("/v1/tools/:name", post(handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let base = format!("http://{addr}");
+
+        let state = Arc::new(AppState {
+            queue: crate::queue::Queue::new(),
+            pending_placements: crate::api::PendingPlacements::new(),
+        });
+        for (g, r) in [
+            (1, Role::Tank),
+            (2, Role::Healer),
+            (3, Role::Dps),
+            (4, Role::Dps),
+            (5, Role::Dps),
+        ] {
+            state.queue.upsert(QueueEntry {
+                guid: g,
+                role: r,
+                dungeon_id: 4,
+                faction: Faction::Alliance,
+                is_real_player: false,
+            });
+        }
+
+        let h = crate::harness::Harness::new(base.clone(), "tok".into());
+        let conf = cfg(base);
+        let handle = {
+            let state = state.clone();
+            tokio::spawn(async move { run(state, h, conf).await })
+        };
+        tokio::time::sleep(StdDuration::from_millis(150)).await;
+        handle.abort();
+
+        let seq = calls.lock().unwrap().clone();
+
+        // No invites must have fired.
+        let invites: Vec<_> = seq.iter().filter(|c| c.starts_with("bot.invite_to_group")).collect();
+        assert!(
+            invites.is_empty(),
+            "reconciliation must abort before fulfill — no invites expected: {seq:?}"
+        );
+
+        // The 4 eligible members must be back in the queue.
+        let queue_guids: Vec<u64> = {
+            let mut v: Vec<u64> = state.queue.snapshot().iter().map(|e| e.guid).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            queue_guids,
+            vec![1, 2, 4, 5],
+            "4 eligible members must be re-queued after reconciliation abort: {queue_guids:?}"
+        );
+
+        // The stale member must NOT be in the queue.
+        assert!(
+            !queue_guids.contains(&stale_guid),
+            "stale member (guid={stale_guid}) must be dropped, not re-queued: {queue_guids:?}"
+        );
     }
 
     // T13: a clean group (all members placed) records nothing in pending_placements.

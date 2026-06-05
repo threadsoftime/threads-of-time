@@ -66,7 +66,19 @@ pub async fn select_fill_bots(
             }
         };
 
-        if is_eligible(&state, faction) {
+        // Faction check: derive the bot's faction from its race string and
+        // reject mismatches before the generic eligibility check.
+        let self_node = state.get("self");
+        let race = self_node
+            .and_then(|n| n.get("race"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let bot_faction = Faction::from_race(race);
+        if bot_faction != faction {
+            continue;
+        }
+
+        if is_eligible(&state) {
             selected.push(candidate);
         }
     }
@@ -83,16 +95,18 @@ pub async fn select_fill_bots(
 }
 
 /// Check eligibility from a raw `obs.get_state` result value.
-fn is_eligible(state: &Value, want_faction: Faction) -> bool {
+///
+/// Returns `true` when the player/bot is free to join a group:
+/// - `result.social.in_group == false`
+/// - `result.self.is_in_combat == false`
+///
+/// Faction is NOT checked here. Callers that require same-faction matching
+/// (e.g. `select_fill_bots`) perform the faction check themselves.
+pub(crate) fn is_eligible(state: &Value) -> bool {
     let self_node = match state.get("self") {
         Some(v) => v,
         None => return false,
     };
-    let race = self_node.get("race").and_then(Value::as_str).unwrap_or("");
-    let bot_faction = Faction::from_race(race);
-    if bot_faction != want_faction {
-        return false;
-    }
     let in_group = state
         .get("social")
         .and_then(|s| s.get("in_group"))
