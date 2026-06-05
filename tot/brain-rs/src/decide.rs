@@ -592,6 +592,10 @@ impl Decider {
             class_default_role(&personality.class_.to_lowercase());
 
         // (1) Persona line + bot_guid + traits + party_invite_policy + default role
+        //
+        // Route each f64 trait through format_f64_python so that whole-number
+        // values (0.0, 1.0, -1.0) render as "0.0" / "1.0" / "-1.0", matching
+        // the Python f-string behaviour rather than Rust Display's "0" / "1" / "-1".
         let mut system = format!(
             "You are {name}, a {race} {class_} \
              in World of Warcraft. {backstory}\n\
@@ -609,10 +613,10 @@ impl Decider {
             class_ = personality.class_,
             backstory = personality.backstory,
             bot_guid = bot_guid,
-            talkativeness = personality.talkativeness,
-            courage = personality.courage,
-            greed = personality.greed,
-            attitude_to_master = personality.attitude_to_master,
+            talkativeness = format_f64_python(personality.talkativeness),
+            courage = format_f64_python(personality.courage),
+            greed = format_f64_python(personality.greed),
+            attitude_to_master = format_f64_python(personality.attitude_to_master),
             party_invite_policy = personality.party_invite_policy,
             default_role = default_role,
         );
@@ -956,21 +960,33 @@ fn fmt_optional_f64(v: Option<f64>) -> String {
     }
 }
 
-/// Format a f64 the way Python's f-string does: avoids trailing zeros.
-/// Python uses repr-style: `0.4` not `0.4000000000000001`.
-/// Rust `{}` format also gives `0.4` for `0.4f64` — they agree for non-whole floats.
+/// Format a f64 the way Python's f-string does: avoids trailing zeros for
+/// non-whole decimals, but emits a trailing ".0" for whole-number values.
 ///
-/// KNOWN DIVERGENCE for whole numbers:
-///   Python f"{1.0}" -> "1.0"  |  Rust format!("{}", 1.0_f64) -> "1"
-///   Python f"{0.0}" -> "0.0"  |  Rust format!("{}", 0.0_f64) -> "0"
+/// Python `f"{v}"` on a float uses shortest-round-trip notation:
+///   f"{0.4}" -> "0.4"   (agrees with Rust `format!("{}", 0.4)`)
+///   f"{1.0}" -> "1.0"   (Rust `format!("{}", 1.0)` gives "1" — DIVERGES)
+///   f"{0.0}" -> "0.0"   (Rust `format!("{}", 0.0)` gives "0" — DIVERGES)
 ///
-/// The LLM schema for morph_personality allows minimum=0.0 and maximum=1.0, so
-/// trait values of exactly 0.0 or 1.0 are structurally possible (LLM can return
-/// them, and apply_v2_fields_from_json stores them verbatim). If such a value is
-/// present in the at-cap paragraph the prompt will differ from the Python version.
-/// See `format_f64_python_whole_number_diverges_from_python_fstring` test.
+/// This function restores Python parity for the whole-number case.
+/// Non-whole decimals already agree (both use shortest round-trip).
+///
+/// Personality trait values span [0.0, 1.0] with no clamping away from
+/// exactly-0.0 / exactly-1.0, so this fix is reachable in the at-cap
+/// paragraph and the persona-line traits (talkativeness, courage, etc.).
+///
+/// See `format_f64_python_whole_number_matches_python_fstring` test.
 fn format_f64_python(f: f64) -> String {
-    format!("{f}")
+    // Python f-string renders whole-number floats with a trailing ".0"
+    // (f"{1.0}" -> "1.0"); Rust's Display drops it (format!("{}", 1.0) -> "1").
+    // Personality trait values are in [0.0, 1.0] and can be exactly 0.0 or 1.0,
+    // so restore Python parity for the whole-number case. Non-whole decimals
+    // already agree (both use shortest round-trip).
+    if f.is_finite() && f.fract() == 0.0 {
+        format!("{f:.1}")          // 1.0 -> "1.0", 0.0 -> "0.0"
+    } else {
+        format!("{f}")             // 0.4 -> "0.4"
+    }
 }
 
 /// Faithful equivalent of Python's `str.format(**kwargs)` for the decide_v1.txt template.
@@ -1472,30 +1488,29 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // format_f64_python / fmt_optional_f64 parity characterization tests
+    // format_f64_python / fmt_optional_f64 parity tests — LOCKED
     // -----------------------------------------------------------------------
     //
-    // format_f64_python(f) is `format!("{f}")`.
-    // Python f-string `f"{v}"` on a float uses shortest-round-trip notation:
-    //   - Non-whole decimals agree with Rust Display: f"{0.4}" == "0.4" ✓
-    //   - Whole numbers DIVERGE: f"{1.0}" == "1.0" but Rust gives "1"
-    //                            f"{0.0}" == "0.0" but Rust gives "0"
+    // format_f64_python(f) now matches Python f-string behaviour for all cases:
+    //   - Non-whole decimals: both Rust and Python use shortest round-trip.
+    //     f"{0.4}" == "0.4"; format_f64_python(0.4) == "0.4" ✓
+    //   - Whole numbers: Python emits trailing ".0"; Rust now matches.
+    //     f"{1.0}" == "1.0"; format_f64_python(1.0) == "1.0" ✓  (FIXED)
+    //     f"{0.0}" == "0.0"; format_f64_python(0.0) == "0.0" ✓  (FIXED)
     //
-    // DIVERGENCE SCOPE: pvp_appetite and the other v2 trait fields are LLM-produced
-    // floats in the schema range [0.0, 1.0] with no explicit clamping to non-whole
-    // values. The LLM schema specifies minimum=0.0, maximum=1.0; the LLM CAN return
-    // exactly 0.0 or 1.0, which are then stored and later passed to format_f64_python.
-    // Rust produces "0" / "1"; Python produced "0.0" / "1.0". This is a real
-    // prompt-divergence bug — the at-cap paragraph sent to the LLM would differ
-    // between the Python and Rust implementations when a trait value is exactly
-    // 0.0 or 1.0. The operator must decide whether to fix the formatter.
+    // Fix applied: if f.is_finite() && f.fract() == 0.0 { format!("{f:.1}") }
+    // else { format!("{f}") }
     //
-    // The tests below capture the CURRENT Rust behaviour so any future fix is
-    // visible as a deliberate change (test updates, not silent divergence).
+    // Parity verified against: python3 -c "print(f'{1.0}', f'{0.0}', f'{0.4}', f'{0.5}', f'{1.5}')"
+    //   -> "1.0 0.0 0.4 0.5 1.5"
+    //
+    // Sibling sites also fixed: persona-line traits (talkativeness, courage,
+    // greed, attitude_to_master) are non-optional f64s rendered in assemble_prompt;
+    // they now go through format_f64_python rather than bare Rust Display.
 
     /// In-scope values: representative 1-decimal-place personality trait floats.
     /// Oracle: python3 -c "for v in [0.4, 0.9, 0.6, 0.3, 0.5]: print(f'{v}')"
-    ///   0.4 / 0.9 / 0.6 / 0.3 / 0.5 — Rust Display agrees.
+    ///   0.4 / 0.9 / 0.6 / 0.3 / 0.5 — Rust Display agrees; format_f64_python matches.
     #[test]
     fn format_f64_python_in_scope_values_match_python_fstring() {
         // python3 -c "print(f'{0.4}')" -> "0.4"
@@ -1510,27 +1525,24 @@ mod tests {
         assert_eq!(format_f64_python(0.5), "0.5");
     }
 
-    /// Whole-number divergence — documents the current Rust behaviour.
-    /// Python f"{1.0}" -> "1.0"; Rust format!("{}", 1.0_f64) -> "1".
-    /// Python f"{0.0}" -> "0.0"; Rust format!("{}", 0.0_f64) -> "0".
+    /// Whole-number parity — LOCKED. Faithful-port fix: whole-number f64 now
+    /// emits trailing ".0", matching Python f-string.
     ///
-    /// IMPORTANT: these values ARE reachable in practice — the LLM schema for
-    /// morph_personality specifies minimum=0.0, maximum=1.0 with no sub-range
-    /// guard, and apply_v2_fields_from_json stores whatever the LLM returns.
-    /// A trait value of exactly 1.0 or 0.0 would produce a DIVERGENT at-cap
-    /// prompt vs the Python implementation.
-    ///
-    /// This test captures current (divergent) behaviour. Fix format_f64_python to
-    /// emit trailing ".0" for whole numbers if the operator decides parity is needed.
-    /// Oracle: python3 -c "print(f'{1.0}')" -> "1.0"; python3 -c "print(f'{0.0}')" -> "0.0"
+    /// Oracle: python3 -c "print(f'{1.0}')" -> "1.0"
+    ///         python3 -c "print(f'{0.0}')" -> "0.0"
+    ///         python3 -c "print(f'{-1.0}')" -> "-1.0"
+    ///         python3 -c "print(f'{1.5}')" -> "1.5"
     #[test]
-    fn format_f64_python_whole_number_diverges_from_python_fstring() {
-        // Current Rust Display behaviour: no trailing ".0".
-        // Python f-string: "1.0" and "0.0". These DIFFER.
-        assert_eq!(format_f64_python(1.0), "1",
-            "KNOWN DIVERGENCE: Python f\"{{1.0}}\" -> \"1.0\"; fix if parity required");
-        assert_eq!(format_f64_python(0.0), "0",
-            "KNOWN DIVERGENCE: Python f\"{{0.0}}\" -> \"0.0\"; fix if parity required");
+    fn format_f64_python_whole_number_matches_python_fstring() {
+        // python3 -c "print(f'{1.0}')" -> "1.0"
+        assert_eq!(format_f64_python(1.0), "1.0");
+        // python3 -c "print(f'{0.0}')" -> "0.0"
+        assert_eq!(format_f64_python(0.0), "0.0");
+        // python3 -c "print(f'{-1.0}')" -> "-1.0"
+        assert_eq!(format_f64_python(-1.0), "-1.0");
+        // Non-whole: shortest round-trip path, no change.
+        // python3 -c "print(f'{1.5}')" -> "1.5"
+        assert_eq!(format_f64_python(1.5), "1.5");
     }
 
     /// fmt_optional_f64(None) must produce "None", matching Python f"{None}" -> "None".
@@ -1542,10 +1554,14 @@ mod tests {
     }
 
     /// fmt_optional_f64(Some(f)) delegates to format_f64_python.
-    /// Oracle: python3 -c "print(f'{0.4}')" -> "0.4"
+    /// Oracle: python3 -c "print(f'{0.4}')" -> "0.4"; python3 -c "print(f'{1.0}')" -> "1.0"
     #[test]
     fn fmt_optional_f64_some_delegates_to_format_f64_python() {
         assert_eq!(fmt_optional_f64(Some(0.4)), "0.4");
         assert_eq!(fmt_optional_f64(Some(0.9)), "0.9");
+        // Whole-number case: delegates correctly now that format_f64_python is fixed.
+        // python3 -c "print(f'{1.0}')" -> "1.0"; python3 -c "print(f'{0.0}')" -> "0.0"
+        assert_eq!(fmt_optional_f64(Some(1.0)), "1.0");
+        assert_eq!(fmt_optional_f64(Some(0.0)), "0.0");
     }
 }

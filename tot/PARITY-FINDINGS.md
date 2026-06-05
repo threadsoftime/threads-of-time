@@ -93,7 +93,7 @@ by a test even if the path is unlikely.**
 |---|---|---|---|---|
 | `memory-rs/src/retrieval/recall.rs:46` — `score_memory` return value | 2 | Python formula with identical NaN-on-zero-norm behaviour; Python result would also be NaN. No special handling in Python. | `cosine()` guards zero-norm → 0.0 (line 36 of cosine.rs); therefore `score_memory` cannot produce NaN via this path. | **LOCKED** — `score_memory_zero_norm_embedding_stays_finite` test asserts `s.is_finite()` and the exact value (0.35) for a zero-norm input embedding. The guard exists in `cosine.rs:36`: `if na == 0.0 \|\| nb == 0.0 { 0.0 }`. |
 | `memory-rs/src/retrieval/cosine.rs` — cosine divide-by-zero | 2 | `numpy` returns NaN on zero-norm; Python `recall.py::cosine` guards: `if na == 0.0 or nb == 0.0: return 0.0` | Guard EXISTS at line 36: `if na == 0.0 \|\| nb == 0.0 { 0.0 }`. Returns 0.0, not NaN. | **LOCKED** — tests `zero_vector_a_returns_zero`, `zero_vector_b_returns_zero`, `both_zero_returns_zero` already asserted this. Map correction: this was incorrectly listed as GAP; the guard mirrors Python exactly. |
-| `brain-rs/src/decide.rs:636-639` — `fmt_optional_f64(personality.pvp_appetite)` etc. | 2 | Python f-string: `f"pvp_appetite={personality.pvp_appetite}"` emits `"pvp_appetite=0.4"` for `Some(0.4)` and `"pvp_appetite=None"` for `None` | `fmt_optional_f64` matches for non-whole decimals and `None`. **DIVERGES for whole-number values** (0.0, 1.0): Rust emits `"0"` / `"1"`; Python emits `"0.0"` / `"1.0"`. | **LOCKED (with known divergence)** — tests added: `format_f64_python_in_scope_values_match_python_fstring` (0.3–0.9 agree), `format_f64_python_whole_number_diverges_from_python_fstring` (documents 0.0/1.0 divergence), `fmt_optional_f64_none_produces_none_string` (None → "None" locked), `fmt_optional_f64_some_delegates_to_format_f64_python`. The whole-number divergence is reachable (LLM schema allows 0.0/1.0; no clamping in `apply_v2_fields_from_json`). See DONE_WITH_CONCERNS note in report. |
+| `brain-rs/src/decide.rs:636-639` — `fmt_optional_f64(personality.pvp_appetite)` etc.; also `decide.rs:612-615` — persona-line non-optional traits (talkativeness, courage, greed, attitude_to_master) | 2 | Python f-string: `f"pvp_appetite={personality.pvp_appetite}"` emits `"pvp_appetite=0.4"` for `Some(0.4)` and `"pvp_appetite=None"` for `None`; whole-number values emit trailing `.0` (e.g. `f"{0.0}"` → `"0.0"`, `f"{1.0}"` → `"1.0"`) | Faithful-port fix applied (2026-06-04): `format_f64_python` now emits trailing `.0` for whole-number f64 values via `format!("{f:.1}")`. Non-optional traits (talkativeness etc.) now routed through `format_f64_python` rather than bare Rust Display. Parity holds for all float paths in the prompt. | **LOCKED (fixed)** — `format_f64_python_whole_number_matches_python_fstring` asserts `1.0`→`"1.0"`, `0.0`→`"0.0"`, `-1.0`→`"-1.0"`, `1.5`→`"1.5"`. `fmt_optional_f64_some_delegates_to_format_f64_python` extended to cover `Some(1.0)` and `Some(0.0)`. Sibling sites (persona-line f64 traits) also fixed in same commit. |
 | `memory-rs/src/sse_format.rs:138-139` — `salience` f32→f64 round-trip | 2 | Python memory sidecar stored salience as float; no NaN guard | f32 stored in DB, read as f64; `serde_json` serialises finite f64 correctly | **N/A** — stored values are clamped to `[0,1]` on write; non-finite unreachable. |
 
 ---
@@ -143,13 +143,13 @@ currently does **not** use `skip_serializing_if` on any of the surveyed DTOs.
 
 ## Open DECISION rows requiring operator input
 
-**None.** All ambiguous sites resolved. One known divergence captured by test:
-
-- `format_f64_python` whole-number output (Rust `"1"` vs Python `"1.0"`) is a reachable
-  prompt-divergence bug — the LLM schema allows 0.0/1.0 with no downstream clamping.
-  Captured as `format_f64_python_whole_number_diverges_from_python_fstring`. The operator
-  must decide whether to fix `format_f64_python` to emit trailing ".0" for whole f64 values.
-  See DONE_WITH_CONCERNS in the implementation report.
+**None.** All ambiguous sites resolved. The previously-noted known divergence for
+`format_f64_python` whole-number output was resolved as a faithful-port fix
+(2026-06-04): `format_f64_python` now emits trailing `.0` for whole-number f64
+values, matching Python f-string behaviour. Test renamed from
+`format_f64_python_whole_number_diverges_from_python_fstring` to
+`format_f64_python_whole_number_matches_python_fstring` and now asserts parity.
+Sibling sites (persona-line non-optional traits) fixed in same commit.
 
 ---
 
