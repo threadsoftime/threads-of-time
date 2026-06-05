@@ -117,7 +117,7 @@ impl Registry {
 
 /// Build the V1 registry per spec §6.
 ///
-/// Verbatim port of `registry.py:build_v1_registry` (48 entries).
+/// Verbatim port of `registry.py:build_v1_registry` (49 entries).
 pub fn build_v1_registry() -> Registry {
     Registry::new(vec![
         // GM-tier
@@ -136,6 +136,8 @@ pub fn build_v1_registry() -> Registry {
         ToolEntry::new("bot.send_chat",           "bot.send_chat",          Some("bot_guid"),    true),
         ToolEntry::new("bot.follow",              "bot.follow",             Some("bot_guid"),    true),
         ToolEntry::new("bot.stop",                "bot.stop",               Some("bot_guid"),    true),
+        // Bot-tier (M1-walk)
+        ToolEntry::new("bot.move_path",           "bot.move_path",          Some("bot_guid"),    true),
         // Bot-tier (V1.5 — grouping primitives)
         ToolEntry::new("bot.invite_to_group",     "bot.invite_to_group",    Some("bot_guid"),    true),
         ToolEntry::new("bot.accept_invite",       "bot.accept_invite",      Some("bot_guid"),    true),
@@ -194,9 +196,9 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn registry_has_48_tools() {
+    fn registry_has_49_tools() {
         let reg = build_v1_registry();
-        assert_eq!(reg.names().len(), 48);
+        assert_eq!(reg.names().len(), 49);
     }
 
     #[test]
@@ -279,6 +281,16 @@ mod tests {
         assert_eq!(e.required_scope, "nav.find_path");
         assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
         assert!(e.forwards_to_ac, "nav.find_path must forward to AC");
+    }
+
+    #[test]
+    fn bot_move_path_registered() {
+        let reg = build_v1_registry();
+        let e = reg.find("bot.move_path").unwrap();
+        assert_eq!(e.name, "bot.move_path");
+        assert_eq!(e.required_scope, "bot.move_path");
+        assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
+        assert!(e.forwards_to_ac, "bot.move_path must forward to AC");
     }
 
     // ── check_self_binding ─────────────────────────────────────────────────

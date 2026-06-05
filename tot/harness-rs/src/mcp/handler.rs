@@ -1,4 +1,4 @@
-//! MCP ServerHandler with all 48 V1 tools.
+//! MCP ServerHandler with all 49 V1 tools.
 //!
 //! Port of `harness_daemon/mcp_server.py:build_mcp_server`.
 //!
@@ -101,7 +101,7 @@ fn gen_mcp_request_id() -> String {
 }
 
 impl HarnessMcp {
-    /// Shared dispatch path for all 48 tool methods.
+    /// Shared dispatch path for all 49 tool methods.
     ///
     /// Steps (mirror mcp_server.py:111-150):
     /// 1. Resolve TokenRecord from Parts extensions → build AuthResult.
@@ -177,7 +177,7 @@ impl HarnessMcp {
     }
 }
 
-// ── 48-tool #[tool_router] impl ───────────────────────────────────────────────
+// ── 49-tool #[tool_router] impl ───────────────────────────────────────────────
 //
 // CRITICAL: Each tool method MUST be defined directly with `#[tool(...)]` on
 // the function. Do NOT use macro_rules! invocations here — the `#[tool_router]`
@@ -223,7 +223,7 @@ impl HarnessMcp {
         self.forward("gm.strip_gear", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
     }
 
-    // ── bot.* (12) ────────────────────────────────────────────────────────────
+    // ── bot.* (13) ────────────────────────────────────────────────────────────
 
     #[tool(name = "bot.set_goal", description = "Set a playerbot's next RPG goal.")]
     async fn bot_set_goal(&self, Parameters(w): Parameters<schemas::BotSetGoalWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
@@ -268,6 +268,11 @@ impl HarnessMcp {
     #[tool(name = "bot.leave_group", description = "Leave (or disband if leader) the bot's current group.")]
     async fn bot_leave_group(&self, Parameters(w): Parameters<schemas::BotLeaveGroupWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
         self.forward("bot.leave_group", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
+    }
+
+    #[tool(name = "bot.move_path", description = "Drive a bot along a navmesh waypoint list using a movement spline. Points are typically from nav.find_path. Returns {launched, duration_ms, final}.")]
+    async fn bot_move_path(&self, Parameters(w): Parameters<schemas::BotMovePathWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
+        self.forward("bot.move_path", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
     }
 
     #[tool(name = "bot.set_role", description = "Set LFG role or transfer group leadership.")]
@@ -484,7 +489,7 @@ mod tests {
     // FAIL TO BOOT.
     //
     // This test asserts the representative case (obs.ping).  The full suite
-    // covering all 48 wrappers lives in mcp::schemas::tests::all_48_wrappers_have_args_envelope.
+    // covering all 49 wrappers lives in mcp::schemas::tests::all_49_wrappers_have_args_envelope.
     // (A live tools/list assertion previously lived in the Python parity gate,
     // retired along with the Python sidecars.)
     #[test]
