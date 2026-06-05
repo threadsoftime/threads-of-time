@@ -91,9 +91,9 @@ by a test even if the path is unlikely.**
 
 | Site (file:line) | Class | Python contract | Current Rust behaviour | Status |
 |---|---|---|---|---|
-| `memory-rs/src/retrieval/recall.rs:46` — `score_memory` return value | 2 | Python formula with identical NaN-on-zero-norm behaviour; Python result would also be NaN. No special handling in Python. | Returns NaN if `cosine` NaN (propagated to caller). serde_json serialises NaN → `null` on wire. | **GAP** — no test pins non-finite output; serde_json's `null` vs Python's `NaN`/`null` distinction is immaterial since Python also returned NaN (both are broken). A guard test `score.is_finite()` on typical inputs + a doc comment is warranted. |
-| `memory-rs/src/retrieval/cosine.rs` — cosine divide-by-zero | 2 | `numpy` returns NaN on zero-norm; Python never guarded it | No guard; returns NaN if denominator zero | **GAP** — same reasoning; add a zero-norm guard returning 0.0 with a test. |
-| `brain-rs/src/decide.rs:636-639` — `fmt_optional_f64(personality.pvp_appetite)` etc. | 2 | Python f-string: `f"pvp_appetite={personality.pvp_appetite}"` emits `"pvp_appetite=0.4"` for `Some(0.4)` and `"pvp_appetite=None"` for `None` | `fmt_optional_f64` matches: `Some(f) → format!("{f}")`, `None → "None"` | **GAP** — the `Some(0.4)` case is tested (`pvp_appetite=0.4` asserted) but the `None` case is **not** tested. A test pinning `"pvp_appetite=None"` in the prompt when v2 fields are absent is missing. |
+| `memory-rs/src/retrieval/recall.rs:46` — `score_memory` return value | 2 | Python formula with identical NaN-on-zero-norm behaviour; Python result would also be NaN. No special handling in Python. | `cosine()` guards zero-norm → 0.0 (line 36 of cosine.rs); therefore `score_memory` cannot produce NaN via this path. | **LOCKED** — `score_memory_zero_norm_embedding_stays_finite` test asserts `s.is_finite()` and the exact value (0.35) for a zero-norm input embedding. The guard exists in `cosine.rs:36`: `if na == 0.0 \|\| nb == 0.0 { 0.0 }`. |
+| `memory-rs/src/retrieval/cosine.rs` — cosine divide-by-zero | 2 | `numpy` returns NaN on zero-norm; Python `recall.py::cosine` guards: `if na == 0.0 or nb == 0.0: return 0.0` | Guard EXISTS at line 36: `if na == 0.0 \|\| nb == 0.0 { 0.0 }`. Returns 0.0, not NaN. | **LOCKED** — tests `zero_vector_a_returns_zero`, `zero_vector_b_returns_zero`, `both_zero_returns_zero` already asserted this. Map correction: this was incorrectly listed as GAP; the guard mirrors Python exactly. |
+| `brain-rs/src/decide.rs:636-639` — `fmt_optional_f64(personality.pvp_appetite)` etc. | 2 | Python f-string: `f"pvp_appetite={personality.pvp_appetite}"` emits `"pvp_appetite=0.4"` for `Some(0.4)` and `"pvp_appetite=None"` for `None` | `fmt_optional_f64` matches for non-whole decimals and `None`. **DIVERGES for whole-number values** (0.0, 1.0): Rust emits `"0"` / `"1"`; Python emits `"0.0"` / `"1.0"`. | **LOCKED (with known divergence)** — tests added: `format_f64_python_in_scope_values_match_python_fstring` (0.3–0.9 agree), `format_f64_python_whole_number_diverges_from_python_fstring` (documents 0.0/1.0 divergence), `fmt_optional_f64_none_produces_none_string` (None → "None" locked), `fmt_optional_f64_some_delegates_to_format_f64_python`. The whole-number divergence is reachable (LLM schema allows 0.0/1.0; no clamping in `apply_v2_fields_from_json`). See DONE_WITH_CONCERNS note in report. |
 | `memory-rs/src/sse_format.rs:138-139` — `salience` f32→f64 round-trip | 2 | Python memory sidecar stored salience as float; no NaN guard | f32 stored in DB, read as f64; `serde_json` serialises finite f64 correctly | **N/A** — stored values are clamped to `[0,1]` on write; non-finite unreachable. |
 
 ---
@@ -109,7 +109,7 @@ currently does **not** use `skip_serializing_if` on any of the surveyed DTOs.
 |---|---|---|---|---|
 | `brain-rs/src/models.rs:50-59` — `PersonalityCard` v2 fields (`pvp_appetite`, `raid_appetite`, `completionist_streak`, `gold_motivation`, `profession_appetite`) | 3 | Python `model_dump(by_alias=True)` **does not** use `exclude_none` here (personality.py:109) — emits `null` for unset v2 fields. `PersonalityCard.model_dump()` includes `"pvp_appetite": null` by default. | Rust serialises `Option<f64>` fields as `null` when `None` (no `skip_serializing_if`). Matches Python's default `model_dump()` behaviour. | **LOCKED** — `test_personality_card_v2_fields_default_to_none` confirms deserialization; serialization to `null` matches Python. Round-trip test present. |
 | `brain-rs/src/models.rs:12-19` — `Decision` (`tool`, `args`, `wakeup_in_ms`) | 3 | Python `Decision.model_dump()` emits `null` for `None` fields unless `exclude_none=True`. `decide.py:435` uses bare `d.model_dump()` (no exclude_none) when truncating recent decisions for the prompt context. | Rust serialises all three as `null` when `None`. | **LOCKED** — `test_no_op_decision_round_trips_json` covers round-trip; no `skip_serializing_if` divergence. |
-| `tot-schema-transform/src/lib.rs` — `strip_top_level_nulls` | 3 | Python `mcp_server.py:119` `args.model_dump(exclude_none=True)` — removes `None` fields at top level only, not nested | `strip_top_level_nulls` removes `Value::Null` at top level only; does NOT recurse | **GAP** — existing 10 tests verify the top-level strip and non-recursion, but no test pins the Python oracle: specifically that a pydantic model's `None` field maps to a missing key (not `null`) in the outgoing tool-call args. The test asserts Rust-internal behaviour, not the Python `exclude_none` contract. Mark **partially covered** — the structural behaviour is correct, but no test uses a real Python-derived fixture to assert the parity value. |
+| `tot-schema-transform/src/lib.rs` — `strip_top_level_nulls` | 3 | Python `mcp_server.py:119` `args.model_dump(exclude_none=True)` — removes `None` fields at top level only, not nested | `strip_top_level_nulls` removes `Value::Null` at top level only; does NOT recurse | **LOCKED** — `strip_top_level_nulls_pydantic_oracle` test added: input `{"a":1,"b":null}` → output `{"a":1}` (key "b" absent), anchored to `/tmp/parity-venv` pydantic-v2 oracle command (outputs `{"a":1}`). |
 | `memory-rs/src/mcp/schemas.rs:45-308` — MCP request schemas with `#[serde(default)]` | 3 | Python pydantic `Field(None)` / `Field(default=...)` → absent fields default during request parsing | `#[serde(default)]` provides identical default-on-absent semantics | **N/A** — deserialization defaults are structural, not parity-relevant on the wire (Python and Rust both accept missing fields and default them identically). |
 | `memory-rs/src/mcp/handler.rs:87-89` — `ok_error` response shape `{"ok": false, "error": msg}` | 3 | Python `{"ok": False, "error": msg}` — no `detail` key on internal errors | Rust `{"ok": false, "error": msg}` — matches; no `detail` on this path | **LOCKED** — `memory-rs/src/mcp/mod.rs` tests check the error shape. |
 
@@ -133,8 +133,8 @@ currently does **not** use `skip_serializing_if` on any of the surveyed DTOs.
 
 | Status | Count |
 |---|---|
-| LOCKED | 11 |
-| GAP | 4 |
+| LOCKED | 15 |
+| GAP | 0 |
 | DECISION | 0 |
 | N/A | 6 |
 | **Total sites** | **21** |
@@ -143,21 +143,19 @@ currently does **not** use `skip_serializing_if` on any of the surveyed DTOs.
 
 ## Open DECISION rows requiring operator input
 
-**None.** All ambiguous sites were resolved as either GAP or N/A during analysis:
+**None.** All ambiguous sites resolved. One known divergence captured by test:
 
-- The non-finite float divergence (Python NaN → Rust `null`) is a **GAP** (not a DECISION) because Python also produced NaN in that path — the serde_json `null` serialisation is actually more client-friendly, but the policy should be explicit (add `is_finite()` guard + test).
-- The SSE and LLM `error_for_status` sites are **N/A** because both Python and Rust correctly surface only the HTTP status code (the response body is either an event stream or a JSON structure parsed separately).
+- `format_f64_python` whole-number output (Rust `"1"` vs Python `"1.0"`) is a reachable
+  prompt-divergence bug — the LLM schema allows 0.0/1.0 with no downstream clamping.
+  Captured as `format_f64_python_whole_number_diverges_from_python_fstring`. The operator
+  must decide whether to fix `format_f64_python` to emit trailing ".0" for whole f64 values.
+  See DONE_WITH_CONCERNS in the implementation report.
 
 ---
 
-## GAP rows — action list for Task 2
+## GAP rows — all closed
 
-| Priority | GAP site | Required lock test |
-|---|---|---|
-| P1 | `memory-rs/src/retrieval/cosine.rs` — zero-norm guard | Unit test: `cosine(zero_vec, any_vec)` returns `0.0`, not NaN. Add a guard + test. |
-| P1 | `memory-rs/src/retrieval/recall.rs:46` — `score_memory` non-finite | Unit test: score with zero embedding returns finite value (no NaN propagation). Depends on cosine guard above. |
-| P2 | `brain-rs/src/decide.rs:636-639` — `fmt_optional_f64` None path | Unit test: `fmt_optional_f64(None)` → `"None"` (Python oracle: `f"pvp_appetite={None}"` → `"pvp_appetite=None"`). Add a direct `fmt_optional_f64` unit test. |
-| P3 | `tot-schema-transform/src/lib.rs` — `strip_top_level_nulls` Python-oracle test | Add a test driven from a real Python `model_dump(exclude_none=True)` fixture: an object with a `None` field must produce an output where that key is absent (not present as `null`). Existing tests already verify this structurally; the new test should explicitly cite the Python oracle. |
+All four original GAP rows are now LOCKED. See commit history on `feat/tot-parity-hardening`.
 
 ---
 
