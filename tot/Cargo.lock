@@ -948,6 +948,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "tokio",
+ "tot-mcp-bearer-auth",
  "tot-schema-transform",
  "tower",
  "tracing",
@@ -1457,7 +1458,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
- "axum 0.7.9",
+ "axum 0.8.9",
  "bytes",
  "cc",
  "futures-util",
@@ -1476,6 +1477,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tot-mcp-bearer-auth",
  "tot-schema-transform",
  "tower",
  "tracing",
@@ -2670,6 +2672,18 @@ dependencies = [
  "reqwest 0.12.28",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "tot-mcp-bearer-auth"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "bytes",
+ "http",
+ "http-body-util",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

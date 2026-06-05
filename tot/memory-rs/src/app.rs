@@ -73,14 +73,14 @@ pub fn build_router(state: AppState, allowed_hosts: Vec<String>) -> Router {
         .route("/memory/personality/get",   post(personality::personality_get))
         .route("/memory/personality/set",   post(personality::personality_set))
         // Memory read-by-id (wildcard last).
-        .route("/memory/:memory_id",        get(memory::get_memory))
+        .route("/memory/{memory_id}",       get(memory::get_memory))
         // Goals routes.
         .route("/goals/create",             post(goals::create))
         .route("/goals/list",               get(goals::list_goals))
         .route("/goals/update",             put(goals::update))
         .route("/goals/complete",           post(goals::complete))
         // Goals read-by-id (wildcard last).
-        .route("/goals/:goal_id",           get(goals::read))
+        .route("/goals/{goal_id}",          get(goals::read))
         // SSE event stream.
         .route("/v1/events/stream",         get(events::stream_events))
         .with_state(state.clone());

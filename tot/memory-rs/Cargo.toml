@@ -23,7 +23,7 @@ path = "src/bin/embed_stub.rs"
 [dependencies]
 # Async runtime + HTTP server — match workspace pinned majors.
 tokio       = { version = "1", features = ["full"] }
-axum        = "0.7"
+axum        = "0.8"
 reqwest     = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # MCP transport (Tasks 6.3-6.5): rmcp 1.7 with StreamableHTTP server + macros.
@@ -46,6 +46,7 @@ http-body-util = "0.1"
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
 tot-schema-transform = { path = "../tot-schema-transform" }
+tot-mcp-bearer-auth = { path = "../tot-mcp-bearer-auth" }
 
 # SQLite (bundled = static; bundled enables FTS5 + bm25() + porter/unicode61
 # tokenisers and re-exports rusqlite::ffi so we can call sqlite3_auto_extension).

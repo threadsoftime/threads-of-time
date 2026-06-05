@@ -1,0 +1,14 @@
+[package]
+name = "tot-mcp-bearer-auth"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.8"
+tower = "0.5"
+http = "1"
+bytes = "1"
+http-body-util = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

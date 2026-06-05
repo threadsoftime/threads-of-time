@@ -4,9 +4,8 @@
 //! Public surface:
 //! - `build_mcp_service` — construct the tower service to nest at `/mcp/mcp`.
 //! - `handler::HarnessMcp` — the ServerHandler (used in tests).
-//! - `auth_layer::BearerAuthLayer` — the bearer-auth tower layer (used in tests).
+//! - `tot_mcp_bearer_auth::BearerAuthLayer` — the bearer-auth tower layer (used in tests).
 
-pub mod auth_layer;
 pub mod handler;
 pub mod schemas;
 
@@ -20,12 +19,12 @@ use tower::Layer as _;
 
 use crate::auth::TokenStore;
 use crate::rest::SharedState;
-use auth_layer::{BearerAuthLayer, BearerAuthService};
+use tot_mcp_bearer_auth::{BearerAuthLayer, BearerAuthService};
 use handler::HarnessMcp;
 
 /// Build the MCP service ready to be nested at `/mcp/mcp`.
 ///
-/// Returns a `BearerAuthService<StreamableHttpService<HarnessMcp, LocalSessionManager>>`
+/// Returns a `BearerAuthService<TokenStore, StreamableHttpService<HarnessMcp, LocalSessionManager>>`
 /// — a tower [`Service`] that:
 /// - Runs bearer-auth (from the daemon's `TokenStore`).
 /// - On valid bearer: injects `config::TokenRecord` into request extensions.
@@ -46,7 +45,7 @@ pub fn build_mcp_service(
     state:         SharedState,
     allowed_hosts: Vec<String>,
     token_store:   Arc<TokenStore>,
-) -> BearerAuthService<StreamableHttpService<HarnessMcp, LocalSessionManager>>
+) -> BearerAuthService<TokenStore, StreamableHttpService<HarnessMcp, LocalSessionManager>>
 {
     let session_manager = Arc::new(LocalSessionManager::default());
 
