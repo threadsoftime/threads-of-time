@@ -6,6 +6,43 @@
 
 ---
 
+## Sweep outcome — 2026-06-04
+
+Proactive parity-hardening sweep of the three faithful Python→Rust ports
+(brain-rs, memory-rs, harness-rs). **Final gate: 950 passed, 0 failed, 4 ignored**
+(+6 net-new parity tests over the 944 baseline; the 4 ignored are pre-existing,
+none in the new test files).
+
+**Headline finding (1 real, reachable divergence — found proactively, fixed):**
+`brain-rs/src/decide.rs::format_f64_python` rendered whole-number trait floats
+without the trailing `.0` (Rust Display `1.0`→`"1"`) while the Python original's
+f-string emits `"1.0"`. Reachable on the **live `decide_v1` prompt path** whenever
+a personality trait sits exactly at its `0.0`/`1.0` cap (schema-allowed, stored
+verbatim). Resolved as a **faithful-port fix** (operator-approved): emit `.0` for
+whole numbers; a sibling site (`assemble_prompt` persona-line traits) had the same
+bug and was fixed in the same pass. Parity now locked by test.
+
+**Everything else was already in parity** — the enumeration confirmed the
+audit-SHA canonicalization (the Phase-24 fix), the `cosine` zero-norm guard,
+the `{ok,result}`/`detail` error envelopes, and the `exclude_none`/`null`
+wire-shapes are all already test-locked (or structurally N/A). The originally
+feared NaN/Inf-on-the-wire class is guarded at `cosine.rs:36` and now has an
+end-to-end finiteness lock. The Python v0.3 hybrid scoring route was never
+ported (retired with the Python source) — no parity surface there.
+
+**Process note:** one enumeration false-positive (cosine "missing guard") was
+caught in review and corrected — the guard existed and was already tested.
+
+**Commit series on `feat/tot-parity-hardening`:**
+`39f11621e` enumerate map · `fad927aae` correct false cosine GAP ·
+`4f6d3eddc` score_memory finiteness lock · `d9d3ea3e1` format/optional-f64
+characterization · `5273bebe2` schema-transform pydantic oracle ·
+`618dd3eb6` fix format_f64_python whole-number parity + sibling site.
+
+**No live redeploy** — source/test only; runtime images unaffected.
+
+---
+
 ## Root-cause reminder
 
 `brain-rs/Cargo.toml` enables `serde_json` feature `preserve_order`. Cargo
