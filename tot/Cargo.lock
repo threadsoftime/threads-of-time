@@ -2411,6 +2411,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower",
+ "tracing-subscriber",
 ]
 
 [[package]]
