@@ -54,18 +54,14 @@ pub async fn select_fill_bots(
             break;
         }
         if probed >= MAX_PROBES {
-            eprintln!(
-                "[roster] probe cap ({MAX_PROBES}) reached; pool may be short \
-                 (needed={needed}, found={})",
-                selected.len()
-            );
+            tracing::warn!(max_probes = MAX_PROBES, needed, found = selected.len(), "roster probe cap reached; pool may be short");
             break;
         }
 
         let state = match harness.get_state(candidate).await {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[roster] get_state {candidate} failed: {e}; skipping");
+                tracing::warn!(guid = candidate, error = %e, "roster get_state failed; skipping");
                 continue;
             }
         };
@@ -76,10 +72,7 @@ pub async fn select_fill_bots(
     }
 
     if selected.len() < needed {
-        eprintln!(
-            "[roster] short pool: needed={needed} eligible={} (faction={faction:?})",
-            selected.len()
-        );
+        tracing::warn!(needed, eligible = selected.len(), faction = ?faction, "roster short pool");
         return Err(HarnessError::Shape(format!(
             "roster: only {} eligible bots found, needed {needed}",
             selected.len()

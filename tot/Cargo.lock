@@ -1345,6 +1345,8 @@ dependencies = [
  "serde_json",
  "tokio",
  "tot-harness-client",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

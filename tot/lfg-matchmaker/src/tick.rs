@@ -18,6 +18,11 @@ pub async fn run(state: Arc<AppState>, harness: Harness, cfg: Config) {
     let mut ticker = tokio::time::interval(Duration::from_secs(cfg.tick_secs.max(1)));
     loop {
         ticker.tick().await;
+        // Per-tick span: enter synchronously, drop before any await so the future
+        // remains Send (tracing's Entered guard holds a *mut () thread-local pointer).
+        // Sub-events emitted in sync sections are nested; the tick_done summary at the
+        // end is emitted via in_scope() on the same span.
+        let tick_span = tracing::info_span!("tick");
 
         // Step 1: Drain obs.lfg_pending intents from the server-side queue and
         // upsert them into our local queue. The adapter clears server-side on read
@@ -44,7 +49,7 @@ pub async fn run(state: Arc<AppState>, harness: Harness, cfg: Config) {
                 }
             }
             Err(e) => {
-                eprintln!("[tick] obs.lfg_pending failed: {e}; continuing with existing queue");
+                tracing::warn!(error = %e, "obs.lfg_pending failed; continuing with existing queue");
             }
         }
 
@@ -58,7 +63,7 @@ pub async fn run(state: Arc<AppState>, harness: Harness, cfg: Config) {
                 }
             }
             Err(e) => {
-                eprintln!("[tick] lfg.cancel failed: {e}; continuing without cancel drain");
+                tracing::warn!(error = %e, "lfg.cancel failed; continuing without cancel drain");
             }
         }
 
@@ -72,7 +77,7 @@ pub async fn run(state: Arc<AppState>, harness: Harness, cfg: Config) {
         // it clears the server-side intent queue) runs unconditionally so the
         // local queue accurately reflects intent state even in shadow mode.
         if !cfg.enabled {
-            eprintln!("[tick] LFG_ENABLED=false — skipping matchmaking actions (inert mode)");
+            tracing::info!("LFG_ENABLED=false — skipping matchmaking actions (inert mode)");
             continue;
         }
 
@@ -88,19 +93,13 @@ pub async fn run(state: Arc<AppState>, harness: Harness, cfg: Config) {
                 for mut entry in pending {
                     match harness.enter_instance_direct(entry.guid, &entry.dungeon).await {
                         Ok(_) => {
-                            eprintln!(
-                                "[place] late-placed {} on attempt {}",
-                                entry.guid, entry.attempts + 1
-                            );
+                            tracing::info!(guid = entry.guid, attempt = entry.attempts + 1, "place late-placed");
                             // Successfully placed — do not re-insert.
                         }
                         Err(e) => {
                             entry.attempts += 1;
                             if entry.attempts >= MAX_PLACEMENT_ATTEMPTS {
-                                eprintln!(
-                                    "[place] gave up on {} after {} attempts: {}",
-                                    entry.guid, entry.attempts, e
-                                );
+                                tracing::warn!(guid = entry.guid, attempts = entry.attempts, error = %e, "place gave up");
                                 // Drop the entry — do not re-insert.
                             } else {
                                 keep.push(entry);
@@ -136,10 +135,7 @@ pub async fn run(state: Arc<AppState>, harness: Harness, cfg: Config) {
             .await
             {
                 Err(e) => {
-                    eprintln!(
-                        "[tick] bot-fill for real player {} failed: {e}; will retry next tick",
-                        rp_entry.guid
-                    );
+                    tracing::warn!(guid = rp_entry.guid, error = %e, "bot-fill for real player failed; will retry next tick");
                     // Real player stays in queue — next tick re-attempts fill.
                 }
                 Ok(fillers) => {
@@ -147,10 +143,7 @@ pub async fn run(state: Arc<AppState>, harness: Harness, cfg: Config) {
                         match build_real_player_proposal(rp_entry, &fillers, cfg.dungeon.id) {
                             Some(p) => p,
                             None => {
-                                eprintln!(
-                                    "[tick] build_real_player_proposal failed for guid={}",
-                                    rp_entry.guid
-                                );
+                                tracing::warn!(guid = rp_entry.guid, "build_real_player_proposal failed");
                                 continue;
                             }
                         };
@@ -172,15 +165,7 @@ pub async fn run(state: Arc<AppState>, harness: Harness, cfg: Config) {
                             state.pending_placements.push(guid, cfg.dungeon.clone());
                         }
                     }
-                    eprintln!(
-                        "[match/lfg] dungeon={} leader={} formed={} placed={}/{} note={}",
-                        res.dungeon_id,
-                        res.leader,
-                        res.formed,
-                        res.placed,
-                        res.members.len(),
-                        res.note
-                    );
+                    tracing::info!(dungeon = res.dungeon_id, leader = res.leader, formed = res.formed, placed = res.placed, of = res.members.len(), note = %res.note, "match/lfg");
                 }
             }
         }
@@ -199,10 +184,7 @@ pub async fn run(state: Arc<AppState>, harness: Harness, cfg: Config) {
                 // member), re-queue everyone — this preserves the old behaviour
                 // for unexpected error shapes.
                 if let Some(evicted) = res.failed_guid {
-                    eprintln!(
-                        "[match] evicted {} after form failure: {}",
-                        evicted, res.note
-                    );
+                    tracing::warn!(guid = evicted, note = %res.note, "match evicted after form failure");
                     for entry in taken {
                         if entry.guid != evicted {
                             state.queue.upsert(entry);
@@ -220,16 +202,9 @@ pub async fn run(state: Arc<AppState>, harness: Harness, cfg: Config) {
                     state.pending_placements.push(guid, cfg.dungeon.clone());
                 }
             }
-            eprintln!(
-                "[match] dungeon={} leader={} formed={} placed={}/{} note={}",
-                res.dungeon_id,
-                res.leader,
-                res.formed,
-                res.placed,
-                res.members.len(),
-                res.note
-            );
+            tracing::info!(dungeon = res.dungeon_id, leader = res.leader, formed = res.formed, placed = res.placed, of = res.members.len(), note = %res.note, "match");
         }
+        tick_span.in_scope(|| tracing::info!(queue = snapshot.len(), "tick_done"));
     }
 }
 
