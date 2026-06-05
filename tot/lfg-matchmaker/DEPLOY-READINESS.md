@@ -40,10 +40,15 @@ Source/mock testing **cannot** close these — they depend on live worldserver b
    ("teleport group as a unit / bind to leader's instance"). **Do not assume the slice is
    C++-free until this is verified empirically.**
 2. **Timing under real harness latency.** The new reconciliation (`obs.get_state` ×5 per
-   proposal) and confirm-poll (`obs.get_group` up to ×5 per member) add round-trips. Mock
-   tests run sub-ms; verify the **~2 s tick budget** still holds against real harness RTTs
-   with several concurrent proposals, and that the confirm-poll's ≤1 s worst case does not
-   serialize badly across a full 5-man.
+   proposal) and confirm-poll (`obs.get_group` up to ×5 per member) add round-trips.
+   **Worst-case `fulfill`:** each non-leader member can exhaust the confirm-poll
+   (`MAX_INVITE_CONFIRM_ATTEMPTS=5` × `INVITE_CONFIRM_DELAY=200 ms` = ~800 ms of sleep +
+   5 RTT), and the 4 non-leaders are polled **serially** → ~4 × (5·RTT + 800 ms) ≈ **3.3 s**
+   at LAN RTT when every member times out. This does **not** stall the loop — `tokio::time::
+   interval` delivers the missed tick immediately on the next `tick()` (catch-up, no
+   pile-up) — but it **misses cadence** when `fulfill` exceeds `tick_secs`. Acceptable for
+   the exceptional (persistent-join-failure) path; **monitor production logs for repeated
+   `confirm-timeout`** and consider a larger `tick_secs` if it recurs.
 
 ### Smoke-test procedure (bots-only, deterministic, no human)
 1. Deploy the slice composed in `slice-host`; set `LFG_ENABLED=true` (and `LFG_TICK_SECS`).
@@ -59,9 +64,20 @@ Source/mock testing **cannot** close these — they depend on live worldserver b
 
 ## 📋 Known limitations / deferred (not blockers)
 
+- **Confirm-poll false-negative under load.** If the worldserver propagates a group join
+  slower than the confirm-poll budget (~1 s/member), `obs.get_group` never shows the member
+  and `fulfill` rolls back + evicts it (`failed_guid`, note `confirm-timeout`) even though
+  it actually joined. The rollback (`bot.leave_group` on the joined set) is consistent —
+  the evicted bot ends up ungrouped — but it must **re-queue externally** to be re-matched.
+  Acceptable tradeoff vs. hanging; watch for it in the smoke test and prod logs.
 - **Retry-store not externally observable.** `PendingPlacements::{len,snapshot}` are
   `#[cfg(test)]`-only, so an external monitor (or an extended `/healthz`) cannot read the
   straggler-retry depth. Make them unconditionally public if external monitoring is needed.
+- **Per-tick span is cosmetic-only.** `tick.rs` creates a `tracing::info_span!("tick")` but
+  (because `Entered` is `!Send` across `.await`) only the `tick_done` event runs inside it,
+  and `tick_done` is skipped on the early-`continue` ticks (inert mode / queue < 5). Other
+  per-tick events carry structured fields but are not nested under the span. Use
+  `Instrument` on the tick body if full nesting is wanted later — no correctness impact.
 - **`slice-host` startup/supervisor logging** still uses `eprintln!` by design — only the
   hosted slices were converted to `tracing`. Convert in a dedicated slice-host pass if
   uniform structured logs are wanted.
