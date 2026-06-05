@@ -1,6 +1,57 @@
 use crate::config::Dungeon;
 use crate::harness::Harness;
 use crate::types::MatchProposal;
+use std::time::Duration;
+use tokio::time::sleep;
+
+/// Maximum number of `obs.get_group` polls before treating the join as timed out.
+const MAX_INVITE_CONFIRM_ATTEMPTS: u32 = 5;
+/// Delay between consecutive `obs.get_group` polls.
+const INVITE_CONFIRM_DELAY: Duration = Duration::from_millis(200);
+
+/// Returns `true` when `member` appears in `leader`'s group-observation result.
+/// The real `obs.get_group` result shape (from ObsGetGroupAdapter.cpp):
+///   `{ "in_group": true, "members": [{ "guid": <u64>, ... }, ...] }`
+/// The member list is at `result["members"]` and each element carries a `"guid"` field.
+/// Returns `false` when `in_group` is absent/false, `members` is absent, or `member`
+/// is not found.
+fn group_contains(result: &serde_json::Value, member: u64) -> bool {
+    let members = match result.get("members").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => return false,
+    };
+    members
+        .iter()
+        .any(|m| m.get("guid").and_then(|g| g.as_u64()) == Some(member))
+}
+
+/// Poll `obs.get_group(leader)` up to `MAX_INVITE_CONFIRM_ATTEMPTS` times, checking
+/// whether `member` appears in the group. Returns `true` if confirmed within the cap,
+/// `false` if the cap is exhausted or every attempt returns a harness error.
+async fn confirm_member_joined(h: &Harness, leader: u64, member: u64) -> bool {
+    for attempt in 0..MAX_INVITE_CONFIRM_ATTEMPTS {
+        if attempt > 0 {
+            sleep(INVITE_CONFIRM_DELAY).await;
+        }
+        match h.get_group(leader).await {
+            Ok(result) => {
+                if group_contains(&result, member) {
+                    return true;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    leader,
+                    member,
+                    attempt,
+                    error = %e,
+                    "confirm_member_joined: obs.get_group error"
+                );
+            }
+        }
+    }
+    false
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FormResult {
@@ -57,6 +108,21 @@ pub async fn fulfill(h: &Harness, p: &MatchProposal, dungeon: &Dungeon) -> FormR
             return FormResult {
                 dungeon_id: p.dungeon_id, leader, members, formed: false, placed: 0,
                 note: format!("accept {m} failed: {e}; rolled back {joined:?}{rb}"),
+                failed_guid: Some(*m),
+                unplaced: Vec::new(),
+            };
+        }
+        // After accept succeeds, confirm the member actually appears in the leader's
+        // group (the data-plane join is asynchronous with respect to accept_invite
+        // returning). Poll obs.get_group up to MAX_INVITE_CONFIRM_ATTEMPTS times.
+        if !confirm_member_joined(h, leader, *m).await {
+            let rb = rollback(h, &joined).await;
+            return FormResult {
+                dungeon_id: p.dungeon_id, leader, members, formed: false, placed: 0,
+                note: format!(
+                    "confirm-timeout: member {m} did not appear in leader {leader}'s group after \
+                     {MAX_INVITE_CONFIRM_ATTEMPTS} attempts; rolled back {joined:?}{rb}"
+                ),
                 failed_guid: Some(*m),
                 unplaced: Vec::new(),
             };
@@ -191,6 +257,12 @@ mod tests {
 
     // Mock harness that records the ordered sequence of tool calls and can be told
     // to fail one specific (tool, guid) with a typed 422 executor failure.
+    //
+    // For `obs.get_group` calls the mock returns a synthetic group containing all
+    // five proposal members (guids 1-5) so that `confirm_member_joined` always
+    // sees the member present in the leader's group (happy-path behavior). Tests
+    // that need finer control over the get_group response use a dedicated stateful
+    // mock (see `spawn_slow_group_mock` and `spawn_never_joins_mock`).
     async fn spawn_recording_mock_with_fail(fail: FailSpec) -> (String, Arc<Mutex<Vec<String>>>) {
         let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let calls_h = calls.clone();
@@ -214,6 +286,22 @@ mod tests {
                             })),
                         );
                     }
+                }
+                // obs.get_group: return a synthetic group containing all proposal
+                // members (guids 1-5) so confirm_member_joined always passes.
+                if name == "obs.get_group" {
+                    return (StatusCode::OK, Json(serde_json::json!({
+                        "ok": true,
+                        "result": {
+                            "in_group": true,
+                            "group_type": "party",
+                            "leader_guid": 1u64,
+                            "members": [
+                                {"guid": 1u64}, {"guid": 2u64}, {"guid": 3u64},
+                                {"guid": 4u64}, {"guid": 5u64},
+                            ]
+                        }
+                    })));
                 }
                 (StatusCode::OK, Json(serde_json::json!({ "ok": true, "result": {} })))
             }
@@ -265,12 +353,15 @@ mod tests {
         assert_eq!(res.placed, 5);
 
         let seq = calls.lock().unwrap().clone();
-        // 4 invites + 4 accepts (leader excluded) + 5 placements = 13 calls
-        assert_eq!(seq.len(), 13);
-        // leader (1) invites each of 2,3,4,5; each accepts; then all 5 enter
+        // 4 invites + 4 accepts + 4 obs.get_group (confirm-poll, one per non-leader member)
+        // + 5 bot.enter_instance placements = 17 calls
+        assert_eq!(seq.len(), 17, "expected 17 calls (4 invite+accept+confirm + 5 place): {seq:?}");
+        // leader (1) invites each of 2,3,4,5; each accepts; obs.get_group confirms; then all 5 enter
         assert_eq!(seq[0], "bot.invite_to_group:1");
         assert_eq!(seq[1], "bot.accept_invite:2");
-        assert!(seq[8..13].iter().all(|c| c.starts_with("bot.enter_instance:")));
+        assert_eq!(seq[2], "obs.get_group:0", "confirm-poll must follow accept: {seq:?}");
+        assert!(seq[12..17].iter().all(|c| c.starts_with("bot.enter_instance:")),
+            "placements must be at positions 12-16: {seq:?}");
     }
 
     // T2-new(a): when the 2nd invite (leader -> dps 3) fails, failed_guid == Some(3).
@@ -324,10 +415,10 @@ mod tests {
         assert!(res.note.contains('3'), "note must name the failing bot: {}", res.note);
         assert!(res.note.contains("rolled back"), "note must record the rollback: {}", res.note);
 
-        // Bail at the 2nd invite: invite(2)+accept(2)+invite(3 fails) = 3 calls, then
-        // roll back the joined members (leader 1 + member 2) = 2 leave_group calls.
+        // Bail at the 2nd invite: invite(2)+accept(2)+obs.get_group(confirm 2)+invite(3 fails)
+        // = 4 calls, then roll back the joined members (leader 1 + member 2) = 2 leave_group calls.
         let seq = calls.lock().unwrap().clone();
-        assert_eq!(seq.len(), 5, "3 form calls + 2 rollback leave_group calls: {seq:?}");
+        assert_eq!(seq.len(), 6, "4 form calls + 2 rollback leave_group calls: {seq:?}");
         // No placement happened.
         assert!(seq.iter().all(|c| !c.starts_with("bot.enter_instance:")), "no placement: {seq:?}");
         // Rollback tore down the leader and the one already-joined member.
@@ -470,6 +561,162 @@ mod tests {
         assert!(
             seq.iter().all(|c| !c.starts_with("bot.leave_group")),
             "no rollback needed for lfg.form_group failure: {seq:?}"
+        );
+    }
+
+    // T-confirm(a): "slow-but-eventual join" — obs.get_group returns the member absent on
+    // the first call, then present on the second. fulfill must poll and eventually confirm,
+    // returning formed:true. The recorded call sequence must show obs.get_group appearing
+    // after bot.accept_invite for the member being confirmed.
+    //
+    // Mock strategy: a shared atomic counter tracks how many obs.get_group calls have
+    // been issued. Before the 2nd call the response omits member 2; on the 2nd call it
+    // includes member 2. All other calls use standard happy-path responses.
+    #[tokio::test]
+    async fn confirm_poll_eventually_sees_member_and_forms() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_h = calls.clone();
+        // count how many obs.get_group invocations have occurred
+        let get_group_count = Arc::new(AtomicU32::new(0));
+        let ggc_h = get_group_count.clone();
+
+        let handler = move |Path(name): Path<String>, Json(args): Json<serde_json::Value>| {
+            let calls = calls_h.clone();
+            let ggc = ggc_h.clone();
+            async move {
+                let bot = args.get("bot_guid").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                calls.lock().unwrap().push(format!("{name}:{bot}"));
+                if name == "obs.get_group" {
+                    let n = ggc.fetch_add(1, Ordering::SeqCst);
+                    // First call: member 2 absent (only leader present). Subsequent calls:
+                    // member 2 present (join has propagated).
+                    let members = if n == 0 {
+                        serde_json::json!([{"guid": 1u64}])
+                    } else {
+                        serde_json::json!([{"guid": 1u64}, {"guid": 2u64}])
+                    };
+                    return (StatusCode::OK, Json(serde_json::json!({
+                        "ok": true,
+                        "result": {
+                            "in_group": true,
+                            "group_type": "party",
+                            "leader_guid": 1u64,
+                            "members": members,
+                        }
+                    })));
+                }
+                // All other calls: standard happy-path group response for obs.* tools
+                // and empty result for bot.* tools.
+                (StatusCode::OK, Json(serde_json::json!({ "ok": true, "result": {} })))
+            }
+        };
+        let app = Router::new().route("/v1/tools/:name", post(handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let base = format!("http://{addr}");
+
+        // Only test with a 2-member proposal (leader=1, non-leader=2) so we only have
+        // one confirm-poll site and the accounting is straightforward.
+        let p = MatchProposal {
+            dungeon_id: 4,
+            tank: 1,
+            healer: 2,
+            dps: vec![],
+            has_real_player: false,
+            real_player_guid: None,
+        };
+        let h = Harness::new(base, "tok".into());
+        let res = fulfill(&h, &p, &dungeon()).await;
+
+        assert!(res.formed, "must form: member eventually joined: {}", res.note);
+        assert_eq!(res.placed, 2, "both members placed: {}", res.note);
+
+        let seq = calls.lock().unwrap().clone();
+        // Find where obs.get_group first appears and ensure bot.accept_invite precedes it.
+        let accept_pos = seq.iter().position(|c| c.starts_with("bot.accept_invite")).expect("accept must be present");
+        let first_gg_pos = seq.iter().position(|c| c.starts_with("obs.get_group")).expect("obs.get_group must be present");
+        assert!(
+            first_gg_pos > accept_pos,
+            "obs.get_group must follow bot.accept_invite in call sequence: {seq:?}"
+        );
+        // The slow-join required 2 obs.get_group calls (first absent, second present).
+        let gg_calls: Vec<&String> = seq.iter().filter(|c| c.starts_with("obs.get_group")).collect();
+        assert_eq!(gg_calls.len(), 2, "slow join needs 2 obs.get_group polls: {seq:?}");
+    }
+
+    // T-confirm(b): "never joins" — obs.get_group never contains the member. fulfill must
+    // exhaust the poll cap and return formed:false with failed_guid:Some(m) and a note
+    // that mentions confirm-timeout.
+    #[tokio::test]
+    async fn confirm_poll_timeout_triggers_rollback() {
+        let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let calls_h = calls.clone();
+
+        let handler = move |Path(name): Path<String>, Json(args): Json<serde_json::Value>| {
+            let calls = calls_h.clone();
+            async move {
+                let bot = args.get("bot_guid").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                calls.lock().unwrap().push(format!("{name}:{bot}"));
+                if name == "obs.get_group" {
+                    // Always return a group that contains only the leader — member never joins.
+                    return (StatusCode::OK, Json(serde_json::json!({
+                        "ok": true,
+                        "result": {
+                            "in_group": true,
+                            "group_type": "party",
+                            "leader_guid": 1u64,
+                            "members": [{"guid": 1u64}],
+                        }
+                    })));
+                }
+                (StatusCode::OK, Json(serde_json::json!({ "ok": true, "result": {} })))
+            }
+        };
+        let app = Router::new().route("/v1/tools/:name", post(handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let base = format!("http://{addr}");
+
+        // 2-member proposal: leader=1, non-leader=2. Member 2 never confirms.
+        let p = MatchProposal {
+            dungeon_id: 4,
+            tank: 1,
+            healer: 2,
+            dps: vec![],
+            has_real_player: false,
+            real_player_guid: None,
+        };
+        let h = Harness::new(base, "tok".into());
+        let res = fulfill(&h, &p, &dungeon()).await;
+
+        assert!(!res.formed, "must not form when confirm-poll exhausted: {}", res.note);
+        assert_eq!(
+            res.failed_guid,
+            Some(2),
+            "failed_guid must name the non-confirming member: {:?}",
+            res.failed_guid
+        );
+        assert!(
+            res.note.contains("confirm-timeout"),
+            "note must mention confirm-timeout: {}",
+            res.note
+        );
+
+        let seq = calls.lock().unwrap().clone();
+        // MAX_INVITE_CONFIRM_ATTEMPTS obs.get_group calls must have fired.
+        let gg_calls: Vec<&String> = seq.iter().filter(|c| c.starts_with("obs.get_group")).collect();
+        assert_eq!(
+            gg_calls.len(),
+            MAX_INVITE_CONFIRM_ATTEMPTS as usize,
+            "must exhaust the full poll cap: {seq:?}"
+        );
+        // Rollback must have sent leave_group to the leader (the only joined member at time of failure).
+        assert!(
+            seq.iter().any(|c| c == "bot.leave_group:1"),
+            "rollback must leave_group the leader: {seq:?}"
         );
     }
 

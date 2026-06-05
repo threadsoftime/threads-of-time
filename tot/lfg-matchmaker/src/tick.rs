@@ -256,6 +256,22 @@ mod tests {
                         }
                     }));
                 }
+                // obs.get_group: return a synthetic group containing all test-range guids
+                // so confirm_member_joined always passes in happy-path tick tests.
+                if name == "obs.get_group" {
+                    return Json(serde_json::json!({
+                        "ok": true,
+                        "result": {
+                            "in_group": true,
+                            "group_type": "party",
+                            "leader_guid": 1u64,
+                            "members": [
+                                {"guid": 1u64}, {"guid": 2u64}, {"guid": 3u64},
+                                {"guid": 4u64}, {"guid": 5u64}, {"guid": 6u64}, {"guid": 7u64},
+                            ]
+                        }
+                    }));
+                }
                 Json(serde_json::json!({ "ok": true, "result": {} }))
             }
         };
@@ -374,6 +390,23 @@ mod tests {
                     return Json(
                         serde_json::json!({ "ok": true, "result": { "pending": [] } }),
                     );
+                }
+
+                // obs.get_group: always return a group with all test-range members present
+                // so confirm_member_joined passes in the happy-path arms of these tests.
+                if name == "obs.get_group" {
+                    return Json(serde_json::json!({
+                        "ok": true,
+                        "result": {
+                            "in_group": true,
+                            "group_type": "party",
+                            "leader_guid": 1u64,
+                            "members": [
+                                {"guid": 1u64}, {"guid": 2u64}, {"guid": 3u64},
+                                {"guid": 4u64}, {"guid": 5u64}, {"guid": 6u64}, {"guid": 7u64},
+                            ]
+                        }
+                    }));
                 }
 
                 // Reject the specific (tool, target) we want to fail.
@@ -733,6 +766,23 @@ mod tests {
                         return Json(
                             serde_json::json!({ "ok": true, "result": { "pending": [] } }),
                         );
+                    }
+
+                    // obs.get_group: return a group with all test-range members present
+                    // so confirm_member_joined passes during the invite/accept phase.
+                    if name == "obs.get_group" {
+                        return Json(serde_json::json!({
+                            "ok": true,
+                            "result": {
+                                "in_group": true,
+                                "group_type": "party",
+                                "leader_guid": 1u64,
+                                "members": [
+                                    {"guid": 1u64}, {"guid": 2u64}, {"guid": 3u64},
+                                    {"guid": 4u64}, {"guid": 5u64},
+                                ]
+                            }
+                        }));
                     }
 
                     // Fail bot.enter_instance for guid 5 on its first invocation.
