@@ -1154,6 +1154,14 @@ mod tests {
         );
         assert!(prompt.system.contains("bot_guid is 1001"));
         assert!(prompt.system.contains("talkativeness=0.7"));
+        // Integration-level guard for the format_f64_python reroute (decide.rs ~L612):
+        // attitude_to_master=0.0 is the whole-number case — must render "0.0", not "0"
+        // (Python f"{0.0}" -> "0.0"). courage/greed lock the other rerouted f64 traits.
+        assert!(prompt.system.contains("attitude_to_master=0.0"),
+            "whole-number trait must render as 0.0 not 0; got: {}",
+            &prompt.system[..200.min(prompt.system.len())]);
+        assert!(prompt.system.contains("courage=0.8"));
+        assert!(prompt.system.contains("greed=0.3"));
         assert!(prompt.system.contains("party_invite_policy=accept_from_known"));
         assert!(prompt.system.contains("Your default dungeon role: tank or healer."));
     }

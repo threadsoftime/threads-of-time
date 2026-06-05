@@ -224,8 +224,7 @@ mod tests {
     ///   class M(BaseModel):
     ///       a: int = 1
     ///       b: Optional[str] = None
-    ///   print(json.dumps(M().model_dump(exclude_none=True), separators=(",",":")
-    ///   ))'
+    ///   print(json.dumps(M().model_dump(exclude_none=True), separators=(",",":")))'
     ///   # -> {"a":1}    (key "b" is ABSENT, not present as null)
     #[test]
     fn strip_top_level_nulls_pydantic_oracle() {
