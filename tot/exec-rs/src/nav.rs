@@ -55,8 +55,10 @@ pub enum NavError {
     NoPath,
     #[error("bot did not arrive within the time budget")]
     Timeout,
-    #[error("bot made no forward progress after {0} re-path attempts")]
+    #[error("bot made no progress toward destination after {0} re-path attempts")]
     Stuck(u32),
+    #[error("re-path budget exhausted after {0} attempts without reaching destination")]
+    RepathBudgetExceeded(u32),
 }
 
 /// Destination coordinates in WoW world-space.
@@ -154,9 +156,21 @@ fn dist(a: &PathPoint, b: &PathPoint) -> f64 {
 /// Drive `bot_guid` to `dest` using the server navmesh: find_path → move_path → await arrival,
 /// re-querying on INCOMPLETE paths. The worldserver anchors each `find_path` from the bot's
 /// live position, so re-paths need no explicit new-origin arg (same as M0).
+///
+/// Stuck detection: after each INCOMPLETE segment completes, we measure the bot's distance
+/// to the FINAL destination. If it hasn't closed the gap by at least `STUCK_THRESHOLD` yards
+/// since the previous iteration, we return `NavError::Stuck`. This cannot false-trigger on a
+/// legitimately-advancing walk (which by definition reduces the distance to dest by more than
+/// `STUCK_THRESHOLD` each segment). The separate `NavError::RepathBudgetExceeded` is returned
+/// when the raw re-path count cap (`MAX_REPATH`) is hit regardless of progress.
 pub async fn walk_to(client: &HarnessClient, bot_guid: u64, dest: Dest) -> Result<(), NavError> {
     let mut repath_count = 0u32;
-    let mut last_segment_start: Option<PathPoint> = None;
+    // Tracks the bot's distance to `dest` at the end of each INCOMPLETE segment, so that the
+    // next iteration can verify we got meaningfully closer.
+    let mut last_dist_to_dest: Option<f64> = None;
+
+    // Synthetic PathPoint for the final destination — used only for distance measurement.
+    let dest_pt = PathPoint { x: dest.x, y: dest.y, z: dest.z };
 
     loop {
         let path = find_path(client, bot_guid, dest).await?;
@@ -171,38 +185,43 @@ pub async fn walk_to(client: &HarnessClient, bot_guid: u64, dest: Dest) -> Resul
         if path.points.len() < 2 {
             return Ok(());
         }
-        // Forward-progress guard between re-path iterations.
-        if let Some(ref prev_start) = last_segment_start {
-            let current_pos = get_position(client, bot_guid).await?;
-            if dist(prev_start, &current_pos) < STUCK_THRESHOLD {
-                return Err(NavError::Stuck(repath_count));
-            }
-        }
-        last_segment_start = path.points.first().cloned();
 
         let move_res = move_path(client, bot_guid, &path.points).await?;
 
         let wait_ms = move_res.duration_ms.clamp(0, MAX_WAIT_MS);
         tokio::time::sleep(std::time::Duration::from_millis(wait_ms as u64)).await;
 
-        let mut arrived = false;
+        // Poll for arrival at the segment's final waypoint.
+        let mut arrival_pos: Option<PathPoint> = None;
         for _ in 0..MAX_ARRIVAL_CHECKS {
             let pos = get_position(client, bot_guid).await?;
             if dist(&pos, &final_wp) <= ARRIVAL_TOLERANCE {
-                arrived = true;
+                arrival_pos = Some(pos);
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(RECHECK_INTERVAL_MS)).await;
         }
-        if !arrived {
-            return Err(NavError::Timeout);
-        }
+        let arrival_pos = match arrival_pos {
+            Some(p) => p,
+            None => return Err(NavError::Timeout),
+        };
 
         if path.is_incomplete() {
             repath_count += 1;
             if repath_count > MAX_REPATH {
-                return Err(NavError::Stuck(repath_count));
+                return Err(NavError::RepathBudgetExceeded(repath_count));
             }
+
+            // Progress guard: did we get meaningfully closer to the FINAL destination?
+            // We reuse `arrival_pos` (already fetched) to avoid an extra `obs.get_position` call.
+            let current_dist = dist(&arrival_pos, &dest_pt);
+            if let Some(prev_dist) = last_dist_to_dest {
+                if prev_dist - current_dist < STUCK_THRESHOLD {
+                    return Err(NavError::Stuck(repath_count));
+                }
+            }
+            last_dist_to_dest = Some(current_dist);
+
             continue;
         }
         return Ok(());
@@ -424,9 +443,11 @@ mod tests {
 
     #[tokio::test]
     async fn walk_to_incomplete_repath_succeeds() {
-        // Iteration 1: find_path → INCOMPLETE [0→5]; move_path; arrival at (5,0,0) ✓; repath.
-        // Iteration 2: find_path → NORMAL [5→10]; stuck check: get_position→(5,0,0), dist=5≥1 ✓;
-        //              move_path; arrival at (10,0,0) ✓; NORMAL → Ok(()).
+        // Iteration 1: find_path → INCOMPLETE [0→5]; move_path; arrival poll → (5,0,0) ✓.
+        //              dist_to_dest=5.0 (dest=(10,0,0)); last_dist_to_dest=Some(5.0). Repath.
+        // Iteration 2: find_path → NORMAL [5→10]; move_path; arrival poll → (10,0,0) ✓.
+        //              path.is_incomplete()==false → Ok(()).
+        //              No stuck check on NORMAL segment — progress guard is inside `if path.is_incomplete()`.
         //
         // Two separate monotonic counters: `fp` counts find_path calls (switches at 2nd),
         // `mp` counts move_path calls (determines final point).
@@ -471,8 +492,10 @@ mod tests {
 
     #[tokio::test]
     async fn walk_to_stuck_when_no_progress() {
-        // Always INCOMPLETE; position returns (0.5,0,0): arrives (dist to (1,0,0)=0.5<2.0),
-        // re-loops; on iter 2 progress = dist((0,0,0),(0.5,0,0))=0.5 < STUCK_THRESHOLD(1.0) → Stuck.
+        // Always INCOMPLETE; bot stays at ~(0.5,0,0); dest=(100,0,0).
+        // Iter 1: arrival at (0.5,0,0); dist_to_dest≈99.5; last_dist_to_dest=Some(99.5). Repath.
+        // Iter 2: arrival at (0.5,0,0); dist_to_dest≈99.5;
+        //         prev_dist(99.5) - current_dist(99.5) = 0 < STUCK_THRESHOLD(1.0) → Stuck.
         let base = spawn_mock(|name, _args| match name.as_str() {
             "nav.find_path" => serde_json::json!({ "path_type": 4i64,
                 "points": [{"x":0.0,"y":0.0,"z":0.0},{"x":1.0,"y":0.0,"z":0.0}] }),
