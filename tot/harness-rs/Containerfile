@@ -41,29 +41,42 @@ ENV CARGO_BUILD_JOBS=4
 
 WORKDIR /build
 
-# Workspace + ALL SIX member manifests are needed for workspace resolution
+# Workspace + ALL TEN member manifests are needed for workspace resolution
 # (audited against tot/Cargo.toml [workspace.members]:
-# brain-rs, game-event-scheduler, harness-rs, lfg-matchmaker, memory-rs, slice-host).
+# brain-rs, exec-rs, game-event-scheduler, harness-rs, lfg-matchmaker,
+# memory-rs, slice-host, tot-harness-client, tot-mcp-bearer-auth, tot-schema-transform).
+# Per kb_57b453cd 2026-06-03 lesson: missing member stubs cause
+# "failed to read <crate>/Cargo.toml" at dep-compile time.
 COPY Cargo.toml Cargo.lock ./
 COPY brain-rs/Cargo.toml              ./brain-rs/
+COPY exec-rs/Cargo.toml               ./exec-rs/
 COPY game-event-scheduler/Cargo.toml ./game-event-scheduler/
 COPY harness-rs/Cargo.toml            ./harness-rs/
 COPY lfg-matchmaker/Cargo.toml        ./lfg-matchmaker/
 COPY memory-rs/Cargo.toml             ./memory-rs/
 COPY slice-host/Cargo.toml            ./slice-host/
+COPY tot-harness-client/Cargo.toml    ./tot-harness-client/
+COPY tot-mcp-bearer-auth/Cargo.toml   ./tot-mcp-bearer-auth/
+COPY tot-schema-transform/Cargo.toml  ./tot-schema-transform/
 
 # Stub sources for ALL members so `cargo build -p harness-rs` can resolve the
 # workspace and compile harness-rs's dependency crates without real sources.
 # memory-rs declares a lib + two bins (memory-rs, embed-stub) + a build.rs — all
 # are stubbed (memory-rs is NOT built by `-p harness-rs`, but its declared target
 # files must exist for workspace target discovery). brain-rs declares a lib +
-# one bin (brain-rs) + a build.rs. The stubs are replaced by the real harness-rs
-# sources in the COPY step below.
-RUN mkdir -p brain-rs/src game-event-scheduler/src harness-rs/src lfg-matchmaker/src \
-             memory-rs/src memory-rs/src/bin slice-host/src \
+# one bin (brain-rs) + a build.rs.
+# exec-rs declares a lib (exec_rs) + a bin (exec-rs) — both stubbed.
+# tot-harness-client, tot-mcp-bearer-auth, tot-schema-transform are pure libraries
+# (auto-detected src/lib.rs) — stub each.
+# The stubs are replaced by the real harness-rs sources in the COPY step below.
+RUN mkdir -p brain-rs/src exec-rs/src game-event-scheduler/src harness-rs/src \
+             lfg-matchmaker/src memory-rs/src memory-rs/src/bin slice-host/src \
+             tot-harness-client/src tot-mcp-bearer-auth/src tot-schema-transform/src \
     && echo 'pub fn _stub() {}' > brain-rs/src/lib.rs \
     && echo 'fn main() {}'      > brain-rs/src/main.rs \
     && echo 'fn main() {}'      > brain-rs/build.rs \
+    && echo 'pub fn _stub() {}' > exec-rs/src/lib.rs \
+    && echo 'fn main() {}'      > exec-rs/src/main.rs \
     && echo 'pub fn _stub() {}' > game-event-scheduler/src/lib.rs \
     && echo 'fn main() {}'      > game-event-scheduler/src/main.rs \
     && echo 'fn main() {}'      > harness-rs/src/main.rs \
@@ -74,18 +87,30 @@ RUN mkdir -p brain-rs/src game-event-scheduler/src harness-rs/src lfg-matchmaker
     && echo 'fn main() {}'      > memory-rs/src/bin/embed_stub.rs \
     && echo 'fn main() {}'      > memory-rs/build.rs \
     && echo 'fn main() {}'      > slice-host/src/main.rs \
+    && echo 'pub fn _stub() {}' > tot-harness-client/src/lib.rs \
+    && echo 'pub fn _stub() {}' > tot-mcp-bearer-auth/src/lib.rs \
+    && echo 'pub fn _stub() {}' > tot-schema-transform/src/lib.rs \
     && cargo zigbuild --release --target x86_64-unknown-linux-musl -p harness-rs --bin harness-rs \
     && rm -rf harness-rs/src
 
 # ── Stage 2: real source build ────────────────────────────────────────────────
 
+# Copy ALL local workspace crates that harness-rs depends on (not just harness-rs
+# itself). harness-rs path-deps: tot-mcp-bearer-auth, tot-schema-transform.
+# Without these COPY steps the dep-cache stub artifacts are used for these crates
+# even when compiling harness-rs with real sources, causing:
+#   "cannot find trait `TokenLookup` in crate `tot_mcp_bearer_auth`"
 COPY harness-rs/src/ ./harness-rs/src/
+COPY tot-mcp-bearer-auth/src/ ./tot-mcp-bearer-auth/src/
+COPY tot-schema-transform/src/ ./tot-schema-transform/src/
 
 # CRITICAL (anti-stub fix — kb_87a7eade item 45): touch all .rs AFTER COPY so
 # Cargo's fingerprint sees them as newer than the cached stub artifacts and forces
 # a full recompile. Without this, `cargo build` finishes in ~0.1s and ships the
 # stub `fn main() {}` binary (links clean, passes ELF checks, exits immediately).
-RUN find /build/harness-rs/src -name "*.rs" -exec touch {} \+
+# Also touch the path-dep sources so their stubs are overwritten.
+RUN find /build/harness-rs/src /build/tot-mcp-bearer-auth/src /build/tot-schema-transform/src \
+        -name "*.rs" -exec touch {} \+
 
 RUN cargo zigbuild --release --target x86_64-unknown-linux-musl -p harness-rs --bin harness-rs
 

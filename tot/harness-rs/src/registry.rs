@@ -117,7 +117,7 @@ impl Registry {
 
 /// Build the V1 registry per spec §6.
 ///
-/// Verbatim port of `registry.py:build_v1_registry` (47 entries).
+/// Verbatim port of `registry.py:build_v1_registry` (48 entries).
 pub fn build_v1_registry() -> Registry {
     Registry::new(vec![
         // GM-tier
@@ -175,6 +175,8 @@ pub fn build_v1_registry() -> Registry {
         ToolEntry::new("memory.list",             "memory.list",            Some("bot_guid"),    true),
         ToolEntry::new("memory.update",           "memory.update",          Some("bot_guid"),    true),
         ToolEntry::new("memory.delete",           "memory.delete",          Some("bot_guid"),    true),
+        // nav.* (1) — server-side navmesh primitive
+        ToolEntry::new("nav.find_path",           "nav.find_path",          Some("bot_guid"),    true),
         // LFG force-form primitives (Inc 1)
         ToolEntry::new("lfg.form_group",          "lfg.form_group",         None,                true),
         // LFG cancel drain (Inc 2)
@@ -192,9 +194,9 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn registry_has_47_tools() {
+    fn registry_has_48_tools() {
         let reg = build_v1_registry();
-        assert_eq!(reg.names().len(), 47);
+        assert_eq!(reg.names().len(), 48);
     }
 
     #[test]
@@ -267,6 +269,16 @@ mod tests {
         let e = reg.find("event.stop").unwrap();
         assert!(e.subject_guid_arg.is_none());
         assert!(e.forwards_to_ac);
+    }
+
+    #[test]
+    fn nav_find_path_registered() {
+        let reg = build_v1_registry();
+        let e = reg.find("nav.find_path").unwrap();
+        assert_eq!(e.name, "nav.find_path");
+        assert_eq!(e.required_scope, "nav.find_path");
+        assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
+        assert!(e.forwards_to_ac, "nav.find_path must forward to AC");
     }
 
     // ── check_self_binding ─────────────────────────────────────────────────

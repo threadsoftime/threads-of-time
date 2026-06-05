@@ -1,4 +1,4 @@
-//! MCP ServerHandler with all 47 V1 tools.
+//! MCP ServerHandler with all 48 V1 tools.
 //!
 //! Port of `harness_daemon/mcp_server.py:build_mcp_server`.
 //!
@@ -9,7 +9,7 @@
 //!   `impl ServerHandler for HarnessMcp` sets `serverInfo`.
 //! - Every tool is a direct `#[tool]` fn that forwards to `self.forward(...)`.
 //!
-//! IMPORTANT: All 47 tool methods must be defined DIRECTLY in the
+//! IMPORTANT: All 48 tool methods must be defined DIRECTLY in the
 //! `#[tool_router] impl HarnessMcp` block with `#[tool(...)]` attributes on
 //! each function. The `#[tool_router]` proc macro detects `#[tool]` attributes
 //! in the token stream BEFORE macro_rules expansion — so `macro_rules!`
@@ -101,7 +101,7 @@ fn gen_mcp_request_id() -> String {
 }
 
 impl HarnessMcp {
-    /// Shared dispatch path for all 47 tool methods.
+    /// Shared dispatch path for all 48 tool methods.
     ///
     /// Steps (mirror mcp_server.py:111-150):
     /// 1. Resolve TokenRecord from Parts extensions → build AuthResult.
@@ -177,7 +177,7 @@ impl HarnessMcp {
     }
 }
 
-// ── 47-tool #[tool_router] impl ───────────────────────────────────────────────
+// ── 48-tool #[tool_router] impl ───────────────────────────────────────────────
 //
 // CRITICAL: Each tool method MUST be defined directly with `#[tool(...)]` on
 // the function. Do NOT use macro_rules! invocations here — the `#[tool_router]`
@@ -421,6 +421,13 @@ impl HarnessMcp {
         self.forward("memory.delete", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
     }
 
+    // ── nav.* (1) ────────────────────────────────────────────────────────────
+
+    #[tool(name = "nav.find_path", description = "Compute a navmesh path from the bot's current position to (dest_x, dest_y, dest_z) using server-side MMaps/Detour. Returns path_type bitmask and ordered waypoints.")]
+    async fn nav_find_path(&self, Parameters(w): Parameters<schemas::NavFindPathWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
+        self.forward("nav.find_path", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
+    }
+
     // ── lfg.* (2) ────────────────────────────────────────────────────────────
 
     #[tool(name = "lfg.form_group", description = "Force-create a server-side LFG group and teleport all members into the dungeon.")]
@@ -477,7 +484,7 @@ mod tests {
     // FAIL TO BOOT.
     //
     // This test asserts the representative case (obs.ping).  The full suite
-    // covering all 47 wrappers lives in mcp::schemas::tests::all_47_wrappers_have_args_envelope.
+    // covering all 48 wrappers lives in mcp::schemas::tests::all_48_wrappers_have_args_envelope.
     // (A live tools/list assertion previously lived in the Python parity gate,
     // retired along with the Python sidecars.)
     #[test]
