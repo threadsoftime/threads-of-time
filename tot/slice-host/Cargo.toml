@@ -16,6 +16,11 @@ lfg-matchmaker = { path = "../lfg-matchmaker" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
 axum = "0.7"
 
+# Observability: a single global tracing subscriber for the whole host, so the
+# hosted slices' `tracing` events (e.g. lfg-matchmaker's per-tick span) are
+# actually emitted in the deployed service. Filtered via RUST_LOG.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 serde_json = "1"

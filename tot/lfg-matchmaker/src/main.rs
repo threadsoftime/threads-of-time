@@ -37,8 +37,19 @@ async fn shutdown_signal() {
 
 #[tokio::main]
 async fn main() {
+    // Init the tracing subscriber for the standalone binary only — the library
+    // must NOT init global state (slice-host is responsible for subscriber init
+    // when composing this library; see slice-host/src/main.rs).
+    //
+    // NOTE: slice-host currently has NO tracing subscriber init (it uses eprintln!
+    // throughout). When slice-host is migrated to tracing, it should add the
+    // subscriber init there and this note should be removed.
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
     let cfg = Config::from_env().unwrap_or_else(|e| {
-        eprintln!("config error: {e}");
+        tracing::error!(error = %e, "config error");
         std::process::exit(2);
     });
 
@@ -56,7 +67,7 @@ async fn main() {
 
     let app = lfg_matchmaker::api::router(state);
     let listener = tokio::net::TcpListener::bind(&cfg.listen_addr).await.expect("bind");
-    eprintln!("lfg-matchmaker listening on {} (tick {}s)", cfg.listen_addr, cfg.tick_secs);
+    tracing::info!(listen = %cfg.listen_addr, tick_secs = cfg.tick_secs, "lfg-matchmaker listening");
 
     let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
 
@@ -66,15 +77,15 @@ async fn main() {
     tokio::select! {
         res = server => {
             if let Err(e) = res {
-                eprintln!("[supervise] server error: {e}");
+                tracing::error!(error = %e, "server error");
             } else {
-                eprintln!("[supervise] server shut down gracefully");
+                tracing::info!("server shut down gracefully");
             }
         }
         res = tick_handle => {
             match res {
-                Ok(()) => eprintln!("[supervise] tick loop exited unexpectedly — terminating"),
-                Err(e) => eprintln!("[supervise] tick loop panicked: {e} — terminating"),
+                Ok(()) => tracing::error!("tick loop exited unexpectedly — terminating"),
+                Err(e) => tracing::error!(error = %e, "tick loop panicked — terminating"),
             }
             std::process::exit(1);
         }

@@ -54,32 +54,37 @@ pub async fn select_fill_bots(
             break;
         }
         if probed >= MAX_PROBES {
-            eprintln!(
-                "[roster] probe cap ({MAX_PROBES}) reached; pool may be short \
-                 (needed={needed}, found={})",
-                selected.len()
-            );
+            tracing::warn!(max_probes = MAX_PROBES, needed, found = selected.len(), "roster probe cap reached; pool may be short");
             break;
         }
 
         let state = match harness.get_state(candidate).await {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[roster] get_state {candidate} failed: {e}; skipping");
+                tracing::warn!(guid = candidate, error = %e, "roster get_state failed; skipping");
                 continue;
             }
         };
 
-        if is_eligible(&state, faction) {
+        // Faction check: derive the bot's faction from its race string and
+        // reject mismatches before the generic eligibility check.
+        let self_node = state.get("self");
+        let race = self_node
+            .and_then(|n| n.get("race"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let bot_faction = Faction::from_race(race);
+        if bot_faction != faction {
+            continue;
+        }
+
+        if is_eligible(&state) {
             selected.push(candidate);
         }
     }
 
     if selected.len() < needed {
-        eprintln!(
-            "[roster] short pool: needed={needed} eligible={} (faction={faction:?})",
-            selected.len()
-        );
+        tracing::warn!(needed, eligible = selected.len(), faction = ?faction, "roster short pool");
         return Err(HarnessError::Shape(format!(
             "roster: only {} eligible bots found, needed {needed}",
             selected.len()
@@ -90,16 +95,18 @@ pub async fn select_fill_bots(
 }
 
 /// Check eligibility from a raw `obs.get_state` result value.
-fn is_eligible(state: &Value, want_faction: Faction) -> bool {
+///
+/// Returns `true` when the player/bot is free to join a group:
+/// - `result.social.in_group == false`
+/// - `result.self.is_in_combat == false`
+///
+/// Faction is NOT checked here. Callers that require same-faction matching
+/// (e.g. `select_fill_bots`) perform the faction check themselves.
+pub(crate) fn is_eligible(state: &Value) -> bool {
     let self_node = match state.get("self") {
         Some(v) => v,
         None => return false,
     };
-    let race = self_node.get("race").and_then(Value::as_str).unwrap_or("");
-    let bot_faction = Faction::from_race(race);
-    if bot_faction != want_faction {
-        return false;
-    }
     let in_group = state
         .get("social")
         .and_then(|s| s.get("in_group"))

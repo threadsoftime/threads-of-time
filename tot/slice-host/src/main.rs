@@ -172,6 +172,14 @@ async fn shutdown_signal() {
 
 #[tokio::main]
 async fn main() {
+    // One global tracing subscriber for the whole host. Without this, the hosted
+    // slices' `tracing` events (lfg-matchmaker's per-tick span etc.) are silently
+    // discarded — the deployed service would be unobservable. Filter via RUST_LOG.
+    // (slice-host's own startup/supervisor logging still uses eprintln by design.)
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
     let listen = listen_addr();
     let harness_base_url = require_env("HARNESS_BASE_URL");
     let harness_bearer = require_env("HARNESS_BEARER");

@@ -49,7 +49,6 @@ impl Harness {
         .await
     }
 
-    #[allow(dead_code)] // scaffolding for the deferred obs pre-poll reconciliation step
     pub async fn get_group(&self, target: u64) -> Result<Value, HarnessError> {
         self.call("obs.get_group", json!({ "target_guid": target })).await
     }
