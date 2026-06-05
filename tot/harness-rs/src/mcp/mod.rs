@@ -1,4 +1,4 @@
-//! MCP adapter — exposes the 47-tool V1 surface over the MCP StreamableHTTP
+//! MCP adapter — exposes the 48-tool V1 surface over the MCP StreamableHTTP
 //! transport so the daemon is a drop-in for the Python FastMCP daemon.
 //!
 //! Public surface:
