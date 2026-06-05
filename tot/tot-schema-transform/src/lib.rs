@@ -211,6 +211,33 @@ mod tests {
         assert_eq!(out, input);
     }
 
+    /// Pydantic-v2 oracle: a field with `None` default is ABSENT (not `null`) after
+    /// `model_dump(exclude_none=True)`, which is what `mcp_server.py:119` uses when
+    /// serialising tool-call args.
+    ///
+    /// Oracle command (do NOT delete /tmp/parity-venv — leave in place):
+    ///   python3 -m venv /tmp/parity-venv && /tmp/parity-venv/bin/pip install -q 'pydantic>=2,<3'
+    ///   /tmp/parity-venv/bin/python -c '
+    ///   import json
+    ///   from pydantic import BaseModel
+    ///   from typing import Optional
+    ///   class M(BaseModel):
+    ///       a: int = 1
+    ///       b: Optional[str] = None
+    ///   print(json.dumps(M().model_dump(exclude_none=True), separators=(",",":")
+    ///   ))'
+    ///   # -> {"a":1}    (key "b" is ABSENT, not present as null)
+    #[test]
+    fn strip_top_level_nulls_pydantic_oracle() {
+        // Input: a JSON object with one non-null key and one null key,
+        // mirroring pydantic model_dump() output before exclude_none.
+        let input = json!({"a": 1, "b": null});
+        let out = strip_top_level_nulls(input);
+        // Pydantic oracle: {"a":1} — key "b" is absent, not null.
+        assert_eq!(out, json!({"a": 1}), "null key must be absent (not present as null), matching pydantic exclude_none=True");
+        assert!(out.get("b").is_none(), "key 'b' must not appear in output");
+    }
+
     // ── transform_nullable_types ──────────────────────────────────────────────
     //
     // The brain client's _render_arg (schema_builder.py:158) calls
