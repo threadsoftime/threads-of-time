@@ -176,7 +176,12 @@ async fn main() {
     // slices' `tracing` events (lfg-matchmaker's per-tick span etc.) are silently
     // discarded — the deployed service would be unobservable. Filter via RUST_LOG.
     // (slice-host's own startup/supervisor logging still uses eprintln by design.)
+    // Write to stderr (unbuffered) rather than the default stdout: in the
+    // musl/scratch container, podman captures stdout via a non-TTY pipe where it
+    // is block-buffered (flushes only at 4 KB or exit), so tick logs never appear
+    // in `podman logs`. stderr is line/unbuffered and shows up immediately.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 

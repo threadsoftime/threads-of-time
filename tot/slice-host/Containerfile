@@ -43,6 +43,12 @@ WORKDIR /build
 # layer is reused.
 # brain-rs added to workspace in Inc-2; its Cargo.toml must be present for
 # workspace resolution even though slice-host does not depend on it.
+# tot-harness-client / tot-schema-transform / tot-mcp-bearer-auth added in
+# Phases 25-26 as shared lib crates; workspace resolution requires their
+# Cargo.toml manifests and lib stubs even though slice-host does not directly
+# depend on all of them (lfg-matchmaker depends on tot-harness-client).
+# Per kb_57b453cd 2026-06-03 lesson: leave non-built-crate stubs alive
+# throughout (do NOT delete them in the rm step) for workspace resolution.
 COPY Cargo.toml Cargo.lock ./
 COPY brain-rs/Cargo.toml              ./brain-rs/
 COPY game-event-scheduler/Cargo.toml ./game-event-scheduler/
@@ -50,13 +56,20 @@ COPY harness-rs/Cargo.toml            ./harness-rs/
 COPY lfg-matchmaker/Cargo.toml        ./lfg-matchmaker/
 COPY memory-rs/Cargo.toml             ./memory-rs/
 COPY slice-host/Cargo.toml             ./slice-host/
+COPY tot-harness-client/Cargo.toml    ./tot-harness-client/
+COPY tot-schema-transform/Cargo.toml  ./tot-schema-transform/
+COPY tot-mcp-bearer-auth/Cargo.toml   ./tot-mcp-bearer-auth/
 
 # Create stub lib/main files so `cargo build` can resolve and cache all deps
 # without compiling actual sources.  We replace them with real sources in the
 # next COPY step.
 # brain-rs: lib + bin + build.rs.  harness-rs: bin.  memory-rs: lib + bin + embed_stub + build.rs.
+# tot-harness-client / tot-schema-transform / tot-mcp-bearer-auth: lib-only (no bin, no build.rs).
+# DO NOT delete stubs for tot-* crates — they are not real-COPY'd later but
+# workspace resolution needs them alive throughout the build.
 RUN mkdir -p brain-rs/src game-event-scheduler/src harness-rs/src lfg-matchmaker/src \
              memory-rs/src memory-rs/src/bin slice-host/src \
+             tot-harness-client/src tot-schema-transform/src tot-mcp-bearer-auth/src \
     && echo 'pub fn _stub() {}' > brain-rs/src/lib.rs \
     && echo 'fn main() {}' > brain-rs/src/main.rs \
     && echo 'fn main() {}' > brain-rs/build.rs \
@@ -70,6 +83,9 @@ RUN mkdir -p brain-rs/src game-event-scheduler/src harness-rs/src lfg-matchmaker
     && echo 'fn main() {}' > memory-rs/src/bin/embed_stub.rs \
     && echo 'fn main() {}' > memory-rs/build.rs \
     && echo 'fn main() {}' > slice-host/src/main.rs \
+    && echo 'pub fn _stub() {}' > tot-harness-client/src/lib.rs \
+    && echo 'pub fn _stub() {}' > tot-schema-transform/src/lib.rs \
+    && echo 'pub fn _stub() {}' > tot-mcp-bearer-auth/src/lib.rs \
     && cargo build --release -p slice-host \
     && rm -rf game-event-scheduler/src lfg-matchmaker/src slice-host/src
 
@@ -82,8 +98,12 @@ RUN mkdir -p brain-rs/src game-event-scheduler/src harness-rs/src lfg-matchmaker
 COPY game-event-scheduler/src ./game-event-scheduler/src/
 COPY lfg-matchmaker/src        ./lfg-matchmaker/src/
 COPY slice-host/src             ./slice-host/src/
+# tot-harness-client is a path-dep of lfg-matchmaker — real sources needed here.
+# tot-schema-transform and tot-mcp-bearer-auth are NOT deps of slice-host or
+# lfg-matchmaker; their stubs remain alive from the dep-cache stage.
+COPY tot-harness-client/src    ./tot-harness-client/src/
 
-RUN find /build/game-event-scheduler/src /build/lfg-matchmaker/src /build/slice-host/src -name "*.rs" -exec touch {} \+
+RUN find /build/game-event-scheduler/src /build/lfg-matchmaker/src /build/slice-host/src /build/tot-harness-client/src -name "*.rs" -exec touch {} \+
 
 RUN cargo build --release -p slice-host
 
