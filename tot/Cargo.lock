@@ -688,6 +688,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "exec-rs"
+version = "0.1.0"
+dependencies = [
+ "axum 0.7.9",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tot-harness-client",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
