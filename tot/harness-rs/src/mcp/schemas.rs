@@ -7,7 +7,7 @@
 //! `Serialize` is required by the MCP handler to call `serde_json::to_value(&w.args)`
 //! (the exclude_none path in `forward()`).
 //!
-//! All 48 tools from `TOOL_SCHEMAS` are represented here.
+//! All 49 tools from `TOOL_SCHEMAS` are represented here.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -868,6 +868,31 @@ pub struct NavFindPathWrapper {
     pub args: NavFindPathArgs,
 }
 
+// ── bot.move_path ─────────────────────────────────────────────────────────────
+
+/// One waypoint in a navmesh path. Mirrors `exec_rs::nav::PathPoint`.
+/// First `Vec<struct>` arg besides `Vec<LfgFormGroupMember>` — the precedent
+/// confirming schemars emits a $defs ref for nested structs.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PathPointArg {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotMovePathArgs {
+    /// Low-32 GUID of the bot to move.
+    pub bot_guid: i64,
+    /// Ordered waypoints (≥2); typically the `points` from a preceding `nav.find_path`.
+    pub points: Vec<PathPointArg>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotMovePathWrapper {
+    pub args: BotMovePathArgs,
+}
+
 // ── lfg.form_group ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -905,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn all_48_wrappers_have_args_envelope() {
+    fn all_49_wrappers_have_args_envelope() {
         // gm (7)
         assert!(has_args_envelope(&schema_for!(GmAdditemWrapper)),     "gm.additem");
         assert!(has_args_envelope(&schema_for!(GmEquipAllWrapper)),    "gm.equip_all");
@@ -958,6 +983,8 @@ mod tests {
         assert!(has_args_envelope(&schema_for!(MemoryDeleteWrapper)), "memory.delete");
         // nav (1)
         assert!(has_args_envelope(&schema_for!(NavFindPathWrapper)), "nav.find_path");
+        // bot.move_path (1) — nested Vec<struct>; Vec<PathPointArg> precedent
+        assert!(has_args_envelope(&schema_for!(BotMovePathWrapper)), "bot.move_path");
         // lfg (2)
         assert!(has_args_envelope(&schema_for!(LfgFormGroupWrapper)), "lfg.form_group");
         assert!(has_args_envelope(&schema_for!(LfgCancelWrapper)),    "lfg.cancel");  // NEW

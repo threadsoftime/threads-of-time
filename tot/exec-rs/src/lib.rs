@@ -5,6 +5,7 @@
 //!
 //! # Public surface
 //!
-//! - [`nav`] — navmesh client: [`nav::find_path`], typed [`nav::Path`], [`nav::flags`].
+//! - [`nav`] — navmesh client + movement orchestrator: [`nav::find_path`],
+//!   [`nav::move_path`], [`nav::walk_to`], typed [`nav::Path`], [`nav::MoveResult`], [`nav::flags`].
 
 pub mod nav;
