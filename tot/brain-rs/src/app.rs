@@ -527,6 +527,9 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
         .trim_end_matches("/mcp/mcp")
         .to_string();
 
+    // G3 will replace this None with Some(Arc::new(sink)) when exec_bot_guid is set.
+    let goal_sink: Option<Arc<dyn tot_goal_contract::GoalSink>> = None;
+
     let supervisor = LoopSupervisor::new(
         triage.clone(),
         decider.clone(),
@@ -542,6 +545,7 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
         memory_http_url.clone(),
         settings.memory_bearer.clone(),
         settings.brain_sse_coalesce_ms,
+        goal_sink,
     );
 
     // ── Rehydrate active bots ─────────────────────────────────────────────────

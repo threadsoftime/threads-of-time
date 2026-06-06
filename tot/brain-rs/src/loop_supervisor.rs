@@ -34,6 +34,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex as StdMutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tot_goal_contract::GoalSink;
+
 use serde_json::{json, Value};
 use tokio::sync::{Mutex as TokioMutex, Notify};
 use tokio::task::JoinHandle;
@@ -113,10 +115,23 @@ pub struct LoopSupervisor {
     sse_tasks: StdMutex<HashMap<i64, JoinHandle<()>>>,
     /// Shared cancel flags for SSE consumers so `stop()` can signal them.
     sse_cancel_flags: StdMutex<HashMap<i64, Arc<AtomicBool>>>,
+
+    // ── G2: goal emission (additive, gated) ─────────────────────────────────
+    /// When `Some`, goal emission is active. When `None` (the default),
+    /// the supervisor behaves exactly as before — byte-identical parity.
+    goal_sink: Option<Arc<dyn GoalSink>>,
+    /// Dedup map: bot_guid → last emitted goal_id. Prevents re-emitting the
+    /// same goal every tick. StdMutex — never held across an `.await`.
+    emitted_goals: StdMutex<HashMap<i64, String>>,
 }
 
 impl LoopSupervisor {
     /// Full constructor — all collaborators supplied.
+    ///
+    /// The `goal_sink` parameter controls goal emission (G2):
+    /// - `None` → pure parity mode (no goal emission; behaviour identical to before).
+    /// - `Some(sink)` → deterministic `Grind` goal emitted at the end of each successful
+    ///   tick when the bot is below cap. Goals are deduplicated per (bot, level).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         triage: Arc<TriageGate>,
@@ -133,6 +148,7 @@ impl LoopSupervisor {
         memory_mcp_url: String,
         memory_bearer: String,
         brain_sse_coalesce_ms: u64,
+        goal_sink: Option<Arc<dyn GoalSink>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             triage,
@@ -153,6 +169,8 @@ impl LoopSupervisor {
             tasks: StdMutex::new(HashMap::new()),
             sse_tasks: StdMutex::new(HashMap::new()),
             sse_cancel_flags: StdMutex::new(HashMap::new()),
+            goal_sink,
+            emitted_goals: StdMutex::new(HashMap::new()),
         })
     }
 
@@ -760,11 +778,63 @@ impl LoopSupervisor {
             }
         }
 
+        // ── G2: goal emission (additive, gated) ───────────────────────────────
+        // Called AFTER all existing telemetry/dispatch/memory paths.
+        // With goal_sink=None this is a complete no-op — parity preserved.
+        self.maybe_emit_goal(bot_guid, &hot_inputs).await;
+
         Ok(TickState {
             bot_guid,
             last_tick_ms: now_ms,
             last_decision_id: Some(event_id.to_string()),
         })
+    }
+
+    /// Emit a goal to the sink if the bot is below cap and the goal has not
+    /// already been emitted for this (bot, level) combination.
+    ///
+    /// Gated on `self.goal_sink`. With `None`, this is a complete no-op.
+    /// Called at the end of `_one_tick_inner` — after dispatch + telemetry.
+    /// `pub(crate)` for unit tests.
+    pub(crate) async fn maybe_emit_goal(&self, bot_guid: i64, hot_inputs: &HashMap<String, Value>) {
+        let sink = match &self.goal_sink {
+            Some(s) => Arc::clone(s),
+            None => return, // ← pure parity path (no-op)
+        };
+
+        // Resolve max_level from the state_store if needed — re-use state_summary
+        // from hot_inputs (same field path as decide()'s at_cap logic).
+        let state_summary = match hot_inputs.get("state_summary") {
+            Some(v) => v.clone(),
+            None => return, // no observation this tick → skip
+        };
+
+        // Derive max_player_level — stored on the Decider, but we keep it
+        // accessible via the state_store path. For simplicity we use a
+        // hard-wired default from config; in practice this value is also
+        // derived from the Decider::max_player_level field which we cannot
+        // reach here without coupling. We rely on the caller (app.rs) to set
+        // the same cap. For now, resolve via the Decider's public field.
+        let max_level = self.decider.max_player_level;
+
+        let envelope = match crate::goal_emitter::synthesize_grind(bot_guid, &state_summary, max_level) {
+            Some(e) => e,
+            None => return, // at cap → no goal
+        };
+
+        // Dedup: emit once per (bot, level). goal_id encodes both.
+        {
+            let mut emitted = self.emitted_goals.lock().unwrap();
+            if emitted.get(&bot_guid).map(|id| id == &envelope.goal_id).unwrap_or(false) {
+                return; // already emitted this (bot, level) goal
+            }
+            emitted.insert(bot_guid, envelope.goal_id.clone());
+        }
+
+        // Emit — best-effort: log on error, do NOT propagate (must not perturb the tick).
+        if let Err(e) = sink.set_goal(bot_guid as u64, envelope).await {
+            warn!("goal_emit_failed bot_guid={} err={:?}", bot_guid, e);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1033,6 +1103,167 @@ mod tests {
     use super::*;
     use crate::models::{Decision, DecisionKind};
     use crate::dispatch::DispatchResult;
+    use std::pin::Pin;
+    use std::future::Future;
+    use tot_goal_contract::{GoalEnvelope, GoalSink};
+
+    // ── TestGoalSink — captures set_goal calls without async_trait ──────────
+
+    struct TestGoalSink {
+        tx: tokio::sync::mpsc::UnboundedSender<(u64, GoalEnvelope)>,
+    }
+
+    impl GoalSink for TestGoalSink {
+        fn set_goal<'life0, 'async_trait>(
+            &'life0 self,
+            bot_guid: u64,
+            envelope: GoalEnvelope,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            let _ = self.tx.send((bot_guid, envelope));
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn make_test_sink() -> (Arc<dyn GoalSink>, tokio::sync::mpsc::UnboundedReceiver<(u64, GoalEnvelope)>) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (Arc::new(TestGoalSink { tx }), rx)
+    }
+
+    /// Build a minimal LoopSupervisor for unit tests.
+    /// Uses the simplest possible Decider (new_test_with_max_level) and no-op
+    /// collaborators for everything not under test.
+    fn minimal_supervisor(goal_sink: Option<Arc<dyn GoalSink>>, max_level: u32) -> Arc<LoopSupervisor> {
+        use crate::decide::Decider;
+        use crate::dispatch::Dispatcher;
+        use crate::models::PersonalityCard;
+        use crate::personality::McpCallable;
+        use crate::state::StateStore;
+        use crate::triage::TriageGate;
+        use tempfile::NamedTempFile;
+
+        struct NoopMcp;
+        impl McpCallable for NoopMcp {
+            fn call<'a>(&'a self, _: &'a str, _: serde_json::Value)
+                -> Pin<Box<dyn Future<Output = Result<serde_json::Value, anyhow::Error>> + Send + 'a>>
+            {
+                Box::pin(async { Ok(serde_json::json!({})) })
+            }
+        }
+
+        struct TestLogWriter;
+        impl DecisionLogWriter for TestLogWriter {
+            fn write(&self, _: &serde_json::Value) {}
+        }
+
+        let mcp: Arc<dyn McpCallable> = Arc::new(NoopMcp);
+        let f = NamedTempFile::new().unwrap();
+        let store = Arc::new(StateStore::open(f.path().to_str().unwrap()).unwrap());
+        store.migrate().unwrap();
+
+        // Keep the tempfile alive for the test by leaking it (small, test-only)
+        std::mem::forget(f);
+
+        let card = PersonalityCard {
+            name: "T".into(), race: "Human".into(), class_: "Warrior".into(),
+            backstory: "T".into(), talkativeness: 0.5, courage: 0.5, greed: 0.0,
+            attitude_to_master: 0.0, party_invite_policy: "none".into(),
+            pvp_appetite: None, raid_appetite: None, completionist_streak: None,
+            gold_motivation: None, profession_appetite: None,
+        };
+        let decider = Arc::new(Decider::new_test_with_max_level(1001, card, "{}", max_level));
+        let triage = Arc::new(TriageGate::new(Arc::clone(&mcp), Arc::clone(&mcp)));
+        let dispatcher = Arc::new(Dispatcher::new(Arc::clone(&mcp), Arc::clone(&mcp), "whisper", None));
+
+        LoopSupervisor::new(
+            triage, decider, dispatcher, store,
+            5.0, 300.0,
+            Arc::new(TestLogWriter),
+            None, None, 3,
+            false, String::new(), String::new(), 200,
+            goal_sink,
+        )
+    }
+
+    fn hot_inputs_with_level(level: u64) -> HashMap<String, serde_json::Value> {
+        let mut m = HashMap::new();
+        m.insert("state_summary".into(), serde_json::json!({ "self": { "level": level } }));
+        m
+    }
+
+    // ── G2 tests ────────────────────────────────────────────────────────────
+
+    /// With goal_sink=None, maybe_emit_goal must be a complete no-op.
+    #[tokio::test]
+    async fn goal_sink_none_is_noop() {
+        let sup = minimal_supervisor(None, 25);
+        let inputs = hot_inputs_with_level(6);
+        // Call twice — if it were to panic or do anything, the test would catch it.
+        sup.maybe_emit_goal(1003, &inputs).await;
+        sup.maybe_emit_goal(1003, &inputs).await;
+        // No assertion needed beyond "doesn't panic" — parity preserved.
+    }
+
+    /// With goal_sink=Some, the first tick at level 6 emits exactly one goal.
+    #[tokio::test]
+    async fn goal_sink_some_emits_on_first_tick_below_cap() {
+        let (sink, mut rx) = make_test_sink();
+        let sup = minimal_supervisor(Some(sink), 25);
+        let inputs = hot_inputs_with_level(6);
+        sup.maybe_emit_goal(1003, &inputs).await;
+        let (guid, env) = rx.try_recv().expect("expected one goal");
+        assert_eq!(guid, 1003u64);
+        assert_eq!(env.goal_id, "grind-1003-6");
+    }
+
+    /// A second tick at the same level must NOT re-emit (dedup).
+    #[tokio::test]
+    async fn goal_sink_dedupes_same_level() {
+        let (sink, mut rx) = make_test_sink();
+        let sup = minimal_supervisor(Some(sink), 25);
+        let inputs = hot_inputs_with_level(6);
+        sup.maybe_emit_goal(1003, &inputs).await;
+        sup.maybe_emit_goal(1003, &inputs).await; // second call — same level
+        // First call succeeds
+        let _ = rx.try_recv().expect("expected first goal");
+        // No second goal
+        assert!(rx.try_recv().is_err(), "second tick at same level must not re-emit");
+    }
+
+    /// A tick at level 7 after one at level 6 MUST emit a new goal.
+    #[tokio::test]
+    async fn goal_sink_re_emits_on_level_change() {
+        let (sink, mut rx) = make_test_sink();
+        let sup = minimal_supervisor(Some(sink), 25);
+        sup.maybe_emit_goal(1003, &hot_inputs_with_level(6)).await;
+        sup.maybe_emit_goal(1003, &hot_inputs_with_level(7)).await;
+        let (_, e1) = rx.try_recv().expect("first goal");
+        let (_, e2) = rx.try_recv().expect("second goal on level-up");
+        assert_eq!(e1.goal_id, "grind-1003-6");
+        assert_eq!(e2.goal_id, "grind-1003-7");
+    }
+
+    /// At cap (level == max_level), must not emit.
+    #[tokio::test]
+    async fn goal_sink_no_emit_at_cap() {
+        let (sink, mut rx) = make_test_sink();
+        let sup = minimal_supervisor(Some(sink), 25);
+        sup.maybe_emit_goal(1003, &hot_inputs_with_level(25)).await;
+        assert!(rx.try_recv().is_err(), "at cap must not emit");
+    }
+
+    /// Missing state_summary in hot_inputs → no emit.
+    #[tokio::test]
+    async fn goal_sink_no_emit_without_state_summary() {
+        let (sink, mut rx) = make_test_sink();
+        let sup = minimal_supervisor(Some(sink), 25);
+        let empty: HashMap<String, serde_json::Value> = HashMap::new();
+        sup.maybe_emit_goal(1003, &empty).await;
+        assert!(rx.try_recv().is_err(), "missing state_summary must not emit");
+    }
 
     #[test]
     fn test_episode_text_keys_sorted_alphabetically() {

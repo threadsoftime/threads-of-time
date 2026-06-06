@@ -173,6 +173,7 @@ fn make_supervisor(
         String::new(),
         String::new(),
         200,
+        None, // goal_sink: None → pure parity mode
     )
 }
 
@@ -286,6 +287,7 @@ fn make_supervisor_with_llm(
         String::new(),
         String::new(),
         200,
+        None, // goal_sink: None → pure parity mode
     )
 }
 
