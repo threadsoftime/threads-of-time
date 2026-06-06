@@ -55,6 +55,27 @@ pub struct GoalEnvelope {
     pub goal: Goal,
 }
 
+/// Why a received `GoalEnvelope` is unusable.
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum EnvelopeError {
+    #[error("goal contract version {got} exceeds supported {supported}")]
+    VersionTooNew { got: u32, supported: u32 },
+}
+
+impl GoalEnvelope {
+    /// Validate the envelope against this build's contract version.
+    /// (Unknown `Goal` variants are rejected earlier, at deserialization time.)
+    pub fn validate(&self) -> Result<(), EnvelopeError> {
+        if self.version > crate::GOAL_CONTRACT_VERSION {
+            return Err(EnvelopeError::VersionTooNew {
+                got: self.version,
+                supported: crate::GOAL_CONTRACT_VERSION,
+            });
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +113,27 @@ mod tests {
                       "mob_filter", "to_level", "rest_threshold"] {
             assert!(json.contains(field), "missing field {field} in {json}");
         }
+    }
+
+    #[test]
+    fn validate_accepts_current_version() {
+        let env = sample_envelope();
+        assert!(env.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_future_version() {
+        let mut env = sample_envelope();
+        env.version = crate::GOAL_CONTRACT_VERSION + 1;
+        let err = env.validate().unwrap_err();
+        assert!(matches!(err, EnvelopeError::VersionTooNew { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn unknown_goal_kind_fails_to_deserialize() {
+        // An unrecognised "kind" must fail deserialization (caller maps to Blocked).
+        let json = r#"{"goal_id":"g","version":1,"goal":{"kind":"teleport_to_moon"}}"#;
+        let res: Result<GoalEnvelope, _> = serde_json::from_str(json);
+        assert!(res.is_err(), "unknown variant must not deserialize");
     }
 }
