@@ -12,3 +12,6 @@ thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
 
 # [profile.*] intentionally absent — the workspace root owns the shared release profile.
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync"] }
