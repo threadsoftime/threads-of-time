@@ -117,7 +117,7 @@ impl Registry {
 
 /// Build the V1 registry per spec §6.
 ///
-/// Verbatim port of `registry.py:build_v1_registry` (49 entries).
+/// Verbatim port of `registry.py:build_v1_registry` (50 entries).
 pub fn build_v1_registry() -> Registry {
     Registry::new(vec![
         // GM-tier
@@ -138,6 +138,8 @@ pub fn build_v1_registry() -> Registry {
         ToolEntry::new("bot.stop",                "bot.stop",               Some("bot_guid"),    true),
         // Bot-tier (M1-walk)
         ToolEntry::new("bot.move_path",           "bot.move_path",          Some("bot_guid"),    true),
+        // Bot-tier (M1-own)
+        ToolEntry::new("bot.set_ai_enabled",      "bot.set_ai_enabled",     Some("bot_guid"),    true),
         // Bot-tier (V1.5 — grouping primitives)
         ToolEntry::new("bot.invite_to_group",     "bot.invite_to_group",    Some("bot_guid"),    true),
         ToolEntry::new("bot.accept_invite",       "bot.accept_invite",      Some("bot_guid"),    true),
@@ -196,9 +198,9 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn registry_has_49_tools() {
+    fn registry_has_50_tools() {
         let reg = build_v1_registry();
-        assert_eq!(reg.names().len(), 49);
+        assert_eq!(reg.names().len(), 50);
     }
 
     #[test]
@@ -291,6 +293,16 @@ mod tests {
         assert_eq!(e.required_scope, "bot.move_path");
         assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
         assert!(e.forwards_to_ac, "bot.move_path must forward to AC");
+    }
+
+    #[test]
+    fn bot_set_ai_enabled_registered() {
+        let reg = build_v1_registry();
+        let e = reg.find("bot.set_ai_enabled").unwrap();
+        assert_eq!(e.name, "bot.set_ai_enabled");
+        assert_eq!(e.required_scope, "bot.set_ai_enabled");
+        assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
+        assert!(e.forwards_to_ac);
     }
 
     // ── check_self_binding ─────────────────────────────────────────────────

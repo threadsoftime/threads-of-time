@@ -7,7 +7,7 @@
 //! `Serialize` is required by the MCP handler to call `serde_json::to_value(&w.args)`
 //! (the exclude_none path in `forward()`).
 //!
-//! All 49 tools from `TOOL_SCHEMAS` are represented here.
+//! All 50 tools from `TOOL_SCHEMAS` are represented here.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -893,6 +893,23 @@ pub struct BotMovePathWrapper {
     pub args: BotMovePathArgs,
 }
 
+// ── bot.set_ai_enabled ────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotSetAiEnabledArgs {
+    /// Low-32 GUID of the bot to own/release.
+    pub bot_guid: i64,
+    /// true = mod-playerbots AI active; false = AI suppressed (new system owns the bot).
+    pub enabled: bool,
+    /// When releasing (enabled=true), have the C++ side call PlayerbotAI::Reset(true).
+    /// Absent → C++ adapter default (true).
+    #[serde(default)]
+    pub reset_on_release: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotSetAiEnabledWrapper { pub args: BotSetAiEnabledArgs }
+
 // ── lfg.form_group ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -930,7 +947,7 @@ mod tests {
     }
 
     #[test]
-    fn all_49_wrappers_have_args_envelope() {
+    fn all_50_wrappers_have_args_envelope() {
         // gm (7)
         assert!(has_args_envelope(&schema_for!(GmAdditemWrapper)),     "gm.additem");
         assert!(has_args_envelope(&schema_for!(GmEquipAllWrapper)),    "gm.equip_all");
@@ -985,6 +1002,8 @@ mod tests {
         assert!(has_args_envelope(&schema_for!(NavFindPathWrapper)), "nav.find_path");
         // bot.move_path (1) — nested Vec<struct>; Vec<PathPointArg> precedent
         assert!(has_args_envelope(&schema_for!(BotMovePathWrapper)), "bot.move_path");
+        // bot.set_ai_enabled (1) — first bare #[serde(default)] Option<bool> (absent → None)
+        assert!(has_args_envelope(&schema_for!(BotSetAiEnabledWrapper)), "bot.set_ai_enabled");
         // lfg (2)
         assert!(has_args_envelope(&schema_for!(LfgFormGroupWrapper)), "lfg.form_group");
         assert!(has_args_envelope(&schema_for!(LfgCancelWrapper)),    "lfg.cancel");  // NEW
