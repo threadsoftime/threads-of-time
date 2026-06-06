@@ -4,8 +4,7 @@
 use std::sync::Arc;
 
 use tokio::task::JoinHandle;
-use tot_goal_contract::{GoalEnvelope, GoalStatus, Goal};
-use tot_goal_contract::wire::{GoalReceiver, StatusSender};
+use tot_goal_contract::{Goal, GoalEnvelope, GoalReceiver, GoalStatus, StatusSender};
 use tot_harness_client::HarnessClient;
 
 use crate::{grind, own};
