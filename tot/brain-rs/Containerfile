@@ -47,34 +47,57 @@ ENV CARGO_BUILD_TARGET=x86_64-unknown-linux-musl \
 WORKDIR /build
 
 # Copy workspace manifests first — dep-compile layer is reused when only
-# source files change. All six workspace members' manifests are needed for
+# source files change. All eleven workspace members' manifests are needed for
 # dependency resolution (audited against tot/Cargo.toml [workspace.members]:
-# brain-rs, game-event-scheduler, harness-rs, lfg-matchmaker, memory-rs, slice-host).
+# brain-rs, exec-rs, game-event-scheduler, harness-rs, lfg-matchmaker,
+# memory-rs, slice-host, tot-goal-contract, tot-harness-client,
+# tot-mcp-bearer-auth, tot-schema-transform).
+# M1 Plan 3 (2026-06-06): added exec-rs, tot-goal-contract, tot-harness-client,
+# tot-mcp-bearer-auth, tot-schema-transform — brain-rs now depends on exec-rs
+# and tot-goal-contract (+ tot-harness-client transitively). Per kb_57b453cd
+# 2026-06-03 lesson: missing member stubs cause "failed to read <crate>/Cargo.toml".
 COPY Cargo.toml Cargo.lock ./
-COPY brain-rs/Cargo.toml             ./brain-rs/
+COPY brain-rs/Cargo.toml              ./brain-rs/
+COPY exec-rs/Cargo.toml               ./exec-rs/
 COPY game-event-scheduler/Cargo.toml ./game-event-scheduler/
-COPY harness-rs/Cargo.toml           ./harness-rs/
-COPY lfg-matchmaker/Cargo.toml       ./lfg-matchmaker/
-COPY memory-rs/Cargo.toml            ./memory-rs/
-COPY slice-host/Cargo.toml           ./slice-host/
+COPY harness-rs/Cargo.toml            ./harness-rs/
+COPY lfg-matchmaker/Cargo.toml        ./lfg-matchmaker/
+COPY memory-rs/Cargo.toml             ./memory-rs/
+COPY slice-host/Cargo.toml            ./slice-host/
+COPY tot-goal-contract/Cargo.toml     ./tot-goal-contract/
+COPY tot-harness-client/Cargo.toml    ./tot-harness-client/
+COPY tot-mcp-bearer-auth/Cargo.toml   ./tot-mcp-bearer-auth/
+COPY tot-schema-transform/Cargo.toml  ./tot-schema-transform/
 
 # Stub sources for ALL workspace members so `cargo build -p brain-rs`
 # can resolve and compile all dependency crates without real sources.
 # brain-rs declares a lib + bin + build.rs — all are stubbed.
+# exec-rs declares a lib (exec_rs) + bin (exec-rs) — both stubbed.
 # memory-rs declares a lib + two bins (memory-rs, embed-stub) + a build.rs.
 # harness-rs declares only a bin (src/main.rs, no lib).
 # game-event-scheduler and lfg-matchmaker each declare a lib + bin.
 # slice-host declares only a bin.
+# tot-goal-contract, tot-harness-client, tot-mcp-bearer-auth, tot-schema-transform
+#   are pure libs (auto-detect src/lib.rs) — stub each.
 # The stubs are replaced by real brain-rs sources in the COPY steps below.
+# NOTE: leave exec-rs, tot-goal-contract, tot-harness-client stubs ALIVE
+# (do not rm -rf them) — they are compiled as real dep crates for brain-rs.
 RUN mkdir -p brain-rs/src \
+             exec-rs/src \
              game-event-scheduler/src \
              harness-rs/src \
              lfg-matchmaker/src \
              memory-rs/src memory-rs/src/bin \
              slice-host/src \
+             tot-goal-contract/src \
+             tot-harness-client/src \
+             tot-mcp-bearer-auth/src \
+             tot-schema-transform/src \
     && echo 'pub fn _stub() {}' > brain-rs/src/lib.rs \
     && echo 'fn main() {}'      > brain-rs/src/main.rs \
     && echo 'fn main() {}'      > brain-rs/build.rs \
+    && echo 'pub fn _stub() {}' > exec-rs/src/lib.rs \
+    && echo 'fn main() {}'      > exec-rs/src/main.rs \
     && echo 'pub fn _stub() {}' > game-event-scheduler/src/lib.rs \
     && echo 'fn main() {}'      > game-event-scheduler/src/main.rs \
     && echo 'fn main() {}'      > harness-rs/src/main.rs \
@@ -85,6 +108,10 @@ RUN mkdir -p brain-rs/src \
     && echo 'fn main() {}'      > memory-rs/src/bin/embed_stub.rs \
     && echo 'fn main() {}'      > memory-rs/build.rs \
     && echo 'fn main() {}'      > slice-host/src/main.rs \
+    && echo 'pub fn _stub() {}' > tot-goal-contract/src/lib.rs \
+    && echo 'pub fn _stub() {}' > tot-harness-client/src/lib.rs \
+    && echo 'pub fn _stub() {}' > tot-mcp-bearer-auth/src/lib.rs \
+    && echo 'pub fn _stub() {}' > tot-schema-transform/src/lib.rs \
     && cargo build --release -p brain-rs --bin brain-rs \
     && rm -rf brain-rs/src brain-rs/build.rs
 
@@ -99,13 +126,24 @@ COPY brain-rs/src/                   ./brain-rs/src/
 COPY brain-rs/migrations/            ./brain-rs/migrations/
 COPY brain-rs/prompts/               ./brain-rs/prompts/
 
+# M1 Plan 3 (2026-06-06): brain-rs now depends on exec-rs, tot-goal-contract,
+# and tot-harness-client as REAL crates (not stubs). Copy their real sources
+# so cargo compiles them properly. tot-mcp-bearer-auth and tot-schema-transform
+# remain stubs (not dependencies of brain-rs or its transitive deps).
+COPY exec-rs/src/                    ./exec-rs/src/
+COPY tot-goal-contract/src/          ./tot-goal-contract/src/
+COPY tot-harness-client/src/         ./tot-harness-client/src/
+
 # CRITICAL (T32 anti-stub fix — kb_87a7eade item 45):
 # Touch all .rs files AFTER COPY so Cargo's fingerprint detects them as
 # newer than the cached stub dep artifacts, forcing a full recompile.
 # Without this touch, `cargo build` emits `Finished` in 0.08s and ships
 # the stub `fn main() {}` binary — it links cleanly and passes ELF checks
 # but exits immediately and contains no startup log strings.
-RUN find /build/brain-rs/src -name "*.rs" -exec touch {} \+
+RUN find /build/brain-rs/src -name "*.rs" -exec touch {} \+ \
+    && find /build/exec-rs/src -name "*.rs" -exec touch {} \+ \
+    && find /build/tot-goal-contract/src -name "*.rs" -exec touch {} \+ \
+    && find /build/tot-harness-client/src -name "*.rs" -exec touch {} \+
 
 RUN cargo build --release -p brain-rs --bin brain-rs
 
