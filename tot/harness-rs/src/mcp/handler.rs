@@ -494,7 +494,7 @@ mod tests {
     // FAIL TO BOOT.
     //
     // This test asserts the representative case (obs.ping).  The full suite
-    // covering all 49 wrappers lives in mcp::schemas::tests::all_49_wrappers_have_args_envelope.
+    // covering all 50 wrappers lives in mcp::schemas::tests::all_50_wrappers_have_args_envelope.
     // (A live tools/list assertion previously lived in the Python parity gate,
     // retired along with the Python sidecars.)
     #[test]
