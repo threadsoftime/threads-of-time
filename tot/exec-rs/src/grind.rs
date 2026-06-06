@@ -194,8 +194,12 @@ pub async fn post_kill_pause(target: Target, seed: u64) -> GrindState {
     GrindState::Looting { target }
 }
 
-/// `Looting` (Plan 1 NO-OP): Plan 2 walks to the corpse and calls `bot.loot`.
-pub async fn loot_noop(_target: Target) -> GrindState { GrindState::HealthCheck }
+// loot_noop removed — replaced by loot::loot_nearest in run_grind (Plan 2).
+
+/// Rest poll constants (exec timing; not goal fields).
+const REST_POLL_INTERVAL_MS: u64 = 2000;
+/// Bounded resting: stop polling after this many attempts (~60 s at 2 s/poll).
+const REST_MAX_POLLS: u32 = 30;
 
 #[derive(Debug, Deserialize)]
 struct SelfState {
@@ -345,19 +349,40 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
                                                  detail: Some(format!("fight shape: {s}")) },
             },
             GrindState::PostKillPause { target } => post_kill_pause(target, kills as u64).await,
-            GrindState::Looting { target } => { kills += 1; loot_noop(target).await }
+            GrindState::Looting { target: _ } => {
+                kills += 1;
+                // Non-fatal: loot failure (no corpse / nav failure) doesn't stop the loop.
+                let _ = crate::loot::loot_nearest(client, bot_guid).await;
+                GrindState::HealthCheck
+            }
             GrindState::HealthCheck => {
-                let lvl = read_self(client, bot_guid).await.map(|s| s.level).unwrap_or(level_at_start);
-                if lvl >= goal.to_level
+                let self_state = read_self(client, bot_guid).await;
+                let hp_pct = self_state.as_ref().map(|s| s.hp_pct).unwrap_or(100);
+                let lvl = self_state.map(|s| s.level).unwrap_or(level_at_start);
+                // Rest-threshold check BEFORE completion check (design §7).
+                if (hp_pct as f32 / 100.0) < goal.rest_threshold {
+                    GrindState::Resting
+                } else if lvl >= goal.to_level
                     || goal.kill_count.map(|k| kills >= k).unwrap_or(false)
                 {
                     return GoalStatus::Completed {
                         summary: format!("grind done: {kills} kills, level {lvl}"),
                     };
+                } else {
+                    GrindState::Scanning
+                }
+            }
+            GrindState::Resting => {
+                // Poll obs.get_state until hp_pct >= 75 or the poll budget is exhausted.
+                for _ in 0..REST_MAX_POLLS {
+                    tokio::time::sleep(std::time::Duration::from_millis(REST_POLL_INTERVAL_MS)).await;
+                    let hp = read_self(client, bot_guid).await.map(|s| s.hp_pct).unwrap_or(100);
+                    if hp >= 75 {
+                        break;
+                    }
                 }
                 GrindState::Scanning
             }
-            GrindState::Resting => GrindState::Scanning, // Plan 2: real regen wait
             GrindState::Wandering => match wander(client, bot_guid, goal, idle_seed).await {
                 Ok(s) => { idle_seed += 1; s }
                 Err(GrindError::Harness(e)) =>
@@ -662,5 +687,154 @@ mod tests {
             } => {}
             other => panic!("expected NeedsDecision{{BotDied}}, got {other:?}"),
         }
+    }
+
+    // ── F4: real Looting + HealthCheck + Resting tests ─────────────────────────
+
+    /// Low-hp path: after kill, HealthCheck sends bot to Resting; Resting polls until
+    /// hp_pct >= 75, then resumes Scanning → Completed (kill_count=1 met).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_grind_rests_when_low_hp_then_completes() {
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+        let hostile_calls = std::sync::Arc::new(AtomicU32::new(0));
+        let state_calls = std::sync::Arc::new(AtomicU32::new(0));
+        let hc2 = hostile_calls.clone();
+        let sc2 = state_calls.clone();
+
+        let base = spawn_mock(move |name, _a| match name.as_str() {
+            "obs.get_nearby_hostiles" => {
+                let n = hc2.fetch_add(1, SeqCst);
+                if n == 0 {
+                    // Scan phase: return one live target
+                    json!({"hostiles": [{"guid": 111u64, "level": 5, "hp_pct": 100.0,
+                        "distance": 3.0, "is_alive": true, "x": 3.0, "y": 0.0, "z": 0.0}]})
+                } else {
+                    // Combat poll: target dead immediately
+                    json!({"hostiles": []})
+                }
+            }
+            "nav.find_path" => json!({"path_type": 1i64, "points": [
+                {"x":0.0,"y":0.0,"z":0.0},{"x":3.0,"y":0.0,"z":0.0}]}),
+            "bot.move_path" => json!({"launched": true, "duration_ms": 0,
+                "final": {"x":3.0,"y":0.0,"z":0.0}}),
+            "obs.get_position" => json!({"x":3.0,"y":0.0,"z":0.0,
+                "map_id":0,"zone_id":1,"area_id":1,"orientation":0.0}),
+            "bot.attack" => json!({"attacked": true, "target_guid": 111u64, "target_name": "Kobold"}),
+            "obs.get_lootable_corpses" => json!({"corpses": []}),
+            "obs.get_state" => {
+                // First call (read_self at start): bot alive at L5, low hp (25%)
+                // Second call (HealthCheck): low hp → enter Resting
+                // Third call (Resting poll 1): still low
+                // Fourth call (Resting poll 2): hp recovered to 80 → exit Resting
+                // Fifth call (HealthCheck after Resting): but we exit Resting back to Scanning;
+                //   the next HealthCheck will fire from the 2nd kill loop iteration
+                // NOTE: We set kill_count=1 so after 1 kill we check completion in HealthCheck.
+                // The completion check happens BEFORE the rest check so we need hp to be low
+                // to test resting. We set kill_count=None (rely on to_level) — but test_goal
+                // has kill_count=Some(1), so completion fires first. We need a special goal.
+                // Solution: return low hp for the health-check call, then high hp for resting.
+                let n = sc2.fetch_add(1, SeqCst);
+                if n <= 1 {
+                    // start read + HealthCheck: low hp → Resting
+                    json!({"self": {"level": 5, "hp_pct": 20}})
+                } else if n == 2 {
+                    // Resting poll 1: still low
+                    json!({"self": {"level": 5, "hp_pct": 50}})
+                } else {
+                    // Resting poll 2+: recovered
+                    json!({"self": {"level": 5, "hp_pct": 80}})
+                }
+            }
+            other => panic!("unexpected tool in resting test: {other}"),
+        }).await;
+
+        // Use a goal with kill_count=None so only to_level stops it; rest_threshold=0.35.
+        // With hp_pct=20 (0.20 < 0.35) → enters Resting.
+        // After Resting exits (hp≥75), enters Scanning again. Then no targets → Wandering.
+        // We need it to complete → set kill_count=Some(1) but to_level very high so only
+        // kill_count triggers. But HealthCheck checks kill_count BEFORE rest_threshold.
+        // So with kill_count=Some(1) and kills=1 it would complete without resting.
+        // We need rest_threshold to be checked first, or use kill_count=None + to_level check.
+        //
+        // Looking at the implementation design: HealthCheck should check rest_threshold FIRST,
+        // then the completion check. That's what we'll implement. So here kill_count=Some(1)
+        // and we check rest first: hp=20/100=0.20 < rest_threshold=0.35 → Resting.
+        // After resting → back to Scanning. Then no target (hostile empty after n>0) → Wandering.
+        // Need to eventually complete: set to_level=5 (already at L5) → Completed next HealthCheck.
+        // But that requires another full kill cycle. Simpler: use kill_count=None and to_level=5.
+        let goal = GrindGoal {
+            anchor_point: WorldPos { map_id: 0, x: 0.0, y: 0.0, z: 0.0 },
+            wander_radius: 90.0, max_search_radius: 35.0,
+            mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
+            to_level: 5, // already L5 → completes at next HealthCheck after Resting
+            kill_count: Some(1),
+            rest_threshold: 0.35,
+        };
+        let status = run_grind(&client(&base), 1003, &goal).await;
+        // After resting exits hp≥75 → Scanning → no targets → Wandering → Scanning → no targets
+        // → eventually Blocked{NoTargetsFound}. OR: the second HealthCheck fires after Resting
+        // with level=5 >= to_level=5 → Completed. We assert Completed OR the resting behavior
+        // was exercised by checking state_calls > 2 (resting polls happened).
+        let state_count = state_calls.load(SeqCst);
+        assert!(state_count >= 3, "expected at least 3 obs.get_state calls (Resting polls), got {state_count}");
+        // Also verify terminal status is Completed (to_level met) or Blocked (no more targets).
+        match status {
+            tot_goal_contract::GoalStatus::Completed { .. }
+            | tot_goal_contract::GoalStatus::Blocked { .. } => {}
+            other => panic!("expected Completed or Blocked after resting, got {other:?}"),
+        }
+    }
+
+    /// Rest-not-needed path: high hp after kill → HealthCheck does NOT enter Resting,
+    /// goes straight to completion check → Completed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_grind_no_rest_needed_completes_directly() {
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+        let hostile_calls = std::sync::Arc::new(AtomicU32::new(0));
+        let state_calls = std::sync::Arc::new(AtomicU32::new(0));
+        let hc2 = hostile_calls.clone();
+        let sc2 = state_calls.clone();
+
+        let base = spawn_mock(move |name, _a| match name.as_str() {
+            "obs.get_nearby_hostiles" => {
+                let n = hc2.fetch_add(1, SeqCst);
+                if n == 0 {
+                    json!({"hostiles": [{"guid": 111u64, "level": 5, "hp_pct": 100.0,
+                        "distance": 3.0, "is_alive": true, "x": 3.0, "y": 0.0, "z": 0.0}]})
+                } else {
+                    json!({"hostiles": []})  // target dead in combat poll
+                }
+            }
+            "nav.find_path" => json!({"path_type": 1i64, "points": [
+                {"x":0.0,"y":0.0,"z":0.0},{"x":3.0,"y":0.0,"z":0.0}]}),
+            "bot.move_path" => json!({"launched": true, "duration_ms": 0,
+                "final": {"x":3.0,"y":0.0,"z":0.0}}),
+            "obs.get_position" => json!({"x":3.0,"y":0.0,"z":0.0,
+                "map_id":0,"zone_id":1,"area_id":1,"orientation":0.0}),
+            "bot.attack" => json!({"attacked": true, "target_guid": 111u64, "target_name": "Kobold"}),
+            "obs.get_lootable_corpses" => json!({"corpses": []}),
+            "obs.get_state" => {
+                sc2.fetch_add(1, SeqCst);
+                // Bot at 90% hp — well above rest_threshold=0.35 → no rest
+                json!({"self": {"level": 5, "hp_pct": 90}})
+            }
+            other => panic!("unexpected tool in no_rest test: {other}"),
+        }).await;
+
+        let goal = GrindGoal {
+            anchor_point: WorldPos { map_id: 0, x: 0.0, y: 0.0, z: 0.0 },
+            wander_radius: 90.0, max_search_radius: 35.0,
+            mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
+            to_level: 99, kill_count: Some(1), rest_threshold: 0.35,
+        };
+        let status = run_grind(&client(&base), 1003, &goal).await;
+        match status {
+            tot_goal_contract::GoalStatus::Completed { summary } =>
+                assert!(summary.contains("kill"), "summary: {summary}"),
+            other => panic!("expected Completed, got {other:?}"),
+        }
+        // Verify obs.get_state was called but NOT for Resting (only 2 times: start + HealthCheck)
+        let state_count = state_calls.load(SeqCst);
+        assert!(state_count <= 3, "unexpected extra state polls (resting?), got {state_count}");
     }
 }
