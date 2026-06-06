@@ -69,6 +69,10 @@ impl StatusSource for ChannelStatusSource {
 /// Build an in-process wire for one bot. Returns the brain-side `(sink, source)` and
 /// the exec-side `(goal_rx, status_tx)`. Dropping the returned `sink` closes the goal
 /// channel, which signals shutdown to the exec loop.
+///
+/// Back-pressure: the status channel is bounded (`STATUS_CHANNEL_DEPTH`); if exec emits
+/// status faster than brain polls it, `StatusSender::send` returns an error when full.
+#[must_use]
 pub fn wire(bot_guid: u64) -> (ChannelGoalSink, ChannelStatusSource, GoalReceiver, StatusSender) {
     let (goal_tx, goal_rx) = watch::channel(None);
     let (status_tx, status_rx) = mpsc::channel(STATUS_CHANNEL_DEPTH);
