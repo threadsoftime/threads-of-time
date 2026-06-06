@@ -266,8 +266,11 @@ pub(crate) async fn fight(
     goal: &GrindGoal,
 ) -> Result<FightOutcome, GrindError> {
     let rotation = RotationPlugin::melee_m1();
+    // M1: AutoAttackAction::can_execute ignores ctx, so bot/target hp are placeholders.
+    // M2's per-spec abilities will refresh these from each poll (the values are already
+    // read below via read_self / the hostiles poll) to gate ability preconditions.
     let ctx = CombatContext {
-        bot_hp_pct: 100.0, // refreshed below after each poll
+        bot_hp_pct: 100.0,
         target_hp_pct: 100.0,
         target_distance: target.distance,
     };
