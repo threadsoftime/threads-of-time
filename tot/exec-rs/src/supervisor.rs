@@ -11,8 +11,23 @@ use tot_harness_client::HarnessClient;
 use crate::{grind, own};
 
 /// Owns the running per-bot tasks.
+///
+/// # Shutdown invariant
+///
+/// Tasks in `handles` MUST be shut down by joining (clean shutdown), never by
+/// [`JoinHandle::abort`]. The correct shutdown sequence is:
+/// 1. Drop the brain-side goal sink so each `per_bot_loop` observes channel closure.
+/// 2. Call [`BotSupervisor::join`] (or [`BotSupervisor::join_all`]) to await the task.
+///
+/// Aborting a task mid-execution can interrupt the loop between the ownership-claim
+/// (`set_ai_owned(.., true)`) and the ownership-release (`set_ai_owned(.., false)`),
+/// stranding the bot with `owned = true` permanently.
 #[derive(Default)]
 pub struct BotSupervisor {
+    /// Running per-bot task handles.
+    ///
+    /// These handles MUST be joined (never aborted) to preserve the ownership-release
+    /// invariant — see the struct-level doc comment for the required shutdown sequence.
     handles: std::collections::HashMap<u64, JoinHandle<()>>,
 }
 
@@ -35,6 +50,13 @@ impl BotSupervisor {
     /// Await a bot's task to finish (after its goal channel is closed).
     pub async fn join(&mut self, bot_guid: u64) {
         if let Some(h) = self.handles.remove(&bot_guid) { let _ = h.await; }
+    }
+
+    /// Join every running per-bot task (clean shutdown). Callers should first drop the
+    /// brain-side goal sinks so each loop observes shutdown and releases ownership.
+    pub async fn join_all(&mut self) {
+        let guids: Vec<u64> = self.handles.keys().copied().collect();
+        for g in guids { self.join(g).await; }
     }
 }
 
@@ -126,7 +148,9 @@ mod tests {
         let owned2 = owned.clone();
         let base = spawn_mock(move |name, args| match name.as_str() {
             "bot.set_ai_enabled" => {
-                // enabled:false = claim (owned), enabled:true = release.
+                // set_ai_owned(_, true) claims and sends enabled:false; set_ai_owned(_, false)
+                // releases and sends enabled:true. Track net ownership: +1 on a claim
+                // (enabled:false), -1 on a release (enabled:true).
                 let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
                 if enabled { owned2.fetch_sub(1, std::sync::atomic::Ordering::SeqCst); json!({"owned": false, "reset": true}) }
                 else       { owned2.fetch_add(1, std::sync::atomic::Ordering::SeqCst); json!({"owned": true, "reset": false}) }
@@ -166,5 +190,59 @@ mod tests {
 
         // Net ownership must be 0 (claimed once, released once).
         assert_eq!(owned.load(std::sync::atomic::Ordering::SeqCst), 0, "ownership not balanced");
+    }
+
+    /// When the initial ownership CLAIM fails, `per_bot_loop` must return immediately
+    /// without attempting a release and without running any goal.
+    ///
+    /// The claim is forced to fail by having `bot.set_ai_enabled` return `owned:false`
+    /// (i.e. the server did not grant ownership). `own::set_ai_owned(.., true)` requests
+    /// `owned=true`; when the response carries `owned:false` instead it returns
+    /// `Err(OwnError::Shape)`, which causes `per_bot_loop` to log + early-return.
+    ///
+    /// Any tool other than `bot.set_ai_enabled` hitting the mock panics — proving that
+    /// `run_grind` (and the release path) never execute.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn claim_failure_returns_without_releasing() {
+        let call_count = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let call_count2 = call_count.clone();
+
+        let base = spawn_mock(move |name, _args| match name.as_str() {
+            "bot.set_ai_enabled" => {
+                // Return owned:false — the claim request asked for owned:true, so
+                // own::set_ai_owned will see a mismatch and return Err(OwnError::Shape).
+                call_count2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                json!({"owned": false, "reset": false})
+            }
+            other => panic!("unexpected tool call after claim failure: {other}"),
+        }).await;
+
+        let harness = Arc::new(HarnessClient::new(base, "tok", Duration::from_secs(5)));
+        let (sink, source, goal_rx, status_tx) = wire(2001);
+        let mut sup = BotSupervisor::new();
+        sup.start(2001, harness, goal_rx, status_tx);
+
+        // Push a goal to mirror the real call shape (the loop exits before reading it).
+        sink.set_goal(2001, GoalEnvelope { goal_id: "g-fail".into(), version: 1,
+            goal: Goal::Grind(grind_goal()) }).await.unwrap();
+
+        // Drop the sink and join — the loop already returned on claim failure so join
+        // resolves promptly.
+        drop(sink);
+        sup.join(2001).await;
+
+        // Exactly one set_ai_enabled call was made (the failed claim attempt).
+        // No release attempt (nothing was claimed), no run_grind call.
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "expected exactly 1 set_ai_enabled call (the failed claim); got more or fewer",
+        );
+
+        // No Completed (or any other) status should have been produced.
+        assert!(
+            source.poll_status(2001).await.unwrap().is_none(),
+            "expected no status when claim fails before goal execution",
+        );
     }
 }
