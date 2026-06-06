@@ -35,6 +35,11 @@
 // ---------------------------------------------------------------------------
 
 /// Env-based configuration (faithful port of brain_sidecar/settings.py).
+///
+/// Added fields (Rust-only, no Python parity required):
+/// * `exec_bot_guid` — when `Some(guid)`, embeds an exec-rs `BotSupervisor`
+///   and wires goal emission for that bot. When `None` the brain runs in pure
+///   parity mode (behaviour byte-identical to today).
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub bind_host: String,
@@ -62,6 +67,9 @@ pub struct Settings {
     pub subset_hysteresis_in_ticks: u32,
     pub subset_enroll_backoff_s: f64,
     pub reduced_tick_interval_s: f64,
+    /// M1 exec embed: bot guid that gets an in-process exec loop + goal emission.
+    /// Env: `EXEC_BOT_GUID` (integer). Absent / invalid → `None` (pure parity mode).
+    pub exec_bot_guid: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +142,9 @@ impl Settings {
         let get_bool_strict_true = |key: &str, default: bool| -> bool {
             get(key).map(|v| parse_bool_strict_true(&v)).unwrap_or(default)
         };
+        let get_opt_i64 = |key: &str| -> Option<i64> {
+            get(key).and_then(|v| v.trim().parse::<i64>().ok())
+        };
 
         let living_bot_count = get_usize("TOT_LIVING_BOT_COUNT", 10);
 
@@ -163,6 +174,7 @@ impl Settings {
             subset_hysteresis_in_ticks:     get_u32("TOT_SUBSET_HYSTERESIS_IN_TICKS", 1),
             subset_enroll_backoff_s:        get_f64("TOT_SUBSET_ENROLL_BACKOFF_S", 300.0),
             reduced_tick_interval_s:        get_f64("TOT_REDUCED_TICK_INTERVAL_S", 300.0),
+            exec_bot_guid:                  get_opt_i64("EXEC_BOT_GUID"),
         }
     }
 }
@@ -286,7 +298,30 @@ mod tests {
     // TOT_SUBSET_GATE_ENABLED — strict-true parity with Python
     // ---------------------------------------------------------------------------
 
-    /// Parity test: TOT_SUBSET_GATE_ENABLED uses strict `.lower() == "true"` like Python.
+    // ---------------------------------------------------------------------------
+    // exec_bot_guid (Rust-only; no Python parity)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_exec_bot_guid_absent_is_none() {
+        let s = Settings::build(getter(empty()));
+        assert!(s.exec_bot_guid.is_none(), "default must be None");
+    }
+
+    #[test]
+    fn test_exec_bot_guid_parses_integer() {
+        let s = Settings::build(getter(HashMap::from([("EXEC_BOT_GUID", "1003")])));
+        assert_eq!(s.exec_bot_guid, Some(1003i64));
+    }
+
+    #[test]
+    fn test_exec_bot_guid_invalid_string_is_none() {
+        let s = Settings::build(getter(HashMap::from([("EXEC_BOT_GUID", "not_a_number")])));
+        assert!(s.exec_bot_guid.is_none(), "unparseable value must yield None");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Parity test: TOT_SUBSET_GATE_ENABLED uses strict `.lower() == "true"` like Python.
     ///
     /// Python: `os.getenv("TOT_SUBSET_GATE_ENABLED", "true").lower() == "true"`
     /// → only "true" (case-insensitive) is truthy; "1" and "yes" must yield false.
