@@ -174,6 +174,84 @@ pub enum GrindState {
     Done,
 }
 
+use tot_goal_contract::{GoalProgress, GoalStatus};
+
+/// `Fighting` (Plan 1 NO-OP): in Plan 2 this calls `bot.attack` and polls target death.
+/// Here it immediately reports the target dead so the loop advances.
+pub async fn fight_noop(target: Target) -> GrindState { GrindState::PostKillPause { target } }
+
+/// `PostKillPause`: the highest-leverage "alive" tell (design §7, §E) — pause before loot.
+pub async fn post_kill_pause(target: Target, seed: u64) -> GrindState {
+    tokio::time::sleep(Duration::from_millis(sample_ms(POST_KILL_PAUSE_MS_MIN, POST_KILL_PAUSE_MS_MAX, seed))).await;
+    GrindState::Looting { target }
+}
+
+/// `Looting` (Plan 1 NO-OP): Plan 2 walks to the corpse and calls `bot.loot`.
+pub async fn loot_noop(_target: Target) -> GrindState { GrindState::HealthCheck }
+
+#[derive(Debug, Deserialize)]
+struct SelfState { level: u32, #[serde(default)] #[allow(dead_code)] health_pct: u32 }
+#[derive(Debug, Deserialize)]
+struct StateDigest { #[serde(rename = "self")] self_: SelfState }
+
+/// Read the bot's own level/health from `obs.get_state`.
+async fn read_self(client: &HarnessClient, bot_guid: u64) -> Result<SelfState, GrindError> {
+    let raw = client.call("obs.get_state", serde_json::json!({ "bot_guid": bot_guid as i64 })).await?;
+    let digest: StateDigest =
+        serde_json::from_value(raw).map_err(|e| GrindError::Shape(format!("obs.get_state: {e}")))?;
+    Ok(digest.self_)
+}
+
+/// Drive a `Grind` goal to a terminal `GoalStatus`. Plan 1: combat/loot are no-ops.
+pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) -> GoalStatus {
+    let mut state = GrindState::Scanning;
+    let mut kills: u32 = 0;
+    let level_at_start = read_self(client, bot_guid).await.map(|s| s.level).unwrap_or(0);
+    let mut idle_seed: u64 = 0;
+
+    loop {
+        state = match state {
+            GrindState::Scanning => match scan_for_target(client, bot_guid, goal).await {
+                Ok(Some(t)) => GrindState::Reacting { target: t },
+                Ok(None) => GrindState::Wandering,
+                Err(GrindError::Harness(e)) =>
+                    return GoalStatus::Blocked { reason: tot_goal_contract::BlockedReason::Other,
+                                                 detail: Some(format!("scan harness: {e}")) },
+                Err(GrindError::Shape(s)) =>
+                    return GoalStatus::Blocked { reason: tot_goal_contract::BlockedReason::Other,
+                                                 detail: Some(s) },
+            },
+            GrindState::Reacting { target } => react(target, kills as u64).await,
+            GrindState::Approaching { target } => match approach(client, bot_guid, target).await {
+                Ok(s) => s,
+                Err(_) => GrindState::Scanning,
+            },
+            GrindState::Fighting { target } => fight_noop(target).await,
+            GrindState::PostKillPause { target } => post_kill_pause(target, kills as u64).await,
+            GrindState::Looting { target } => { kills += 1; loot_noop(target).await }
+            GrindState::HealthCheck => {
+                let lvl = read_self(client, bot_guid).await.map(|s| s.level).unwrap_or(level_at_start);
+                if lvl >= goal.to_level
+                    || goal.kill_count.map(|k| kills >= k).unwrap_or(false)
+                {
+                    return GoalStatus::Completed {
+                        summary: format!("grind done: {kills} kills, level {lvl}"),
+                    };
+                }
+                GrindState::Scanning
+            }
+            GrindState::Resting => GrindState::Scanning, // Plan 2: real regen wait
+            GrindState::Wandering => match wander(client, bot_guid, goal, idle_seed).await {
+                Ok(s) => { idle_seed += 1; s }
+                Err(_) => GrindState::Idle,
+            },
+            GrindState::Idle => idle_tick().await,
+            GrindState::Done => return GoalStatus::Running { progress: Some(GoalProgress {
+                kills_this_goal: kills, level_at_start, current_level: level_at_start }) },
+        };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,5 +353,26 @@ mod tests {
         let dx = p.x - g.anchor_point.x;
         let dy = p.y - g.anchor_point.y;
         assert!((dx*dx + dy*dy).sqrt() <= g.wander_radius as f64 + 0.001);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_grind_completes_after_kill_count() {
+        // One in-band target; the no-op combat "kills" it; kill_count=1 → Completed.
+        let base = spawn_mock(|name, _a| match name.as_str() {
+            "obs.get_nearby_hostiles" => json!({"hostiles": [
+                {"guid": 111u64, "name": "Kobold", "level": 5, "hp_pct": 100, "distance": 6.0, "is_alive": true}]}),
+            "nav.find_path" => json!({"path_type": 1i64, "points": [
+                {"x":0.0,"y":0.0,"z":0.0},{"x":6.0,"y":0.0,"z":0.0}]}),
+            "bot.move_path" => json!({"launched": true, "duration_ms": 0, "final": {"x":6.0,"y":0.0,"z":0.0}}),
+            "obs.get_position" => json!({"x":6.0,"y":0.0,"z":0.0,"map_id":0,"zone_id":1,"area_id":1,"orientation":0.0}),
+            "obs.get_state" => json!({"self": {"level": 5, "health_pct": 90}}),
+            other => panic!("unexpected tool {other}"),
+        }).await;
+        let status = run_grind(&client(&base), 1003, &test_goal()).await;
+        match status {
+            tot_goal_contract::GoalStatus::Completed { summary } =>
+                assert!(summary.contains("kill"), "summary: {summary}"),
+            other => panic!("expected Completed, got {other:?}"),
+        }
     }
 }
