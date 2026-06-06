@@ -7,5 +7,7 @@
 //!
 //! - [`nav`] — navmesh client + movement orchestrator: [`nav::find_path`],
 //!   [`nav::move_path`], [`nav::walk_to`], typed [`nav::Path`], [`nav::MoveResult`], [`nav::flags`].
+//! - [`own`] — ownership client: [`own::set_ai_owned`], [`own::OwnError`].
 
 pub mod nav;
+pub mod own;
