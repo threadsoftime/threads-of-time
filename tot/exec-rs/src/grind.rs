@@ -114,6 +114,48 @@ pub async fn approach(
     }
 }
 
+use tot_goal_contract::WorldPos;
+
+const IDLE_SCAN_INTERVAL_MS: u64 = 5000;
+
+/// Pick a fresh wander destination within `wander_radius` of the anchor.
+/// Deterministic from `seed` (no rng dep; reproducible tests). Spreads points around
+/// the circle so consecutive picks differ (design §7: "avoid the last few spots").
+pub fn next_wander_point(goal: &GrindGoal, seed: u64) -> WorldPos {
+    let angle = (seed.wrapping_mul(40503) % 360) as f64 * std::f64::consts::PI / 180.0;
+    let frac = ((seed.wrapping_mul(2654435761) % 1000) as f64 / 1000.0).max(0.35); // 35%..100% out
+    let r = goal.wander_radius as f64 * frac;
+    WorldPos {
+        map_id: goal.anchor_point.map_id,
+        x: goal.anchor_point.x + r * angle.cos(),
+        y: goal.anchor_point.y + r * angle.sin(),
+        z: goal.anchor_point.z,
+    }
+}
+
+/// `Wandering`: walk (not sprint) to a fresh scan point, then rescan.
+pub async fn wander(
+    client: &HarnessClient,
+    bot_guid: u64,
+    goal: &GrindGoal,
+    seed: u64,
+) -> Result<GrindState, GrindError> {
+    let p = next_wander_point(goal, seed);
+    match nav::walk_to(client, bot_guid, Dest { x: p.x, y: p.y, z: p.z }).await {
+        Ok(()) | Err(NavError::NoPath) | Err(NavError::Stuck(_))
+        | Err(NavError::RepathBudgetExceeded(_)) | Err(NavError::Timeout) => Ok(GrindState::Scanning),
+        Err(NavError::Harness(e)) => Err(GrindError::Harness(e)),
+        Err(NavError::Shape(s)) => Err(GrindError::Shape(s)),
+    }
+}
+
+/// `Idle`: at the camp, wait one scan interval, then rescan. The caller decides when
+/// sustained idleness becomes `Blocked{NoTargetsFound}` (the loop tracks the timeout).
+pub async fn idle_tick() -> GrindState {
+    tokio::time::sleep(Duration::from_millis(IDLE_SCAN_INTERVAL_MS)).await;
+    GrindState::Scanning
+}
+
 /// The grind state machine. Plan 1 implements `Scanning`/`Reacting`/`Approaching`/
 /// `Wandering`/`Idle` for real; `Fighting`/`PostKillPause`/`Looting`/`HealthCheck`/
 /// `Resting` are tested no-ops until Plan 2.
@@ -211,5 +253,27 @@ mod tests {
         }).await;
         let next = approach(&client(&base), 1003, Target { guid: 111, x: 8.0, y: 0.0, z: 0.0, distance: 8.0 }).await.unwrap();
         assert_eq!(next, GrindState::Scanning, "no path → pick a new target");
+    }
+
+    #[tokio::test]
+    async fn wander_walks_within_radius_and_returns_to_scanning() {
+        let base = spawn_mock(|name, _a| match name.as_str() {
+            "nav.find_path" => json!({"path_type": 1i64, "points": [
+                {"x":0.0,"y":0.0,"z":0.0},{"x":5.0,"y":5.0,"z":0.0}]}),
+            "bot.move_path" => json!({"launched": true, "duration_ms": 0, "final": {"x":5.0,"y":5.0,"z":0.0}}),
+            "obs.get_position" => json!({"x":5.0,"y":5.0,"z":0.0,"map_id":0,"zone_id":1,"area_id":1,"orientation":0.0}),
+            other => panic!("unexpected tool {other}"),
+        }).await;
+        let next = wander(&client(&base), 1003, &test_goal(), 1).await.unwrap();
+        assert_eq!(next, GrindState::Scanning);
+    }
+
+    #[test]
+    fn next_wander_point_is_within_radius_of_anchor() {
+        let g = test_goal();
+        let p = next_wander_point(&g, 7);
+        let dx = p.x - g.anchor_point.x;
+        let dy = p.y - g.anchor_point.y;
+        assert!((dx*dx + dy*dy).sqrt() <= g.wander_radius as f64 + 0.001);
     }
 }
