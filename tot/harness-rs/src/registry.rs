@@ -117,7 +117,7 @@ impl Registry {
 
 /// Build the V1 registry per spec §6.
 ///
-/// Verbatim port of `registry.py:build_v1_registry` (50 entries).
+/// Verbatim port of `registry.py:build_v1_registry` (54 entries).
 pub fn build_v1_registry() -> Registry {
     Registry::new(vec![
         // GM-tier
@@ -181,6 +181,12 @@ pub fn build_v1_registry() -> Registry {
         ToolEntry::new("memory.delete",           "memory.delete",          Some("bot_guid"),    true),
         // nav.* (1) — server-side navmesh primitive
         ToolEntry::new("nav.find_path",           "nav.find_path",          Some("bot_guid"),    true),
+        // Bot-tier (M1-combat-loot)
+        ToolEntry::new("bot.attack",               "bot.attack",               Some("bot_guid"), true),
+        ToolEntry::new("bot.loot",                 "bot.loot",                 Some("bot_guid"), true),
+        // Observation (M1-combat-loot)
+        ToolEntry::new("obs.get_lootable_corpses", "obs.get_lootable_corpses", Some("bot_guid"), true),
+        ToolEntry::new("obs.get_nearby_hostiles",  "obs.get_nearby_hostiles",  Some("bot_guid"), true),
         // LFG force-form primitives (Inc 1)
         ToolEntry::new("lfg.form_group",          "lfg.form_group",         None,                true),
         // LFG cancel drain (Inc 2)
@@ -198,9 +204,9 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn registry_has_50_tools() {
+    fn registry_has_54_tools() {
         let reg = build_v1_registry();
-        assert_eq!(reg.names().len(), 50);
+        assert_eq!(reg.names().len(), 54);
     }
 
     #[test]
@@ -303,6 +309,46 @@ mod tests {
         assert_eq!(e.required_scope, "bot.set_ai_enabled");
         assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
         assert!(e.forwards_to_ac);
+    }
+
+    #[test]
+    fn bot_attack_registered() {
+        let reg = build_v1_registry();
+        let e = reg.find("bot.attack").unwrap();
+        assert_eq!(e.name, "bot.attack");
+        assert_eq!(e.required_scope, "bot.attack");
+        assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
+        assert!(e.forwards_to_ac, "bot.attack must forward to AC");
+    }
+
+    #[test]
+    fn obs_get_nearby_hostiles_registered() {
+        let reg = build_v1_registry();
+        let e = reg.find("obs.get_nearby_hostiles").unwrap();
+        assert_eq!(e.name, "obs.get_nearby_hostiles");
+        assert_eq!(e.required_scope, "obs.get_nearby_hostiles");
+        assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
+        assert!(e.forwards_to_ac, "obs.get_nearby_hostiles must forward to AC");
+    }
+
+    #[test]
+    fn obs_get_lootable_corpses_registered() {
+        let reg = build_v1_registry();
+        let e = reg.find("obs.get_lootable_corpses").unwrap();
+        assert_eq!(e.name, "obs.get_lootable_corpses");
+        assert_eq!(e.required_scope, "obs.get_lootable_corpses");
+        assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
+        assert!(e.forwards_to_ac, "obs.get_lootable_corpses must forward to AC");
+    }
+
+    #[test]
+    fn bot_loot_registered() {
+        let reg = build_v1_registry();
+        let e = reg.find("bot.loot").unwrap();
+        assert_eq!(e.name, "bot.loot");
+        assert_eq!(e.required_scope, "bot.loot");
+        assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
+        assert!(e.forwards_to_ac, "bot.loot must forward to AC");
     }
 
     // ── check_self_binding ─────────────────────────────────────────────────

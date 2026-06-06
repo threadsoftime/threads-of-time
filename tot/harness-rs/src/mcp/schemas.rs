@@ -7,7 +7,7 @@
 //! `Serialize` is required by the MCP handler to call `serde_json::to_value(&w.args)`
 //! (the exclude_none path in `forward()`).
 //!
-//! All 50 tools from `TOOL_SCHEMAS` are represented here.
+//! All 54 tools from `TOOL_SCHEMAS` are represented here.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -910,6 +910,67 @@ pub struct BotSetAiEnabledArgs {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotSetAiEnabledWrapper { pub args: BotSetAiEnabledArgs }
 
+// ── bot.attack ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotAttackArgs {
+    /// Low-32 GUID of the externally-owned bot.
+    pub bot_guid: i64,
+    /// Packed creature uint64 (raw ObjectGuid) — from obs.get_nearby_hostiles `guid` field.
+    /// MUST be u64: a packed creature GUID (HighGuid bits set) exceeds i64::MAX and would
+    /// fail i64 deserialization, rejecting the call before it forwards to AC.
+    pub target_guid: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotAttackWrapper { pub args: BotAttackArgs }
+
+// ── obs.get_nearby_hostiles ───────────────────────────────────────────────────
+
+fn default_hostiles_radius() -> f64 { 40.0 }
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ObsGetNearbyHostilesArgs {
+    /// Low-32 GUID of the bot used as the search origin.
+    pub bot_guid: i64,
+    /// Search radius in yards (cap 100). Defaults to 40.
+    #[serde(default = "default_hostiles_radius")]
+    pub radius: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ObsGetNearbyHostilesWrapper { pub args: ObsGetNearbyHostilesArgs }
+
+// ── obs.get_lootable_corpses ──────────────────────────────────────────────────
+
+fn default_corpses_radius() -> f64 { 60.0 }
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ObsGetLootableCorpsesArgs {
+    /// Low-32 GUID of the bot used as the search origin.
+    pub bot_guid: i64,
+    /// Search radius in yards (cap 150). Defaults to 60.
+    #[serde(default = "default_corpses_radius")]
+    pub radius: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ObsGetLootableCorpsesWrapper { pub args: ObsGetLootableCorpsesArgs }
+
+// ── bot.loot ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotLootArgs {
+    /// Low-32 GUID of the externally-owned bot.
+    pub bot_guid: i64,
+    /// Packed creature uint64 (raw ObjectGuid) — from obs.get_lootable_corpses `guid` field.
+    /// MUST be u64 (see BotAttackArgs.target_guid): exceeds i64::MAX, would fail to deserialize.
+    pub target_guid: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotLootWrapper { pub args: BotLootArgs }
+
 // ── lfg.form_group ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -947,7 +1008,7 @@ mod tests {
     }
 
     #[test]
-    fn all_50_wrappers_have_args_envelope() {
+    fn all_54_wrappers_have_args_envelope() {
         // gm (7)
         assert!(has_args_envelope(&schema_for!(GmAdditemWrapper)),     "gm.additem");
         assert!(has_args_envelope(&schema_for!(GmEquipAllWrapper)),    "gm.equip_all");
@@ -1006,7 +1067,12 @@ mod tests {
         assert!(has_args_envelope(&schema_for!(BotSetAiEnabledWrapper)), "bot.set_ai_enabled");
         // lfg (2)
         assert!(has_args_envelope(&schema_for!(LfgFormGroupWrapper)), "lfg.form_group");
-        assert!(has_args_envelope(&schema_for!(LfgCancelWrapper)),    "lfg.cancel");  // NEW
+        assert!(has_args_envelope(&schema_for!(LfgCancelWrapper)),    "lfg.cancel");
+        // M1-combat-loot (4)
+        assert!(has_args_envelope(&schema_for!(BotAttackWrapper)),               "bot.attack");
+        assert!(has_args_envelope(&schema_for!(ObsGetNearbyHostilesWrapper)),    "obs.get_nearby_hostiles");
+        assert!(has_args_envelope(&schema_for!(ObsGetLootableCorpsesWrapper)),   "obs.get_lootable_corpses");
+        assert!(has_args_envelope(&schema_for!(BotLootWrapper)),                 "bot.loot");
     }
 
     // ── MCP default-fill parity tests ─────────────────────────────────────────
@@ -1038,6 +1104,22 @@ mod tests {
             serde_json::json!({}),
             "params must default to empty object"
         );
+    }
+
+    /// Regression: a packed creature GUID (HighGuid bits set) exceeds i64::MAX. target_guid
+    /// MUST be u64 — an i64 field would fail to deserialize the value and the daemon would
+    /// reject every bot.attack / bot.loot for a real creature before forwarding to AC.
+    #[test]
+    fn combat_loot_target_guid_accepts_packed_uint64_over_i64_max() {
+        let packed: u64 = 0xF130_0000_0000_0001; // HighGuid::Unit-style raw GUID
+        assert!(packed > i64::MAX as u64, "test value must exceed i64::MAX");
+        let body = format!(r#"{{"args":{{"bot_guid":1003,"target_guid":{packed}}}}}"#);
+        let a: BotAttackWrapper = serde_json::from_str(&body)
+            .expect("bot.attack target_guid must accept u64 > i64::MAX");
+        assert_eq!(a.args.target_guid, packed);
+        let l: BotLootWrapper = serde_json::from_str(&body)
+            .expect("bot.loot target_guid must accept u64 > i64::MAX");
+        assert_eq!(l.args.target_guid, packed);
     }
 
     /// Enum-bearing wrappers must use $defs not $definitions (schemars 1.x).

@@ -13,3 +13,5 @@ pub mod nav;
 pub mod own;
 pub mod grind;
 pub mod supervisor;
+pub mod combat;
+pub mod loot;

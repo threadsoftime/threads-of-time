@@ -1,4 +1,4 @@
-//! MCP ServerHandler with all 50 V1 tools.
+//! MCP ServerHandler with all 54 V1 tools.
 //!
 //! Port of `harness_daemon/mcp_server.py:build_mcp_server`.
 //!
@@ -9,7 +9,7 @@
 //!   `impl ServerHandler for HarnessMcp` sets `serverInfo`.
 //! - Every tool is a direct `#[tool]` fn that forwards to `self.forward(...)`.
 //!
-//! IMPORTANT: All 50 tool methods must be defined DIRECTLY in the
+//! IMPORTANT: All 54 tool methods must be defined DIRECTLY in the
 //! `#[tool_router] impl HarnessMcp` block with `#[tool(...)]` attributes on
 //! each function. The `#[tool_router]` proc macro detects `#[tool]` attributes
 //! in the token stream BEFORE macro_rules expansion — so `macro_rules!`
@@ -177,7 +177,7 @@ impl HarnessMcp {
     }
 }
 
-// ── 50-tool #[tool_router] impl ───────────────────────────────────────────────
+// ── 54-tool #[tool_router] impl ───────────────────────────────────────────────
 //
 // CRITICAL: Each tool method MUST be defined directly with `#[tool(...)]` on
 // the function. Do NOT use macro_rules! invocations here — the `#[tool_router]`
@@ -223,7 +223,7 @@ impl HarnessMcp {
         self.forward("gm.strip_gear", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
     }
 
-    // ── bot.* (14) ────────────────────────────────────────────────────────────
+    // ── bot.* (16) ────────────────────────────────────────────────────────────
 
     #[tool(name = "bot.set_goal", description = "Set a playerbot's next RPG goal.")]
     async fn bot_set_goal(&self, Parameters(w): Parameters<schemas::BotSetGoalWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
@@ -295,7 +295,17 @@ impl HarnessMcp {
         self.forward("bot.enter_instance", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
     }
 
-    // ── obs.* (17) ────────────────────────────────────────────────────────────
+    #[tool(name = "bot.attack", description = "Assert melee attack on a target; core auto-swings while ownership holds. target_guid is the packed creature uint64 from obs.get_nearby_hostiles.")]
+    async fn bot_attack(&self, Parameters(w): Parameters<schemas::BotAttackWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
+        self.forward("bot.attack", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
+    }
+
+    #[tool(name = "bot.loot", description = "Loot a dead creature (must be tapped by this bot, solo loot only). target_guid is the packed creature uint64 from obs.get_lootable_corpses.")]
+    async fn bot_loot(&self, Parameters(w): Parameters<schemas::BotLootWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
+        self.forward("bot.loot", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
+    }
+
+    // ── obs.* (19) ────────────────────────────────────────────────────────────
 
     #[tool(name = "obs.ping", description = "Health check — returns {pong:true}.")]
     async fn obs_ping(&self, Parameters(w): Parameters<schemas::ObsPingWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
@@ -380,6 +390,16 @@ impl HarnessMcp {
     #[tool(name = "obs.lfg_pending", description = "Drain pending real-player + bot LFG join intents recorded by the veto hook / bot-queue.")]
     async fn obs_lfg_pending(&self, Parameters(w): Parameters<schemas::ObsLfgPendingWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
         self.forward("obs.lfg_pending", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
+    }
+
+    #[tool(name = "obs.get_nearby_hostiles", description = "Grid-search for unfriendly attackable units near the bot. Returns up to 10 hostiles sorted by distance with position (x,y,z), hp_pct, and packed guid.")]
+    async fn obs_get_nearby_hostiles(&self, Parameters(w): Parameters<schemas::ObsGetNearbyHostilesWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
+        self.forward("obs.get_nearby_hostiles", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
+    }
+
+    #[tool(name = "obs.get_lootable_corpses", description = "Grid-search for lootable creature corpses near the bot (tapped by this bot, UNIT_DYNFLAG_LOOTABLE set). Returns sorted by distance with position (x,y,z) and packed guid.")]
+    async fn obs_get_lootable_corpses(&self, Parameters(w): Parameters<schemas::ObsGetLootableCorpsesWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
+        self.forward("obs.get_lootable_corpses", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
     }
 
     // ── event.* (2) ───────────────────────────────────────────────────────────
@@ -494,7 +514,7 @@ mod tests {
     // FAIL TO BOOT.
     //
     // This test asserts the representative case (obs.ping).  The full suite
-    // covering all 50 wrappers lives in mcp::schemas::tests::all_50_wrappers_have_args_envelope.
+    // covering all 54 wrappers lives in mcp::schemas::tests::all_54_wrappers_have_args_envelope.
     // (A live tools/list assertion previously lived in the Python parity gate,
     // retired along with the Python sidecars.)
     #[test]
