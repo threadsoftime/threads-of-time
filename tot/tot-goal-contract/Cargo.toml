@@ -1,0 +1,13 @@
+[package]
+name = "tot-goal-contract"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+async-trait = "0.1"
+tokio = { version = "1", features = ["sync"] }
+
+# [profile.*] intentionally absent — the workspace root owns the shared release profile.
