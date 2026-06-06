@@ -39,6 +39,8 @@ serde_json   = { version = "1", features = ["preserve_order"] }
 thiserror    = "2"
 anyhow       = "1"
 tot-harness-client = { path = "../tot-harness-client" }
+tot-goal-contract  = { path = "../tot-goal-contract" }
+exec-rs            = { path = "../exec-rs" }
 tracing      = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 clap         = { version = "4", features = ["derive", "env"] }
