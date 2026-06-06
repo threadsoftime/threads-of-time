@@ -837,4 +837,80 @@ mod tests {
         let state_count = state_calls.load(SeqCst);
         assert!(state_count <= 3, "unexpected extra state polls (resting?), got {state_count}");
     }
+
+    // ── F5: full integrated grind cycle test ─────────────────────────────────
+
+    /// Full cycle: scan → react → approach → fight (attack + target-death poll) →
+    /// post-kill pause → loot → health-check → complete on kill_count=1.
+    ///
+    /// Asserts the tool-call sequence includes all expected tools:
+    /// obs.get_nearby_hostiles, nav.find_path, bot.move_path, obs.get_position,
+    /// bot.attack, obs.get_state, obs.get_lootable_corpses.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_grind_full_cycle_with_real_combat_and_loot() {
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+        use std::sync::{Arc, Mutex};
+
+        // Track every tool call in order.
+        let call_log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let log2 = call_log.clone();
+
+        let hostile_calls = Arc::new(AtomicU32::new(0));
+        let hc2 = hostile_calls.clone();
+
+        let base = spawn_mock(move |name, _a| {
+            log2.lock().unwrap().push(name.clone());
+            match name.as_str() {
+                "obs.get_nearby_hostiles" => {
+                    let n = hc2.fetch_add(1, SeqCst);
+                    if n == 0 {
+                        // Initial scan: live target
+                        json!({"hostiles": [{"guid": 111u64, "level": 5, "hp_pct": 100.0,
+                            "distance": 5.0, "is_alive": true, "x": 5.0, "y": 0.0, "z": 0.0}]})
+                    } else {
+                        // Combat poll: target dead
+                        json!({"hostiles": []})
+                    }
+                }
+                "nav.find_path" => json!({"path_type": 1i64, "points": [
+                    {"x":0.0,"y":0.0,"z":0.0},{"x":5.0,"y":0.0,"z":0.0}]}),
+                "bot.move_path" => json!({"launched": true, "duration_ms": 0,
+                    "final": {"x":5.0,"y":0.0,"z":0.0}}),
+                "obs.get_position" => json!({"x":5.0,"y":0.0,"z":0.0,
+                    "map_id":0,"zone_id":1,"area_id":1,"orientation":0.0}),
+                "bot.attack" => json!({"attacked": true, "target_guid": 111u64, "target_name": "Kobold"}),
+                // obs.get_state: hp_pct=90 → no rest; level=5
+                "obs.get_state" => json!({"self": {"level": 5, "hp_pct": 90}}),
+                // loot: no corpses (simplest path through Looting)
+                "obs.get_lootable_corpses" => json!({"corpses": []}),
+                other => panic!("unexpected tool in full_cycle test: {other}"),
+            }
+        })
+        .await;
+
+        let goal = GrindGoal {
+            anchor_point: WorldPos { map_id: 0, x: 0.0, y: 0.0, z: 0.0 },
+            wander_radius: 90.0, max_search_radius: 35.0,
+            mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
+            to_level: 99, kill_count: Some(1), rest_threshold: 0.35,
+        };
+
+        let status = run_grind(&client(&base), 1003, &goal).await;
+        match status {
+            tot_goal_contract::GoalStatus::Completed { summary } =>
+                assert!(summary.contains("1 kill") || summary.contains("kill"), "summary: {summary}"),
+            other => panic!("expected Completed, got {other:?}"),
+        }
+
+        let log = call_log.lock().unwrap().clone();
+        // Assert each required tool was called at least once.
+        for tool in &["obs.get_nearby_hostiles", "nav.find_path", "bot.move_path",
+                      "obs.get_position", "bot.attack", "obs.get_state",
+                      "obs.get_lootable_corpses"] {
+            assert!(
+                log.iter().any(|t| t == tool),
+                "tool {tool} was never called; call log: {log:?}"
+            );
+        }
+    }
 }

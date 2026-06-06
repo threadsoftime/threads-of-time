@@ -143,8 +143,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn full_loop_owns_runs_goal_reports_completed_and_releases() {
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
         let owned = Arc::new(std::sync::atomic::AtomicI32::new(0)); // +1 claim, -1 release
         let owned2 = owned.clone();
+        // Track obs.get_nearby_hostiles calls: first call is the scan (target alive),
+        // subsequent calls are combat polls (target dead → TargetDead → PostKillPause).
+        let hostile_calls = Arc::new(AtomicU32::new(0));
+        let hc2 = hostile_calls.clone();
         let base = spawn_mock(move |name, args| match name.as_str() {
             "bot.set_ai_enabled" => {
                 // set_ai_owned(_, true) claims and sends enabled:false; set_ai_owned(_, false)
@@ -154,13 +159,29 @@ mod tests {
                 if enabled { owned2.fetch_sub(1, std::sync::atomic::Ordering::SeqCst); json!({"owned": false, "reset": true}) }
                 else       { owned2.fetch_add(1, std::sync::atomic::Ordering::SeqCst); json!({"owned": true, "reset": false}) }
             }
-            "obs.get_nearby_hostiles" => json!({"hostiles": [
-                {"guid": 111u64, "name": "Kobold", "level": 5, "hp_pct": 100, "distance": 6.0, "is_alive": true}]}),
+            "obs.get_nearby_hostiles" => {
+                let n = hc2.fetch_add(1, SeqCst);
+                if n == 0 {
+                    // Scan: return one live in-band target with world-space coords
+                    json!({"hostiles": [
+                        {"guid": 111u64, "name": "Kobold", "level": 5, "hp_pct": 100.0,
+                         "distance": 6.0, "is_alive": true, "x": 6.0, "y": 0.0, "z": 0.0}
+                    ]})
+                } else {
+                    // Combat poll: target dead (absent) → TargetDead → PostKillPause
+                    json!({"hostiles": []})
+                }
+            }
             "nav.find_path" => json!({"path_type": 1i64, "points": [
                 {"x":0.0,"y":0.0,"z":0.0},{"x":6.0,"y":0.0,"z":0.0}]}),
             "bot.move_path" => json!({"launched": true, "duration_ms": 0, "final": {"x":6.0,"y":0.0,"z":0.0}}),
             "obs.get_position" => json!({"x":6.0,"y":0.0,"z":0.0,"map_id":0,"zone_id":1,"area_id":1,"orientation":0.0}),
-            "obs.get_state" => json!({"self": {"level": 5, "health_pct": 90}}),
+            // Plan 2: obs.get_state uses hp_pct (not health_pct)
+            "obs.get_state" => json!({"self": {"level": 5, "hp_pct": 90}}),
+            // Plan 2: bot.attack called by fight()
+            "bot.attack" => json!({"attacked": true, "target_guid": 111u64, "target_name": "Kobold"}),
+            // Plan 2: obs.get_lootable_corpses called by Looting state
+            "obs.get_lootable_corpses" => json!({"corpses": []}),
             other => panic!("unexpected tool {other}"),
         }).await;
 
