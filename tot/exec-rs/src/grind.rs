@@ -9,6 +9,8 @@ use thiserror::Error;
 use tot_goal_contract::GrindGoal;
 use tot_harness_client::{HarnessClient, HarnessError};
 
+use crate::combat::{CombatContext, RotationPlugin};
+
 /// A selected hostile to engage (world-space position + distance from the bot).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Target {
@@ -34,6 +36,8 @@ struct Hostile {
     level: u32,
     distance: f64,
     is_alive: bool,
+    /// Health percentage 0.0–100.0 (used for target-death detection in combat poll).
+    #[serde(default)] hp_pct: f32,
     // World-space position so the executor can navigate to the target (design §6.2).
     // `default` keeps offline mocks that omit coords parseable (→ 0,0,0).
     #[serde(default)] x: f64,
@@ -182,9 +186,7 @@ pub enum GrindState {
 
 use tot_goal_contract::{GoalProgress, GoalStatus};
 
-/// `Fighting` (Plan 1 NO-OP): in Plan 2 this calls `bot.attack` and polls target death.
-/// Here it immediately reports the target dead so the loop advances.
-pub async fn fight_noop(target: Target) -> GrindState { GrindState::PostKillPause { target } }
+// fight_noop removed — replaced by `fight()` above (Plan 2).
 
 /// `PostKillPause`: the highest-leverage "alive" tell (design §7, §E) — pause before loot.
 pub async fn post_kill_pause(target: Target, seed: u64) -> GrindState {
@@ -196,7 +198,12 @@ pub async fn post_kill_pause(target: Target, seed: u64) -> GrindState {
 pub async fn loot_noop(_target: Target) -> GrindState { GrindState::HealthCheck }
 
 #[derive(Debug, Deserialize)]
-struct SelfState { level: u32, #[serde(default)] #[allow(dead_code)] health_pct: u32 }
+struct SelfState {
+    level: u32,
+    /// Health as an integer percentage 0–100 (design §6.1, pre-flight note).
+    #[serde(default)]
+    hp_pct: u32,
+}
 #[derive(Debug, Deserialize)]
 struct StateDigest { #[serde(rename = "self")] self_: SelfState }
 
@@ -206,6 +213,84 @@ async fn read_self(client: &HarnessClient, bot_guid: u64) -> Result<SelfState, G
     let digest: StateDigest =
         serde_json::from_value(raw).map_err(|e| GrindError::Shape(format!("obs.get_state: {e}")))?;
     Ok(digest.self_)
+}
+
+/// Combat poll constants (not goal fields — exec timing, see design §4.2).
+const FIGHT_POLL_INTERVAL_MS: u64 = 500;
+/// Maximum combat-poll iterations before giving up (safety bound: ~30 s at 500 ms/tick).
+const FIGHT_MAX_POLLS: u32 = 60;
+
+/// Internal result of the `fight` state — the `run_grind` loop maps this to the next state.
+pub(crate) enum FightOutcome {
+    /// Target is dead (absent or hp==0 in the hostiles scan). Proceed to post-kill pause.
+    TargetDead,
+    /// Bot died during combat. Must escalate.
+    BotDied,
+}
+
+/// Poll `obs.get_nearby_hostiles` for the presence/hp of a specific target.
+/// Returns `true` if the target is still alive (present AND hp_pct > 0).
+async fn target_still_alive(
+    client: &HarnessClient,
+    bot_guid: u64,
+    target_guid: u64,
+    goal: &GrindGoal,
+) -> Result<bool, GrindError> {
+    let raw = client
+        .call("obs.get_nearby_hostiles", serde_json::json!({
+            "bot_guid": bot_guid as i64,
+            "radius": goal.max_search_radius as f64,
+        }))
+        .await?;
+    let parsed: NearbyHostiles =
+        serde_json::from_value(raw)
+            .map_err(|e| GrindError::Shape(format!("nearby_hostiles: {e}")))?;
+    let alive = parsed.hostiles.iter().any(|h| h.guid == target_guid && h.is_alive && h.hp_pct > 0.0);
+    Ok(alive)
+}
+
+/// `Fighting`: tick the melee rotation, poll target liveness and own death.
+///
+/// Returns:
+/// - `Ok(FightOutcome::TargetDead)` — target gone or hp==0.
+/// - `Ok(FightOutcome::BotDied)` — bot's own hp==0 (caller escalates).
+/// - `Err(GrindError)` — harness/shape failure.
+pub(crate) async fn fight(
+    client: &HarnessClient,
+    bot_guid: u64,
+    target: Target,
+    goal: &GrindGoal,
+) -> Result<FightOutcome, GrindError> {
+    let rotation = RotationPlugin::melee_m1();
+    let ctx = CombatContext {
+        bot_hp_pct: 100.0, // refreshed below after each poll
+        target_hp_pct: 100.0,
+        target_distance: target.distance,
+    };
+
+    for _ in 0..FIGHT_MAX_POLLS {
+        // Fire the rotation action (bot.attack — idempotent re-issue).
+        rotation.tick(bot_guid, target.guid, client, &ctx).await.map_err(|e| match e {
+            crate::combat::CombatError::Harness(he) => GrindError::Harness(he),
+            crate::combat::CombatError::Shape(s) => GrindError::Shape(s),
+        })?;
+
+        // Poll target liveness.
+        if !target_still_alive(client, bot_guid, target.guid, goal).await? {
+            return Ok(FightOutcome::TargetDead);
+        }
+
+        // Poll own health for death.
+        let self_state = read_self(client, bot_guid).await?;
+        if self_state.hp_pct == 0 {
+            return Ok(FightOutcome::BotDied);
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(FIGHT_POLL_INTERVAL_MS)).await;
+    }
+
+    // Poll budget exhausted — treat as target dead (safety: avoid infinite loop).
+    Ok(FightOutcome::TargetDead)
 }
 
 /// Drive a `Grind` goal to a terminal `GoalStatus`. Plan 1: combat/loot are no-ops.
@@ -247,7 +332,18 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
                     return GoalStatus::Blocked { reason: tot_goal_contract::BlockedReason::Other,
                                                  detail: Some(format!("approach shape: {s}")) },
             },
-            GrindState::Fighting { target } => fight_noop(target).await,
+            GrindState::Fighting { target } => match fight(client, bot_guid, target, goal).await {
+                Ok(FightOutcome::TargetDead) => GrindState::PostKillPause { target },
+                Ok(FightOutcome::BotDied) => return GoalStatus::NeedsDecision {
+                    event: tot_goal_contract::EscalationEvent::BotDied { position: None },
+                },
+                Err(GrindError::Harness(e)) =>
+                    return GoalStatus::Blocked { reason: tot_goal_contract::BlockedReason::Other,
+                                                 detail: Some(format!("fight harness: {e}")) },
+                Err(GrindError::Shape(s)) =>
+                    return GoalStatus::Blocked { reason: tot_goal_contract::BlockedReason::Other,
+                                                 detail: Some(format!("fight shape: {s}")) },
+            },
             GrindState::PostKillPause { target } => post_kill_pause(target, kills as u64).await,
             GrindState::Looting { target } => { kills += 1; loot_noop(target).await }
             GrindState::HealthCheck => {
@@ -395,7 +491,8 @@ mod tests {
                 {"x":0.0,"y":0.0,"z":0.0},{"x":5.0,"y":5.0,"z":0.0}]}),
             "bot.move_path" => json!({"launched": true, "duration_ms": 0, "final": {"x":5.0,"y":5.0,"z":0.0}}),
             "obs.get_position" => json!({"x":5.0,"y":5.0,"z":0.0,"map_id":0,"zone_id":1,"area_id":1,"orientation":0.0}),
-            "obs.get_state" => json!({"self": {"level": 5, "health_pct": 90}}),
+            // obs.get_state uses hp_pct (not health_pct) — updated for Plan 2
+            "obs.get_state" => json!({"self": {"level": 5, "hp_pct": 90}}),
             other => panic!("unexpected tool {other}"),
         }).await;
         let status = run_grind(&client(&base), 1003, &test_goal()).await;
@@ -407,15 +504,37 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn run_grind_completes_after_kill_count() {
-        // One in-band target; the no-op combat "kills" it; kill_count=1 → Completed.
-        let base = spawn_mock(|name, _a| match name.as_str() {
-            "obs.get_nearby_hostiles" => json!({"hostiles": [
-                {"guid": 111u64, "name": "Kobold", "level": 5, "hp_pct": 100, "distance": 6.0, "is_alive": true, "x": 6.0, "y": 0.0, "z": 0.0}]}),
+        // One in-band target; fight() sees the target die on the first combat poll;
+        // kill_count=1 → Completed.
+        // The mock uses an AtomicU32 to make obs.get_nearby_hostiles return the target
+        // alive on the scan phase, then dead (empty) when polled from within fight().
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+        let hostile_calls = std::sync::Arc::new(AtomicU32::new(0));
+        let hc2 = hostile_calls.clone();
+        let base = spawn_mock(move |name, _a| match name.as_str() {
+            "obs.get_nearby_hostiles" => {
+                // First call is the scan (Scanning state) — return target alive.
+                // Subsequent calls are combat polls (fight()) — return empty (target dead).
+                let n = hc2.fetch_add(1, SeqCst);
+                if n == 0 {
+                    json!({"hostiles": [
+                        {"guid": 111u64, "name": "Kobold", "level": 5, "hp_pct": 100.0, "distance": 6.0,
+                         "is_alive": true, "x": 6.0, "y": 0.0, "z": 0.0}
+                    ]})
+                } else {
+                    json!({"hostiles": []})  // target gone → TargetDead
+                }
+            }
             "nav.find_path" => json!({"path_type": 1i64, "points": [
                 {"x":0.0,"y":0.0,"z":0.0},{"x":6.0,"y":0.0,"z":0.0}]}),
             "bot.move_path" => json!({"launched": true, "duration_ms": 0, "final": {"x":6.0,"y":0.0,"z":0.0}}),
             "obs.get_position" => json!({"x":6.0,"y":0.0,"z":0.0,"map_id":0,"zone_id":1,"area_id":1,"orientation":0.0}),
-            "obs.get_state" => json!({"self": {"level": 5, "health_pct": 90}}),
+            // obs.get_state: bot alive throughout; Plan 2 field is hp_pct
+            "obs.get_state" => json!({"self": {"level": 5, "hp_pct": 90}}),
+            // bot.attack called by fight()
+            "bot.attack" => json!({"attacked": true, "target_guid": 111u64, "target_name": "Kobold"}),
+            // obs.get_lootable_corpses called by Looting state
+            "obs.get_lootable_corpses" => json!({"corpses": []}),
             other => panic!("unexpected tool {other}"),
         }).await;
         let status = run_grind(&client(&base), 1003, &test_goal()).await;
@@ -423,6 +542,125 @@ mod tests {
             tot_goal_contract::GoalStatus::Completed { summary } =>
                 assert!(summary.contains("kill"), "summary: {summary}"),
             other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    // ── F3: real fight() tests ────────────────────────────────────────────────
+
+    /// fight() transitions to TargetDead when the target disappears from the hostile list.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fight_target_dead_when_absent_from_hostiles() {
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+        let calls = std::sync::Arc::new(AtomicU32::new(0));
+        let c2 = calls.clone();
+
+        let base = spawn_mock(move |name, _a| match name.as_str() {
+            "bot.attack" => json!({"attacked": true, "target_guid": 111u64, "target_name": "Kobold"}),
+            "obs.get_nearby_hostiles" => {
+                let n = c2.fetch_add(1, SeqCst);
+                if n < 2 {
+                    // First 2 polls: target alive
+                    json!({"hostiles": [{"guid": 111u64, "level": 5, "hp_pct": 50.0, "distance": 3.0, "is_alive": true}]})
+                } else {
+                    // 3rd poll: target absent → TargetDead
+                    json!({"hostiles": []})
+                }
+            }
+            "obs.get_state" => json!({"self": {"level": 5, "hp_pct": 80}}),
+            other => panic!("unexpected tool in fight_target_dead test: {other}"),
+        }).await;
+
+        let goal = test_goal();
+        let target = Target { guid: 111, x: 3.0, y: 0.0, z: 0.0, distance: 3.0 };
+        let outcome = fight(&client(&base), 1003, target, &goal).await.unwrap();
+        assert!(matches!(outcome, FightOutcome::TargetDead), "expected TargetDead");
+    }
+
+    /// fight() transitions to TargetDead when the target's hp_pct drops to 0.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fight_target_dead_when_hp_zero() {
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+        let calls = std::sync::Arc::new(AtomicU32::new(0));
+        let c2 = calls.clone();
+
+        let base = spawn_mock(move |name, _a| match name.as_str() {
+            "bot.attack" => json!({"attacked": true, "target_guid": 111u64, "target_name": "Kobold"}),
+            "obs.get_nearby_hostiles" => {
+                let n = c2.fetch_add(1, SeqCst);
+                if n == 0 {
+                    json!({"hostiles": [{"guid": 111u64, "level": 5, "hp_pct": 0.0, "distance": 3.0, "is_alive": false}]})
+                } else {
+                    json!({"hostiles": []})
+                }
+            }
+            "obs.get_state" => json!({"self": {"level": 5, "hp_pct": 90}}),
+            other => panic!("unexpected tool in fight_hp_zero test: {other}"),
+        }).await;
+
+        let goal = test_goal();
+        let target = Target { guid: 111, x: 3.0, y: 0.0, z: 0.0, distance: 3.0 };
+        let outcome = fight(&client(&base), 1003, target, &goal).await.unwrap();
+        assert!(matches!(outcome, FightOutcome::TargetDead), "hp_pct==0 → TargetDead");
+    }
+
+    /// fight() returns BotDied when obs.get_state returns hp_pct==0.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fight_bot_died_when_own_hp_zero() {
+        let base = spawn_mock(|name, _a| match name.as_str() {
+            "bot.attack" => json!({"attacked": true, "target_guid": 111u64, "target_name": "Kobold"}),
+            // target still alive
+            "obs.get_nearby_hostiles" => json!({"hostiles": [
+                {"guid": 111u64, "level": 5, "hp_pct": 80.0, "distance": 3.0, "is_alive": true}
+            ]}),
+            // bot died
+            "obs.get_state" => json!({"self": {"level": 5, "hp_pct": 0}}),
+            other => panic!("unexpected tool in bot_died test: {other}"),
+        }).await;
+
+        let goal = test_goal();
+        let target = Target { guid: 111, x: 3.0, y: 0.0, z: 0.0, distance: 3.0 };
+        let outcome = fight(&client(&base), 1003, target, &goal).await.unwrap();
+        assert!(matches!(outcome, FightOutcome::BotDied), "expected BotDied");
+    }
+
+    /// run_grind escalates NeedsDecision{BotDied} when the bot dies during fighting.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_grind_escalates_bot_died() {
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+        let hostile_calls = std::sync::Arc::new(AtomicU32::new(0));
+        let hc2 = hostile_calls.clone();
+
+        let base = spawn_mock(move |name, _a| match name.as_str() {
+            "obs.get_nearby_hostiles" => {
+                let n = hc2.fetch_add(1, SeqCst);
+                if n == 0 {
+                    // Scan: return a live target
+                    json!({"hostiles": [{"guid": 111u64, "level": 5, "hp_pct": 100.0,
+                        "distance": 3.0, "is_alive": true, "x": 3.0, "y": 0.0, "z": 0.0}]})
+                } else {
+                    // Combat poll: target still there (bot will die)
+                    json!({"hostiles": [{"guid": 111u64, "level": 5, "hp_pct": 80.0,
+                        "distance": 3.0, "is_alive": true}]})
+                }
+            }
+            "nav.find_path" => json!({"path_type": 1i64, "points": [
+                {"x":0.0,"y":0.0,"z":0.0},{"x":3.0,"y":0.0,"z":0.0}]}),
+            "bot.move_path" => json!({"launched": true, "duration_ms": 0,
+                "final": {"x":3.0,"y":0.0,"z":0.0}}),
+            "obs.get_position" => json!({"x":3.0,"y":0.0,"z":0.0,
+                "map_id":0,"zone_id":1,"area_id":1,"orientation":0.0}),
+            "bot.attack" => json!({"attacked": true, "target_guid": 111u64, "target_name": "Kobold"}),
+            // Bot is dead
+            "obs.get_state" => json!({"self": {"level": 5, "hp_pct": 0}}),
+            other => panic!("unexpected tool in escalate_bot_died test: {other}"),
+        }).await;
+
+        let status = run_grind(&client(&base), 1003, &test_goal()).await;
+        match status {
+            tot_goal_contract::GoalStatus::NeedsDecision {
+                event: tot_goal_contract::EscalationEvent::BotDied { .. },
+            } => {}
+            other => panic!("expected NeedsDecision{{BotDied}}, got {other:?}"),
         }
     }
 }
