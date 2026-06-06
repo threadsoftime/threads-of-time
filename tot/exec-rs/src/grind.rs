@@ -72,6 +72,48 @@ pub async fn scan_for_target(
     Ok(best)
 }
 
+use crate::nav::{self, Dest, NavError};
+use std::time::Duration;
+
+/// Sampled micro-timing craft (exec constants, NOT goal fields — see design §4.2).
+const REACT_DELAY_MS_MIN: u64 = 500;
+const REACT_DELAY_MS_MAX: u64 = 1500;
+const POST_KILL_PAUSE_MS_MIN: u64 = 1000;
+const POST_KILL_PAUSE_MS_MAX: u64 = 2000;
+
+/// Deterministic pseudo-sample in [min,max] from a rolling seed (avoids a rng dep and
+/// keeps tests reproducible). `seed` should vary per call (e.g. a kill counter).
+fn sample_ms(min: u64, max: u64, seed: u64) -> u64 {
+    if max <= min { return min; }
+    min + (seed.wrapping_mul(2654435761) % (max - min + 1))
+}
+
+/// `Reacting`: a short delay before moving — the "noticed it" beat (design §7).
+pub async fn react(target: Target, seed: u64) -> GrindState {
+    tokio::time::sleep(Duration::from_millis(sample_ms(REACT_DELAY_MS_MIN, REACT_DELAY_MS_MAX, seed))).await;
+    GrindState::Approaching { target }
+}
+
+/// `Approaching`: walk to the target's position via the navmesh. On a navigation
+/// failure (no path / stuck), fall back to `Scanning` to pick a fresh target.
+pub async fn approach(
+    client: &HarnessClient,
+    bot_guid: u64,
+    target: Target,
+) -> Result<GrindState, GrindError> {
+    // Walk to the target's reported world-space position (from obs.get_nearby_hostiles).
+    let dest = Dest { x: target.x, y: target.y, z: target.z };
+    match nav::walk_to(client, bot_guid, dest).await {
+        Ok(()) => Ok(GrindState::Fighting { target }),
+        Err(NavError::NoPath) | Err(NavError::Stuck(_)) | Err(NavError::RepathBudgetExceeded(_)) => {
+            Ok(GrindState::Scanning)
+        }
+        Err(NavError::Timeout) => Ok(GrindState::Scanning),
+        Err(NavError::Harness(e)) => Err(GrindError::Harness(e)),
+        Err(NavError::Shape(s)) => Err(GrindError::Shape(s)),
+    }
+}
+
 /// The grind state machine. Plan 1 implements `Scanning`/`Reacting`/`Approaching`/
 /// `Wandering`/`Idle` for real; `Fighting`/`PostKillPause`/`Looting`/`HealthCheck`/
 /// `Resting` are tested no-ops until Plan 2.
@@ -145,5 +187,29 @@ mod tests {
         ]})).await;
         let t = scan_for_target(&client(&base), 1003, &test_goal()).await.unwrap();
         assert_eq!(t, None);
+    }
+
+    #[tokio::test]
+    async fn approaching_walks_to_target_then_transitions_to_fighting() {
+        let base = spawn_mock(|name, _a| match name.as_str() {
+            "nav.find_path" => json!({"path_type": 1i64, "points": [
+                {"x":0.0,"y":0.0,"z":0.0},{"x":8.0,"y":0.0,"z":0.0}]}),
+            "bot.move_path" => json!({"launched": true, "duration_ms": 0, "final": {"x":8.0,"y":0.0,"z":0.0}}),
+            "obs.get_position" => json!({"x":8.0,"y":0.0,"z":0.0,"map_id":0,"zone_id":1,"area_id":1,"orientation":0.0}),
+            other => panic!("unexpected tool {other}"),
+        }).await;
+        let target = Target { guid: 111, x: 8.0, y: 0.0, z: 0.0, distance: 8.0 };
+        let next = approach(&client(&base), 1003, target).await.unwrap();
+        assert_eq!(next, GrindState::Fighting { target });
+    }
+
+    #[tokio::test]
+    async fn approaching_nopath_falls_back_to_scanning() {
+        let base = spawn_mock(|name, _a| match name.as_str() {
+            "nav.find_path" => json!({"path_type": 8i64, "points": []}), // PATHFIND_NOPATH
+            other => panic!("unexpected tool {other}"),
+        }).await;
+        let next = approach(&client(&base), 1003, Target { guid: 111, x: 8.0, y: 0.0, z: 0.0, distance: 8.0 }).await.unwrap();
+        assert_eq!(next, GrindState::Scanning, "no path → pick a new target");
     }
 }
