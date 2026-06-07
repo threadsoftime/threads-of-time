@@ -42,6 +42,8 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use rand::Rng;
+
 use crate::decide::Decider;
 use crate::dedup::SeenMemoryIds;
 use crate::dispatch::Dispatcher;
@@ -224,7 +226,10 @@ impl LoopSupervisor {
                     last_state: TickState::new(bot_guid),
                     pending_sse: Vec::new(),
                     seen_memory_ids: Arc::clone(&seen),
-                    next_wakeup_ms: None,
+                    // Seed a jittered first wakeup so (a) the bot's first decision is a
+                    // goal-emitting organic_wakeup within ~0-15s (not first_tick), and
+                    // (b) a cohort of bots staggers instead of bursting in lockstep.
+                    next_wakeup_ms: Some(_now_ms() + jittered_startup_offset(rand::thread_rng().gen::<f64>())),
                 },
             );
         }
@@ -694,10 +699,12 @@ impl LoopSupervisor {
         // ── Wakeup clamp ─────────────────────────────────────────────────
         // V3.7.1: brain-returned delta is clamped to [60_000, 600_000] ms.
         // None / non-positive → 3-min (180_000 ms) default.
-        let delta: i64 = match decision.wakeup_in_ms {
-            Some(d) if d > 0 => d.clamp(60_000, 600_000),
+        let base_delta: i64 = match decision.wakeup_in_ms {
+            Some(d) if d > 0 => d,
             _ => 180_000,
         };
+        // ±15% jitter so a cohort's ~180s wakeups never re-converge into a burst.
+        let delta = jittered_delta(base_delta, rand::thread_rng().gen_range(-0.15..=0.15));
         let next_wakeup = now_ms + delta;
         {
             let mut bots = self.bots.lock().unwrap();
@@ -959,6 +966,20 @@ fn _now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Startup wakeup jitter: map a uniform random `r ∈ [0,1]` to a 0–15s offset (ms).
+/// Pure (random input injected by the caller) so it is deterministically testable.
+pub fn jittered_startup_offset(r: f64) -> i64 {
+    (r.clamp(0.0, 1.0) * 15_000.0) as i64
+}
+
+/// Apply a steady-state jitter factor to a wakeup delta, then re-apply the
+/// contract clamp `[60_000, 600_000]ms`. `jitter_frac` is the caller-supplied
+/// random fraction in `[-0.15, 0.15]`. Pure → deterministically testable.
+pub fn jittered_delta(delta: i64, jitter_frac: f64) -> i64 {
+    let j = (delta as f64 * (1.0 + jitter_frac)).round() as i64;
+    j.clamp(60_000, 600_000)
 }
 
 fn _eid() -> String {
@@ -1298,6 +1319,24 @@ mod tests {
         assert!(di < re, "disposition must come before reasoning");
         assert!(re < to, "reasoning must come before tool");
         assert!(to < tr, "tool must come before triage");
+    }
+
+    #[test]
+    fn startup_offset_is_within_0_to_15s() {
+        assert_eq!(jittered_startup_offset(0.0), 0);
+        assert_eq!(jittered_startup_offset(1.0), 15_000);
+        assert_eq!(jittered_startup_offset(0.5), 7_500);
+        assert_eq!(jittered_startup_offset(-0.3), 0);   // clamped
+        assert_eq!(jittered_startup_offset(2.0), 15_000); // clamped
+    }
+
+    #[test]
+    fn delta_jitter_applies_factor_then_clamps() {
+        assert_eq!(jittered_delta(180_000, 0.15), 207_000);
+        assert_eq!(jittered_delta(180_000, -0.15), 153_000);
+        assert_eq!(jittered_delta(60_000, -0.15), 60_000);   // 51_000 → clamp up
+        assert_eq!(jittered_delta(600_000, 0.15), 600_000);  // 690_000 → clamp down
+        assert_eq!(jittered_delta(180_000, 0.0), 180_000);
     }
 }
 

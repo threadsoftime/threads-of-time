@@ -623,10 +623,12 @@ async fn test_wakeup_clamp_above_maximum() {
     });
     if let Some(rec) = llm_rec {
         let wakeup_in = rec.get("wakeup_in_ms").and_then(|v| v.as_i64());
-        assert_eq!(
-            wakeup_in,
-            Some(600_000),
-            "wakeup_in_ms above 600000 should be clamped to 600000"
+        // With base_delta=700_000 and ±15% jitter the pre-clamp range is [595k,805k].
+        // After jittered_delta clamps to [60k,600k] the result is always [595k,600k].
+        let v = wakeup_in.expect("wakeup_in_ms should be present");
+        assert!(
+            v >= 595_000 && v <= 600_000,
+            "wakeup_in_ms above 600000 should be clamped to [595k,600k]; got {v}"
         );
     }
 }
@@ -657,10 +659,11 @@ async fn test_wakeup_clamp_none_defaults_to_180k() {
     });
     if let Some(rec) = llm_rec {
         let wakeup_in = rec.get("wakeup_in_ms").and_then(|v| v.as_i64());
-        assert_eq!(
-            wakeup_in,
-            Some(180_000),
-            "None wakeup_in_ms should default to 180000"
+        // With base_delta=180_000 and ±15% jitter the result is in [153k,207k].
+        let v = wakeup_in.expect("wakeup_in_ms should be present");
+        assert!(
+            v >= 153_000 && v <= 207_000,
+            "None wakeup_in_ms should default to ~180k ±15%; got {v}"
         );
     }
 }
@@ -1051,20 +1054,20 @@ fn test_dedup_fence_poll_path_condition_unit() {
 
 #[test]
 fn test_wakeup_clamp_values_unit() {
-    // Verify the clamp formula matches Python: max(60k, min(proposed, 600k)), default 180k.
-    let clamp = |proposed: Option<i64>| -> i64 {
-        match proposed {
-            Some(d) if d > 0 => d.clamp(60_000, 600_000),
-            _ => 180_000,
-        }
-    };
+    // Verify jittered_delta (zero-jitter path) matches contract clamp [60k, 600k].
+    use brain_rs::loop_supervisor::{jittered_delta, jittered_startup_offset};
 
-    assert_eq!(clamp(Some(100)), 60_000, "below min → 60k");
-    assert_eq!(clamp(Some(60_000)), 60_000, "at min → 60k");
-    assert_eq!(clamp(Some(300_000)), 300_000, "in range → unchanged");
-    assert_eq!(clamp(Some(600_000)), 600_000, "at max → 600k");
-    assert_eq!(clamp(Some(700_000)), 600_000, "above max → 600k");
-    assert_eq!(clamp(None), 180_000, "None → default 180k");
-    assert_eq!(clamp(Some(0)), 180_000, "zero → default 180k");
-    assert_eq!(clamp(Some(-1)), 180_000, "negative → default 180k");
+    // zero-jitter path — pure clamp behaviour
+    assert_eq!(jittered_delta(100, 0.0), 60_000, "below min → clamp to 60k");
+    assert_eq!(jittered_delta(60_000, 0.0), 60_000, "at min → 60k");
+    assert_eq!(jittered_delta(300_000, 0.0), 300_000, "in range → unchanged");
+    assert_eq!(jittered_delta(600_000, 0.0), 600_000, "at max → 600k");
+    assert_eq!(jittered_delta(700_000, 0.0), 600_000, "above max → clamp to 600k");
+    assert_eq!(jittered_delta(180_000, 0.0), 180_000, "default → 180k");
+
+    // startup offset helpers
+    assert_eq!(jittered_startup_offset(0.0), 0, "r=0 → 0ms");
+    assert_eq!(jittered_startup_offset(1.0), 15_000, "r=1 → 15s");
+    assert_eq!(jittered_startup_offset(-1.0), 0, "r<0 → clamped");
+    assert_eq!(jittered_startup_offset(2.0), 15_000, "r>1 → clamped");
 }
