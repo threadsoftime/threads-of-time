@@ -20,12 +20,14 @@ pub enum ProfileError {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LevelBand {
     pub below: u32,
     pub above: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProfileAnchor {
     pub map_id: u32,
     pub x: f64,
@@ -34,6 +36,7 @@ pub struct ProfileAnchor {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GrindProfile {
     pub anchor: ProfileAnchor,
     pub level_band: LevelBand,
@@ -198,5 +201,28 @@ rotation_id = "auto_attack"
         );
         let reg = ProfileRegistry::from_toml_str(&with_cb).expect("valid with custom_behavior");
         assert_eq!(reg.get("elwynn_fargodeep").unwrap().custom_behavior.as_deref(), Some("escort_v1"));
+    }
+
+    #[test]
+    fn rejects_unknown_field_in_profile() {
+        // A typo'd key (restthreshold) must now fail at parse, not silently drop.
+        let s = VALID.replace(
+            "rotation_id = \"auto_attack\"\n\n[dun_morogh_camp]",
+            "rotation_id = \"auto_attack\"\nrestthreshold = 0.99\n\n[dun_morogh_camp]",
+        );
+        assert!(matches!(ProfileRegistry::from_toml_str(&s).unwrap_err(), ProfileError::Parse(_)));
+    }
+
+    #[test]
+    fn rejects_rest_threshold_zero() {
+        // rest_threshold range is (0, 1] — zero is invalid.
+        let s = VALID.replace("rest_threshold = 0.35", "rest_threshold = 0.0");
+        assert!(matches!(ProfileRegistry::from_toml_str(&s).unwrap_err(), ProfileError::Validation { .. }));
+    }
+
+    #[test]
+    fn rejects_non_positive_max_search_radius() {
+        let s = VALID.replace("max_search_radius = 35.0", "max_search_radius = 0.0");
+        assert!(matches!(ProfileRegistry::from_toml_str(&s).unwrap_err(), ProfileError::Validation { .. }));
     }
 }
