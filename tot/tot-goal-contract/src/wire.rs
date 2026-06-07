@@ -74,6 +74,11 @@ impl StatusSource for ChannelStatusSource {
 /// loop is not running). This lets `loop_supervisor`'s single
 /// `goal_sink: Option<Arc<dyn GoalSink>>` field drive an arbitrary cohort with
 /// no tick-path change.
+///
+/// After construction the registry should be treated as immutable: `register`
+/// takes `&mut self` and must not be called once the registry is shared across
+/// tasks (e.g. wrapped in `Arc<dyn GoalSink>`), while `set_goal` takes `&self`
+/// and is safe to call concurrently.
 #[derive(Default)]
 pub struct GoalSinkRegistry {
     sinks: HashMap<u64, ChannelGoalSink>,
@@ -185,7 +190,7 @@ mod tests {
     #[tokio::test]
     async fn registry_routes_to_the_registered_bot() {
         // Two bots, two channels, one registry.
-        let (sink_a, _src_a, mut rx_a, _tx_a) = wire(1001);
+        let (sink_a, _src_a, rx_a, _tx_a) = wire(1001);
         let (sink_b, _src_b, mut rx_b, _tx_b) = wire(1002);
         let mut reg = GoalSinkRegistry::new();
         reg.register(1001, sink_a);
