@@ -14,6 +14,7 @@ pub mod memory_client;
 pub mod models;
 pub mod morph;
 pub mod personality;
+pub mod profile;
 pub mod salience;
 pub mod schema_builder;
 pub mod sse_consumer;

@@ -31,6 +31,7 @@ rmcp     = { version = "1.7", default-features = false, features = [
 ] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde        = { version = "1", features = ["derive"] }
+toml         = "0.8"
 # preserve_order: serde_json::Map uses IndexMap, preserving insertion order.
 # Required for compose_oneof to produce JSON key order identical to Python
 # (which preserves dict insertion order since 3.7). This is the byte-parity
