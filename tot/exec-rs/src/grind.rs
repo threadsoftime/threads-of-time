@@ -278,11 +278,19 @@ pub(crate) async fn fight(
     };
 
     for _ in 0..FIGHT_MAX_POLLS {
-        // Fire the rotation action (bot.attack — idempotent re-issue).
-        rotation.tick(bot_guid, target.guid, client, &ctx).await.map_err(|e| match e {
-            crate::combat::CombatError::Harness(he) => GrindError::Harness(he),
-            crate::combat::CombatError::Shape(s) => GrindError::Shape(s),
-        })?;
+        // Fire the rotation action (bot.attack — idempotent re-issue). The target can die
+        // between the previous liveness poll and this attack; the adapter then returns
+        // "target is not alive" — the grind's WIN condition, not a failure. Treat it as
+        // TargetDead and proceed to loot.
+        if let Err(e) = rotation.tick(bot_guid, target.guid, client, &ctx).await {
+            if is_target_dead_attack_error(&e) {
+                return Ok(FightOutcome::TargetDead);
+            }
+            return Err(match e {
+                crate::combat::CombatError::Harness(he) => GrindError::Harness(he),
+                crate::combat::CombatError::Shape(s) => GrindError::Shape(s),
+            });
+        }
 
         // Poll target liveness.
         if !target_still_alive(client, bot_guid, target.guid, goal).await? {
@@ -300,6 +308,17 @@ pub(crate) async fn fight(
 
     // Poll budget exhausted — treat as target dead (safety: avoid infinite loop).
     Ok(FightOutcome::TargetDead)
+}
+
+/// A `bot.attack` failure of "target is not alive" means the target died between our
+/// liveness poll and this attack — the grind's win condition, not an error. (Live-caught:
+/// the worldserver kills the target on a swing that lands between exec's poll ticks.)
+fn is_target_dead_attack_error(e: &crate::combat::CombatError) -> bool {
+    matches!(
+        e,
+        crate::combat::CombatError::Harness(HarnessError::Tool { message, .. })
+            if message.contains("not alive")
+    )
 }
 
 /// Drive a `Grind` goal to a terminal `GoalStatus`. Plan 1: combat/loot are no-ops.
@@ -448,6 +467,24 @@ mod tests {
         let body = received.lock().unwrap().clone();
         assert_eq!(body["target_guid"], 1173_i64, "obs.get_state must send target_guid");
         assert!(body.get("bot_guid").is_none(), "must NOT send bot_guid for obs.get_state");
+    }
+
+    /// Regression (live-caught): a `bot.attack` "target is not alive" error means the
+    /// target died mid-fight — the win condition. It must classify as target-dead so the
+    /// grind proceeds to loot, NOT propagate as a fatal Blocked.
+    #[test]
+    fn is_target_dead_attack_error_classifies_not_alive() {
+        use tot_harness_client::HarnessError;
+        let dead = crate::combat::CombatError::Harness(HarnessError::Tool {
+            tool: "bot.attack".into(),
+            message: "executor_failed: bot.attack: target is not alive".into(),
+        });
+        assert!(is_target_dead_attack_error(&dead), "'not alive' must be target-dead");
+        let other = crate::combat::CombatError::Harness(HarnessError::Tool {
+            tool: "bot.attack".into(),
+            message: "executor_failed: bot not found".into(),
+        });
+        assert!(!is_target_dead_attack_error(&other), "other errors must NOT be target-dead");
     }
 
     pub(super) fn test_goal() -> GrindGoal {
