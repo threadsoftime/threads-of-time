@@ -213,7 +213,9 @@ struct StateDigest { #[serde(rename = "self")] self_: SelfState }
 
 /// Read the bot's own level/health from `obs.get_state`.
 async fn read_self(client: &HarnessClient, bot_guid: u64) -> Result<SelfState, GrindError> {
-    let raw = client.call("obs.get_state", serde_json::json!({ "bot_guid": bot_guid as i64 })).await?;
+    // obs.get_state takes `target_guid` (the older obs.* tools use target_guid, unlike the
+    // newer bot_guid-keyed M1 tools). For a bot reading its OWN state, target = the bot.
+    let raw = client.call("obs.get_state", serde_json::json!({ "target_guid": bot_guid as i64 })).await?;
     let digest: StateDigest =
         serde_json::from_value(raw).map_err(|e| GrindError::Shape(format!("obs.get_state: {e}")))?;
     Ok(digest.self_)
@@ -428,6 +430,25 @@ mod tests {
         format!("http://{addr}")
     }
     fn client(base: &str) -> HarnessClient { HarnessClient::new(base, "tok", Duration::from_secs(5)) }
+
+    /// Regression (live-caught): `obs.get_state` requires `target_guid` — the live adapter
+    /// rejects a missing one with "target_guid (int) required". `read_self` must send
+    /// `target_guid`, NOT `bot_guid` (the older obs.* tools are target_guid-keyed). The
+    /// mock doesn't validate arg keys, so this test pins the contract.
+    #[tokio::test]
+    async fn read_self_sends_target_guid_for_obs_get_state() {
+        let received = std::sync::Arc::new(std::sync::Mutex::new(serde_json::Value::Null));
+        let recv = received.clone();
+        let base = spawn_mock(move |name, args| {
+            if name == "obs.get_state" { *recv.lock().unwrap() = args.clone(); }
+            json!({ "self": { "level": 6, "hp_pct": 100 } })
+        }).await;
+        let s = read_self(&client(&base), 1173).await.unwrap();
+        assert_eq!(s.level, 6);
+        let body = received.lock().unwrap().clone();
+        assert_eq!(body["target_guid"], 1173_i64, "obs.get_state must send target_guid");
+        assert!(body.get("bot_guid").is_none(), "must NOT send bot_guid for obs.get_state");
+    }
 
     pub(super) fn test_goal() -> GrindGoal {
         GrindGoal {
