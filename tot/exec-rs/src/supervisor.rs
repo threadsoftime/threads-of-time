@@ -116,7 +116,7 @@ mod tests {
     use axum::{extract::Path as AxumPath, http::StatusCode, routing::post, Json, Router};
     use serde_json::{json, Value};
     use std::time::Duration;
-    use tot_goal_contract::{wire, GoalSink, GrindGoal, MobFilter, StatusSource, WorldPos};
+    use tot_goal_contract::{wire, GoalSink, GoalSinkRegistry, GrindGoal, MobFilter, StatusSource, WorldPos};
 
     async fn spawn_mock<F>(handler: F) -> String
     where F: Fn(String, Value) -> Value + Send + Sync + 'static {
@@ -264,5 +264,88 @@ mod tests {
             source.poll_status(2001).await.unwrap().is_none(),
             "expected no status when claim fails before goal execution",
         );
+    }
+
+    /// Two bots, each with its own per_bot_loop, both driven through ONE
+    /// GoalSinkRegistry. A goal set for bot B must complete bot B's loop; the
+    /// registry routes by guid. Proves the M2 multi-bot wire end-to-end offline.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn registry_drives_two_bots_independently() {
+        // Per-bot call counter for obs.get_nearby_hostiles: the FIRST call per
+        // bot is the Scanning probe (live target); later calls are fight()'s
+        // liveness polls (empty → target dead). Keyed by bot_guid so the two
+        // bots resolve independently through one shared mock.
+        let scan_counts = std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::<i64, u32>::new(),
+        ));
+        let sc = scan_counts.clone();
+
+        // Happy-path mock: scan returns one in-band target, combat/loot
+        // resolve so the kill_count:1 grind completes. Shared by both bots.
+        let base = spawn_mock(move |name, args| match name.as_str() {
+            "bot.set_ai_enabled" => {
+                let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+                if enabled { json!({"owned": false, "reset": true}) }
+                else       { json!({"owned": true,  "reset": false}) }
+            }
+            "obs.get_nearby_hostiles" => {
+                let bot = args.get("bot_guid").and_then(Value::as_i64).unwrap_or(0);
+                let mut counts = sc.lock().unwrap();
+                let n = counts.entry(bot).or_insert(0);
+                let first = *n == 0;
+                *n += 1;
+                if first {
+                    json!({"hostiles": [
+                        {"guid": 222u64, "name": "Kobold", "level": 5, "hp_pct": 100.0,
+                         "distance": 6.0, "is_alive": true, "x": 6.0, "y": 0.0, "z": 0.0}
+                    ]})
+                } else {
+                    json!({"hostiles": []})
+                }
+            }
+            "nav.find_path" => json!({"path_type": 1i64, "points": [
+                {"x":0.0,"y":0.0,"z":0.0},{"x":6.0,"y":0.0,"z":0.0}]}),
+            "bot.move_path" => json!({"launched": true, "duration_ms": 0, "final": {"x":6.0,"y":0.0,"z":0.0}}),
+            "obs.get_position" => json!({"x":6.0,"y":0.0,"z":0.0,"map_id":0,"zone_id":1,"area_id":1,"orientation":0.0}),
+            "obs.get_state" => json!({"self": {"level": 5, "hp_pct": 90}}),
+            "bot.attack" => json!({"attacked": true, "target_guid": 222u64, "target_name": "Kobold"}),
+            "obs.get_lootable_corpses" => json!({"corpses": []}),
+            other => panic!("unexpected tool {other}"),
+        }).await;
+
+        let harness = Arc::new(HarnessClient::new(base, "tok", Duration::from_secs(5)));
+
+        // Wire two bots; register both sinks in one registry; start both loops.
+        let (sink_a, src_a, rx_a, tx_a) = wire(3001);
+        let (sink_b, src_b, rx_b, tx_b) = wire(3002);
+        let mut reg = GoalSinkRegistry::new();
+        reg.register(3001, sink_a);
+        reg.register(3002, sink_b);
+
+        let mut sup = BotSupervisor::new();
+        sup.start(3001, harness.clone(), rx_a, tx_a);
+        sup.start(3002, harness.clone(), rx_b, tx_b);
+
+        // Route a goal to EACH bot via the registry (by guid).
+        reg.set_goal(3001, GoalEnvelope { goal_id: "g-a".into(), version: 1,
+            goal: Goal::Grind(grind_goal()) }).await.unwrap();
+        reg.set_goal(3002, GoalEnvelope { goal_id: "g-b".into(), version: 1,
+            goal: Goal::Grind(grind_goal()) }).await.unwrap();
+
+        // Both bots must reach Completed (bounded poll).
+        let mut done_a = false;
+        let mut done_b = false;
+        for _ in 0..60 {
+            if let Some(GoalStatus::Completed { .. }) = src_a.poll_status(3001).await.unwrap() { done_a = true; }
+            if let Some(GoalStatus::Completed { .. }) = src_b.poll_status(3002).await.unwrap() { done_b = true; }
+            if done_a && done_b { break; }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(done_a, "bot 3001 did not complete");
+        assert!(done_b, "bot 3002 did not complete");
+
+        // Clean shutdown: drop the registry (all sinks) → both loops exit.
+        drop(reg);
+        sup.join_all().await;
     }
 }
