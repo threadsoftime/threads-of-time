@@ -616,3 +616,88 @@ async fn test_goals_create_dot_notation_is_low_risk_and_executes() {
         "text field must be present in dispatched args"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regression: goals.list missing from RISK_TABLE (defaults to "high")
+//
+// Before the fix:
+//   - "goals.list" not in RISK_TABLE → default "high" → confidence 0.85 < 0.95
+//     → dispatcher emits confirmation instead of executing.
+//   - Siblings "memory.goals.list" and "goals_list" were both "low", so only
+//     the dot-notation form was broken.
+//
+// This test pins the RISK_TABLE fix: goals.list must be "low" risk so that
+// a well-formed call at confidence 0.85 (above LOW_RISK_THRESHOLD 0.7) executes.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_goals_list_dot_notation_is_low_risk_and_executes() {
+    // Regression for: "goals.list" absent from RISK_TABLE → defaulted to "high"
+    // → confirmation emitted for any confidence < 0.95 (typical LLM range: 0.7-0.9).
+    //
+    // After the fix, "goals.list" must be in RISK_TABLE as "low" and a call
+    // at confidence 0.85 (above LOW_RISK_THRESHOLD 0.7) must execute.
+    let harness = MockMcp::new();
+    let memory = MockMcp::new();
+    let dispatcher = make_dispatcher(harness.clone(), memory.clone(), None);
+
+    // LLM-authored goals.list — correct args shape {bot_id}.
+    // bot_id as string "1001" matches the bot_guid i64 1001 (string compare passes
+    // cross-bot guard: "1001".parse::<i64>() == Ok(1001) == bot_guid 1001).
+    let d = Decision {
+        kind: DecisionKind::Action,
+        tool: Some("goals.list".to_string()),
+        args: Some(serde_json::json!({
+            "bot_id": "1001"
+        })),
+        confidence: 0.85, // typical organic-wakeup confidence — above LOW (0.7) but below HIGH (0.95)
+        reasoning: "Want to check current goals before acting".to_string(),
+        wakeup_in_ms: None,
+    };
+    let result = dispatcher.dispatch(1001, &d, "full").await.unwrap();
+    // MUST execute — not "confirmation_emitted" (which was the pre-fix behaviour
+    // because "goals.list" defaulted to "high" risk and 0.85 < 0.95).
+    assert_eq!(
+        result.disposition,
+        "executed",
+        "goals.list at confidence 0.85 must execute (low risk), not emit confirmation; \
+         got: {} — this means 'goals.list' is still missing from RISK_TABLE",
+        result.disposition
+    );
+
+    // The call must land on the memory MCP (not harness).
+    let harness_calls = harness.calls();
+    let exec_calls: Vec<_> = harness_calls
+        .iter()
+        .filter(|c| c.tool == "goals.list")
+        .collect();
+    assert!(
+        exec_calls.is_empty(),
+        "goals.list must route to memory MCP, not harness; found on harness: {:?}",
+        exec_calls
+    );
+    let mem_calls = memory.calls();
+    let goal_list_calls: Vec<_> = mem_calls
+        .iter()
+        .filter(|c| c.tool == "goals.list")
+        .collect();
+    assert_eq!(
+        goal_list_calls.len(),
+        1,
+        "goals.list must be dispatched exactly once to memory MCP; calls: {:?}",
+        mem_calls.iter().map(|c| &c.tool).collect::<Vec<_>>()
+    );
+
+    // The dispatched args must be a well-formed object with bot_id.
+    let dispatched_args = &goal_list_calls[0].args;
+    assert!(
+        dispatched_args.is_object(),
+        "dispatched args for goals.list must be a top-level JSON object, got: {:?}",
+        dispatched_args
+    );
+    assert_eq!(
+        dispatched_args["bot_id"].as_str().unwrap_or(""),
+        "1001",
+        "bot_id field must be present and correct"
+    );
+}

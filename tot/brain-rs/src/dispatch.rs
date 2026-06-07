@@ -21,7 +21,9 @@ use crate::personality::McpCallable;
 use crate::tool_policy::ToolPolicyEnforcer;
 
 // ---------------------------------------------------------------------------
-// RISK_TABLE — verbatim from dispatch.py (last write wins for duplicate keys)
+// RISK_TABLE — based on dispatch.py (last write wins for duplicate keys).
+// Intentional Rust additions: dot-notation aliases the LLM emits that Python
+// never populated (e.g. "goals.create", "goals.list").
 // ---------------------------------------------------------------------------
 
 /// Risk classification for tools. Anything not in this map defaults to "high".
@@ -88,6 +90,7 @@ pub static RISK_TABLE: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| 
     m.insert("memory.goals.read", "low");
     m.insert("goals_read", "low");
     m.insert("memory.goals.list", "low");
+    m.insert("goals.list", "low");   // dot-notation form — was missing; defaulted to "high"
     m.insert("goals_list", "low");
     // Personality SET stays high
     m.insert("memory.personality.set", "high");
@@ -147,6 +150,7 @@ static TOOL_DISPLAY_NAMES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new
     m.insert("goals_update", "update that goal");
     m.insert("memory.goals.complete", "mark that goal complete");
     m.insert("goals_complete", "mark that goal complete");
+    m.insert("goals.list", "check its goals");  // dot-notation form — was missing
     // V1.5 grouping/dungeon tools
     m.insert("bot.invite_to_group", "invite someone to group");
     m.insert("bot.accept_invite", "accept the group invite");
