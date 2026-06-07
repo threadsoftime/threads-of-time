@@ -40,6 +40,9 @@
 /// * `exec_bot_guid` — when `Some(guid)`, embeds an exec-rs `BotSupervisor`
 ///   and wires goal emission for that bot. When `None` the brain runs in pure
 ///   parity mode (behaviour byte-identical to today).
+/// * `exec_roster_entries` — M2 roster: each entry is `(guid, Option<profile_id>)`,
+///   parsed from `EXEC_BOT_GUIDS` as `guid` or `guid:profile_id`.
+/// * `exec_default_profile` — fallback profile id for bare-guid entries.
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub bind_host: String,
@@ -70,10 +73,11 @@ pub struct Settings {
     /// M1 exec embed: bot guid that gets an in-process exec loop + goal emission.
     /// Env: `EXEC_BOT_GUID` (integer). Absent / invalid → `None` (pure parity mode).
     pub exec_bot_guid: Option<i64>,
-    /// M2 exec embed roster: bot guids that each get an in-process exec loop.
-    /// Env: `EXEC_BOT_GUIDS` (comma-separated integers). Preferred over the
-    /// singular `EXEC_BOT_GUID`; resolved via [`Settings::exec_roster`].
-    pub exec_bot_guids: Vec<i64>,
+    /// M2 exec roster entries parsed from `EXEC_BOT_GUIDS`: each `(guid, Option<profile_id>)`.
+    /// A bare guid carries `None` → resolved to `exec_default_profile` by `exec_profile_map`.
+    pub exec_roster_entries: Vec<(i64, Option<String>)>,
+    /// Default profile id for bare-guid roster entries. Env: `EXEC_DEFAULT_PROFILE`.
+    pub exec_default_profile: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -123,16 +127,30 @@ impl Settings {
     }
 
     /// The exec enrollment roster as `u64` guids. Prefers `EXEC_BOT_GUIDS`
-    /// (comma-separated); falls back to the singular `EXEC_BOT_GUID` (M1
-    /// back-compat); empty → no exec embed (pure parity mode).
+    /// (comma-separated, optionally `guid:profile_id`); falls back to the singular
+    /// `EXEC_BOT_GUID` (M1 back-compat); empty → no exec embed (pure parity mode).
     pub fn exec_roster(&self) -> Vec<u64> {
-        if !self.exec_bot_guids.is_empty() {
-            self.exec_bot_guids.iter().map(|&g| g as u64).collect()
+        if !self.exec_roster_entries.is_empty() {
+            self.exec_roster_entries.iter().map(|(g, _)| *g as u64).collect()
         } else if let Some(g) = self.exec_bot_guid {
             vec![g as u64]
         } else {
             Vec::new()
         }
+    }
+
+    /// guid → profile_id, resolving bare entries (and the singular `EXEC_BOT_GUID`) to
+    /// `exec_default_profile`. Caller cross-checks each profile_id against the registry.
+    pub fn exec_profile_map(&self) -> std::collections::HashMap<u64, String> {
+        let mut m = std::collections::HashMap::new();
+        if !self.exec_roster_entries.is_empty() {
+            for (g, prof) in &self.exec_roster_entries {
+                m.insert(*g as u64, prof.clone().unwrap_or_else(|| self.exec_default_profile.clone()));
+            }
+        } else if let Some(g) = self.exec_bot_guid {
+            m.insert(g as u64, self.exec_default_profile.clone());
+        }
+        m
     }
 
     /// Construct settings from an arbitrary key→value lookup.
@@ -162,11 +180,17 @@ impl Settings {
         let get_opt_i64 = |key: &str| -> Option<i64> {
             get(key).and_then(|v| v.trim().parse::<i64>().ok())
         };
-        let get_csv_i64 = |key: &str| -> Vec<i64> {
+        let get_roster = |key: &str| -> Vec<(i64, Option<String>)> {
             get(key)
                 .map(|v| {
                     v.split(',')
-                        .filter_map(|s| s.trim().parse::<i64>().ok())
+                        .map(|tok| tok.trim())
+                        .filter(|tok| !tok.is_empty())
+                        .filter_map(|tok| match tok.split_once(':') {
+                            Some((g, prof)) => g.trim().parse::<i64>().ok()
+                                .map(|g| (g, Some(prof.trim().to_string()))),
+                            None => tok.parse::<i64>().ok().map(|g| (g, None)),
+                        })
                         .collect()
                 })
                 .unwrap_or_default()
@@ -201,7 +225,8 @@ impl Settings {
             subset_enroll_backoff_s:        get_f64("TOT_SUBSET_ENROLL_BACKOFF_S", 300.0),
             reduced_tick_interval_s:        get_f64("TOT_REDUCED_TICK_INTERVAL_S", 300.0),
             exec_bot_guid:                  get_opt_i64("EXEC_BOT_GUID"),
-            exec_bot_guids:                 get_csv_i64("EXEC_BOT_GUIDS"),
+            exec_roster_entries:            get_roster("EXEC_BOT_GUIDS"),
+            exec_default_profile:           get_str("EXEC_DEFAULT_PROFILE", "elwynn_fargodeep"),
         }
     }
 }
@@ -360,6 +385,51 @@ mod tests {
     fn exec_roster_skips_non_numeric_entries() {
         let s = Settings::build(getter(HashMap::from([("EXEC_BOT_GUIDS", "1001,nope,1003")])));
         assert_eq!(s.exec_roster(), vec![1001u64, 1003]);
+    }
+
+    #[test]
+    fn roster_parses_guid_profile_pairs() {
+        let s = Settings::build(getter(HashMap::from([
+            ("EXEC_BOT_GUIDS", "1173:elwynn_fargodeep, 2257:dun_morogh_camp"),
+        ])));
+        assert_eq!(s.exec_roster(), vec![1173u64, 2257]);
+        let m = s.exec_profile_map();
+        assert_eq!(m.get(&1173).map(String::as_str), Some("elwynn_fargodeep"));
+        assert_eq!(m.get(&2257).map(String::as_str), Some("dun_morogh_camp"));
+    }
+
+    #[test]
+    fn bare_guid_uses_default_profile() {
+        let s = Settings::build(getter(HashMap::from([
+            ("EXEC_BOT_GUIDS", "1173"),
+            ("EXEC_DEFAULT_PROFILE", "elwynn_fargodeep"),
+        ])));
+        assert_eq!(s.exec_roster(), vec![1173u64]);
+        assert_eq!(s.exec_profile_map().get(&1173).map(String::as_str), Some("elwynn_fargodeep"));
+    }
+
+    #[test]
+    fn mixed_bare_and_profile_entries() {
+        let s = Settings::build(getter(HashMap::from([
+            ("EXEC_BOT_GUIDS", "1173:westfall_camp,2257"),
+            ("EXEC_DEFAULT_PROFILE", "elwynn_fargodeep"),
+        ])));
+        let m = s.exec_profile_map();
+        assert_eq!(m.get(&1173).map(String::as_str), Some("westfall_camp"));
+        assert_eq!(m.get(&2257).map(String::as_str), Some("elwynn_fargodeep")); // default
+    }
+
+    #[test]
+    fn default_profile_falls_back_to_builtin_when_unset() {
+        let s = Settings::build(getter(HashMap::from([("EXEC_BOT_GUIDS", "1173")])));
+        assert_eq!(s.exec_default_profile, "elwynn_fargodeep");
+        assert_eq!(s.exec_profile_map().get(&1173).map(String::as_str), Some("elwynn_fargodeep"));
+    }
+
+    #[test]
+    fn roster_skips_unparseable_guid() {
+        let s = Settings::build(getter(HashMap::from([("EXEC_BOT_GUIDS", "1173:elwynn_fargodeep,nope:x")])));
+        assert_eq!(s.exec_roster(), vec![1173u64]);
     }
 
     #[test]
