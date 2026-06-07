@@ -12,7 +12,8 @@ pub mod wire;
 pub use goal::{EnvelopeError, Goal, GoalEnvelope, GrindGoal, MobFilter, WorldPos};
 pub use status::{BlockedReason, EscalationEvent, GoalProgress, GoalStatus};
 pub use wire::{
-    wire, ChannelGoalSink, ChannelStatusSource, GoalReceiver, GoalSink, StatusSender, StatusSource,
+    wire, ChannelGoalSink, ChannelStatusSource, GoalReceiver, GoalSink, GoalSinkRegistry,
+    StatusSender, StatusSource,
 };
 
 /// The contract version baked into every `GoalEnvelope`. The executor rejects an
