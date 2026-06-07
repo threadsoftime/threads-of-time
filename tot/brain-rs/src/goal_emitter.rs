@@ -15,9 +15,8 @@ use tot_goal_contract::{
     Goal, GoalEnvelope, GrindGoal, MobFilter, WorldPos, GOAL_CONTRACT_VERSION,
 };
 
-/// Elwynn Forest grind anchor — Fargodeep / Jasperlode mine area.
-/// These coordinates place the anchor near the Kobold camps at the east side
-/// of Elwynn (map 0, Eastern Kingdoms).
+/// Fallback grind anchor — Elwynn Forest Fargodeep / Jasperlode mine area.
+/// Used only when the bot's live position is unavailable in `state_summary`.
 const ELWYNN_ANCHOR: WorldPos = WorldPos {
     map_id: 0,
     x: -9384.5,
@@ -25,15 +24,40 @@ const ELWYNN_ANCHOR: WorldPos = WorldPos {
     z: 54.0,
 };
 
+/// Anchor the grind at the bot's CURRENT position so it grinds where it is,
+/// not at a fixed point it would walk away to. Reads `location.position` ([x,y,z])
+/// from the `obs.get_state` digest; falls back to [`ELWYNN_ANCHOR`] if absent.
+///
+/// `map_id` is set to 0 (Eastern Kingdoms): the anchor's map is never used in
+/// pathing (exec passes only x/y/z to `nav.find_path`, anchored from the bot's
+/// live map), so this is harmless for the M1 single-map grind.
+fn anchor_from_state(state_summary: &Value) -> WorldPos {
+    let pos = state_summary
+        .get("location")
+        .and_then(|l| l.get("position"))
+        .and_then(|v| v.as_array());
+    match pos {
+        Some(arr) if arr.len() >= 3 => {
+            let (x, y, z) = (arr[0].as_f64(), arr[1].as_f64(), arr[2].as_f64());
+            match (x, y, z) {
+                (Some(x), Some(y), Some(z)) => WorldPos { map_id: 0, x, y, z },
+                _ => ELWYNN_ANCHOR,
+            }
+        }
+        _ => ELWYNN_ANCHOR,
+    }
+}
+
 /// Synthesise a `Grind` goal for `bot_guid` based on the current observation.
 ///
 /// Returns `Some(GoalEnvelope)` when `state_summary["self"]["level"] < max_level`,
 /// and `None` when the bot is at or above cap (or when `level` is missing/invalid).
 ///
 /// # Goal fields
-/// * `anchor_point`: `ELWYNN_ANCHOR` (Fargodeep / Jasperlode mine area)
+/// * `anchor_point`: the bot's current position (`state_summary["location"]["position"]`),
+///   falling back to `ELWYNN_ANCHOR` when unavailable
 /// * `to_level`: `current_level + 1`
-/// * `mob_filter`: `{min_level: level-1, max_level: level+2, creature_type: "humanoid"}`
+/// * `mob_filter`: `{min_level: level-3, max_level: level+2, creature_type: "humanoid"}`
 /// * `wander_radius`: 90.0
 /// * `max_search_radius`: 35.0
 /// * `rest_threshold`: 0.35
@@ -55,14 +79,17 @@ pub fn synthesize_grind(
         return None;
     }
 
-    let min_level = level.saturating_sub(1);
+    // Band: level-3 .. level+2. The low end is widened from level-1 so the bot
+    // engages nearby slightly-lower mobs (e.g. a L6 bot at the L3 Kobold camp)
+    // rather than reporting NoTargetsFound when the camp is below its level.
+    let min_level = level.saturating_sub(3);
     let max_level_filter = level + 2;
 
     Some(GoalEnvelope {
         goal_id: format!("grind-{bot_guid}-{level}"),
         version: GOAL_CONTRACT_VERSION,
         goal: Goal::Grind(GrindGoal {
-            anchor_point: ELWYNN_ANCHOR,
+            anchor_point: anchor_from_state(state_summary),
             wander_radius: 90.0,
             max_search_radius: 35.0,
             mob_filter: MobFilter {
@@ -87,7 +114,10 @@ mod tests {
     use serde_json::json;
 
     fn state_summary(level: u64) -> Value {
-        json!({ "self": { "level": level, "hp_pct": 100 } })
+        json!({
+            "self": { "level": level, "hp_pct": 100 },
+            "location": { "position": [-8641.34, -132.71, 86.93] }
+        })
     }
 
     // ── below cap → Some ────────────────────────────────────────────────────
@@ -115,13 +145,33 @@ mod tests {
     fn below_cap_mob_filter_correct() {
         let env = synthesize_grind(1003, &state_summary(6), 25).unwrap();
         let Goal::Grind(g) = env.goal else { panic!("not grind") };
-        assert_eq!(g.mob_filter.min_level, 5, "min = level-1");
+        assert_eq!(g.mob_filter.min_level, 3, "min = level-3");
         assert_eq!(g.mob_filter.max_level, 8, "max = level+2");
         assert_eq!(
             g.mob_filter.creature_type.as_deref(),
             Some("humanoid"),
             "creature_type must be humanoid"
         );
+    }
+
+    // ── anchor tracks the bot's live position ───────────────────────────────
+
+    #[test]
+    fn anchor_uses_bot_position_from_state() {
+        let env = synthesize_grind(1173, &state_summary(6), 25).unwrap();
+        let Goal::Grind(g) = env.goal else { panic!("not grind") };
+        assert_eq!(g.anchor_point.x, -8641.34, "anchor x = bot position");
+        assert_eq!(g.anchor_point.y, -132.71, "anchor y = bot position");
+        assert_eq!(g.anchor_point.z, 86.93, "anchor z = bot position");
+    }
+
+    #[test]
+    fn anchor_falls_back_when_position_missing() {
+        // state_summary with a level but no location.position → fallback const.
+        let s = json!({ "self": { "level": 6 } });
+        let env = synthesize_grind(1173, &s, 25).unwrap();
+        let Goal::Grind(g) = env.goal else { panic!("not grind") };
+        assert_eq!(g.anchor_point, ELWYNN_ANCHOR, "missing position → ELWYNN_ANCHOR");
     }
 
     #[test]
