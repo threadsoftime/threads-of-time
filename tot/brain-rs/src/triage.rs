@@ -206,12 +206,7 @@ impl TriageGate {
             "goals.list",
             serde_json::json!({
                 "bot_id": bot_guid.to_string(),
-                // M2: include pending so self-authored goals.create goals (which start
-                // pending) are visible to the brain — otherwise the LLM never sees its own
-                // goals and loops re-creating them. memory-rs goals.list supports the
-                // comma form (status IN (...)). Intentional Rust-side divergence from the
-                // Python brain (observation query, not in the decide() byte-parity golden).
-                "status": "active,pending"
+                "status": "active"
             }),
         );
 
@@ -640,108 +635,5 @@ mod tests {
         assert!(result.should_decide);
         assert_eq!(result.reason, "organic_wakeup");
         assert!(result.hot_inputs.contains_key("state_summary"));
-    }
-
-    // -----------------------------------------------------------------------
-    // M2: goals arg-shape + behavior tests
-    // -----------------------------------------------------------------------
-
-    /// RecordingMcp — returns a fixed JSON response AND records every (tool, args) pair.
-    /// Used to assert what args are sent to goals.list.
-    struct RecordingMcp {
-        response: Value,
-        recorded: Mutex<Vec<(String, Value)>>,
-    }
-
-    impl RecordingMcp {
-        fn new(response: Value) -> Arc<Self> {
-            Arc::new(Self {
-                response,
-                recorded: Mutex::new(Vec::new()),
-            })
-        }
-
-        fn recorded_args_for(&self, tool: &str) -> Vec<Value> {
-            self.recorded
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|(t, _)| t == tool)
-                .map(|(_, a)| a.clone())
-                .collect()
-        }
-    }
-
-    impl McpCallable for RecordingMcp {
-        fn call<'a>(
-            &'a self,
-            tool: &'a str,
-            args: Value,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<Value, anyhow::Error>> + Send + 'a>,
-        > {
-            let response = self.response.clone();
-            self.recorded.lock().unwrap().push((tool.to_string(), args));
-            Box::pin(async move { Ok(response) })
-        }
-    }
-
-    /// M2 arg-shape: goals.list must be called with status="active,pending" so that
-    /// self-authored goals (which start with status=pending) are visible to the brain.
-    ///
-    /// We use an organic_wakeup tick (timer expired) to drive the fan-out path that
-    /// calls goals.list, then inspect the recorded args.
-    #[tokio::test]
-    async fn test_goals_list_queries_active_and_pending() {
-        // Recording memory MCP — captures every (tool, args) call.
-        let memory = RecordingMcp::new(serde_json::json!({
-            "result": { "items": [], "goals": [] }
-        }));
-        let gate = make_gate(harness_no_combat_no_invite(), memory.clone() as Arc<dyn McpCallable>);
-        let state = TickState { bot_guid: 1001, last_tick_ms: 1000, last_decision_id: None };
-        // Trigger organic_wakeup fan-out: now(9000) >= wakeup(8000).
-        let result = gate.evaluate(1001, &state, 9000, None, Some(8000)).await;
-        assert!(result.should_decide);
-        assert_eq!(result.reason, "organic_wakeup");
-
-        // Verify goals.list was called with status="active,pending".
-        let goals_calls = memory.recorded_args_for("goals.list");
-        assert_eq!(goals_calls.len(), 1, "goals.list must be called exactly once per tick");
-        let status = goals_calls[0]
-            .get("status")
-            .and_then(|v| v.as_str())
-            .expect("goals.list args must contain a 'status' field");
-        assert_eq!(
-            status, "active,pending",
-            "M2 fix: goals.list status must be 'active,pending' to surface self-authored goals"
-        );
-    }
-
-    /// M2 behavior note: `goals` is fetched in the fan-out and used only as a
-    /// None-guard in the triage_timeout gate — it does NOT flow into any
-    /// `TriageResult::hot_inputs` field. Therefore a behavior assertion on
-    /// TriageResult for a pending goal is not meaningful at this layer; the
-    /// arg-shape test above is the reliable contract assertion. Downstream
-    /// (decide.py / prompt assembly) is where goals content is consumed.
-    ///
-    /// This test confirms that a memory mock returning a pending goal does NOT
-    /// cause a triage_timeout (i.e. goals.list succeeding with pending-goal data
-    /// is handled without panicking or spurious timeouts).
-    #[tokio::test]
-    async fn test_pending_goal_does_not_cause_triage_timeout() {
-        let memory = MockMcp::always_ok(serde_json::json!({
-            "result": {
-                "items": [],
-                "goals": [{"id": "g1", "status": "pending", "description": "Explore Stormwind"}]
-            }
-        }));
-        let gate = make_gate(harness_no_combat_no_invite(), memory);
-        let state = TickState { bot_guid: 1001, last_tick_ms: 1000, last_decision_id: None };
-        // Organic wakeup path — goals returns data, must not produce triage_timeout.
-        let result = gate.evaluate(1001, &state, 9000, None, Some(8000)).await;
-        assert_ne!(
-            result.reason, "triage_timeout",
-            "a successful goals.list response (even with pending goals) must not produce triage_timeout"
-        );
     }
 }

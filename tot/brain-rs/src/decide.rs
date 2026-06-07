@@ -425,7 +425,14 @@ impl Decider {
                 .memory_mcp
                 .call(
                     "goals.list",
-                    serde_json::json!({"bot_id": bot_guid.to_string(), "status": "active"}),
+                    // M2: include pending so self-authored goals.create goals (created
+                    // pending, never auto-activated) appear in the prompt's ACTIVE GOALS
+                    // list — otherwise the LLM never sees its own goals and loops
+                    // re-creating them. memory-rs goals.list supports the comma form
+                    // (status IN (...)). Intentional Rust-side divergence from the Python
+                    // brain; the fetched-goals change is upstream of assemble_prompt, so
+                    // the prompt-assembly goldens are unaffected.
+                    serde_json::json!({"bot_id": bot_guid.to_string(), "status": "active,pending"}),
                 )
                 .await
             {
@@ -1571,5 +1578,164 @@ mod tests {
         // python3 -c "print(f'{1.0}')" -> "1.0"; python3 -c "print(f'{0.0}')" -> "0.0"
         assert_eq!(fmt_optional_f64(Some(1.0)), "1.0");
         assert_eq!(fmt_optional_f64(Some(0.0)), "0.0");
+    }
+
+    // -----------------------------------------------------------------------
+    // M2: goals.list arg-shape + behavior tests
+    // -----------------------------------------------------------------------
+
+    /// RecordingMcp — returns a fixed JSON response AND records every (tool, args) pair.
+    /// Used to assert what args decide() sends to goals.list.
+    struct RecordingMcp {
+        response: serde_json::Value,
+        recorded: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+    }
+
+    impl RecordingMcp {
+        fn new(response: serde_json::Value) -> Arc<Self> {
+            Arc::new(Self {
+                response,
+                recorded: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn recorded_args_for(&self, tool: &str) -> Vec<serde_json::Value> {
+            self.recorded
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(t, _)| t == tool)
+                .map(|(_, a)| a.clone())
+                .collect()
+        }
+    }
+
+    impl McpCallable for RecordingMcp {
+        fn call<'a>(
+            &'a self,
+            tool: &'a str,
+            args: serde_json::Value,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<serde_json::Value, anyhow::Error>> + Send + 'a>,
+        > {
+            let response = self.response.clone();
+            self.recorded.lock().unwrap().push((tool.to_string(), args));
+            Box::pin(async move { Ok(response) })
+        }
+    }
+
+    /// Build a Decider whose memory_mcp is the given RecordingMcp, with the personality
+    /// cache pre-seeded so decide() reaches the goals.list call.
+    ///
+    /// The personality_cache uses NullMcp (returns Ok({})) for its own MCP calls.
+    /// We seed the card into the LRU directly via cache.seed() so the cache-hit
+    /// fast-path fires and no MCP call is needed on personality_cache.get().
+    async fn decider_with_recording_mcp(
+        bot_guid: i64,
+        recording: Arc<RecordingMcp>,
+    ) -> Decider {
+        use std::num::NonZeroUsize;
+        // NullMcp for the personality cache; memory.personality_set returns Ok({}).
+        let persona_mcp: Arc<dyn McpCallable + Send + Sync> = Arc::new(NullMcp);
+        let cache = Arc::new(crate::personality::PersonalityCache::new_with_options(
+            persona_mcp,
+            300.0,
+            NonZeroUsize::new(8).unwrap().get(),
+            Arc::new(|| 0.0),
+            None,
+        ));
+        // Seed the card so the LRU hit path fires; NullMcp returns Ok({}) for
+        // memory.personality_set so seed() succeeds.
+        let card = fixture_card();
+        // seed() calls memory.personality_set on the NullMcp, which returns Ok({"result":{"items":[]}}).
+        // That is a valid Ok(), so seed succeeds and the card is in the LRU.
+        let _ = cache.seed(bot_guid, card).await;
+
+        let state_store = Arc::new(
+            crate::state::StateStore::open(":memory:").expect("in-memory StateStore"),
+        );
+        state_store.migrate().expect("migrate");
+
+        let known_tools: HashSet<String> = KNOWN_TOOLS.iter().map(|s| s.to_string()).collect();
+
+        Decider {
+            llm_client: Arc::new(LlmClient {
+                base_url: "http://127.0.0.1:11434".to_string(),
+                model: "test".to_string(),
+                timeout_s: 5.0,
+            }),
+            personality_cache: cache,
+            memory_mcp: recording as Arc<dyn McpCallable + Send + Sync>,
+            state_store,
+            prompt_template: "t".to_string(),
+            decision_schema: None,
+            tools_summary: None,
+            max_retries: 1,
+            known_tools,
+            max_player_level: 25,
+        }
+    }
+
+    /// M2 arg-shape: decide() must call goals.list with status="active,pending" so that
+    /// self-authored goals (created pending, never auto-activated) appear in the prompt's
+    /// ACTIVE GOALS section — otherwise the LLM never sees its own goals and loops
+    /// re-creating them.
+    ///
+    /// We drive decide() until after the goals.list call (it will fail at the LLM HTTP
+    /// call since no server is listening, which is fine — goals.list runs before the LLM
+    /// call and the recorded args are visible regardless of later failure).
+    #[tokio::test]
+    async fn test_decide_goals_list_queries_active_and_pending() {
+        let recording = RecordingMcp::new(serde_json::json!({
+            "result": { "items": [] }
+        }));
+        let decider = decider_with_recording_mcp(1001, recording.clone()).await;
+
+        // drive decide(); it will fail at the LLM HTTP step (no server) — that's fine.
+        // The goals.list call happens before LLM and is unconditional once we reach it.
+        let _ = decider.decide(1001, &HashMap::new(), None).await;
+
+        let goals_calls = recording.recorded_args_for("goals.list");
+        assert_eq!(goals_calls.len(), 1, "goals.list must be called exactly once per decide()");
+        let status = goals_calls[0]
+            .get("status")
+            .and_then(|v| v.as_str())
+            .expect("goals.list args must contain a 'status' field");
+        assert_eq!(
+            status, "active,pending",
+            "M2 fix: decide() must pass status='active,pending' to goals.list"
+        );
+    }
+
+    /// M2 behavior: a pending goal fed directly to assemble_prompt_test appears in the
+    /// assembled user prompt's goals_json section (ACTIVE GOALS).
+    ///
+    /// We test assemble_prompt_test directly because the full decide() path requires a
+    /// live LLM; assemble_prompt is the exact function that builds the prompt text the
+    /// LLM sees, so this is the correct assertion boundary.
+    #[test]
+    fn test_pending_goal_appears_in_assembled_prompt() {
+        let card = fixture_card();
+        let decider = Decider::new_test(1001, card.clone(), "goals: {goals_json}");
+        let pending_goal = serde_json::json!({
+            "id": "g1",
+            "status": "pending",
+            "description": "Explore Stormwind"
+        });
+        let prompt = decider.assemble_prompt_test(
+            &card,
+            &serde_json::json!({}),
+            &[pending_goal],
+            &[],
+            &[],
+            &HashMap::new(),
+            1001,
+            None,
+        );
+        assert!(
+            prompt.user.contains("Explore Stormwind"),
+            "pending goal description must appear in assembled user prompt; got: {}",
+            &prompt.user[..200.min(prompt.user.len())]
+        );
     }
 }
