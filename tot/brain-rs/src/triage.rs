@@ -141,8 +141,13 @@ impl TriageGate {
         sse_inputs: Option<&HashMap<String, Value>>,
         next_wakeup_at_ms: Option<i64>,
     ) -> TriageResult {
-        // Gate 1: first tick after enroll — always fire.
-        if last_state.last_tick_ms == 0 {
+        // Gate 1: first tick after enroll — fire only when NO wakeup was seeded.
+        // M2 slice P seeds a jittered next_wakeup_ms at enroll; in that case we skip
+        // first_tick (which carries empty hot_inputs and emits no goal) and let the
+        // seeded organic_wakeup be the bot's first decision — it populates
+        // state_summary so the goal IS emitted. The un-seeded path (next_wakeup_at_ms
+        // == None) is byte-identical to before → parity preserved.
+        if last_state.last_tick_ms == 0 && next_wakeup_at_ms.is_none() {
             return TriageResult {
                 should_decide: true,
                 reason: "first_tick".to_string(),
@@ -604,5 +609,31 @@ mod tests {
         let result = gate.evaluate(1001, &state, 5000, None, None).await;
         assert!(!result.should_decide);
         assert_eq!(result.reason, "no_change");
+    }
+
+    /// When a bot is enrolled with a SEEDED (un-expired) next_wakeup_ms, the first
+    /// tick must NOT fire first_tick — it waits for the seeded organic_wakeup.
+    #[tokio::test]
+    async fn test_first_tick_suppressed_when_wakeup_seeded_unexpired() {
+        let gate = make_gate(harness_no_combat_no_invite(), memory_no_chat());
+        let state = TickState::new(1001); // last_tick_ms = 0
+        // seeded wakeup in the future (now=1000 < wakeup=9000) → first_tick suppressed,
+        // organic_wakeup not yet due → no decision this tick.
+        let result = gate.evaluate(1001, &state, 1000, None, Some(9000)).await;
+        assert!(!result.should_decide, "seeded+unexpired first tick must not decide");
+        assert_ne!(result.reason, "first_tick", "first_tick must be suppressed when seeded");
+    }
+
+    /// When the seeded wakeup has expired, the bot's FIRST decision is organic_wakeup
+    /// (which populates state_summary so the goal can be emitted).
+    #[tokio::test]
+    async fn test_first_decision_is_organic_when_seed_expired() {
+        let gate = make_gate(harness_no_combat_no_invite(), memory_no_chat());
+        let state = TickState::new(1001); // last_tick_ms = 0
+        // now=9000 >= seeded wakeup=8000 → organic_wakeup fires on the first tick.
+        let result = gate.evaluate(1001, &state, 9000, None, Some(8000)).await;
+        assert!(result.should_decide);
+        assert_eq!(result.reason, "organic_wakeup");
+        assert!(result.hot_inputs.contains_key("state_summary"));
     }
 }
