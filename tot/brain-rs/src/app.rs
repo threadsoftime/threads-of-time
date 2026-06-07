@@ -47,7 +47,7 @@ use crate::subset_gate::{BotSnapshot, SubsetGate, SubsetGateConfig};
 use crate::triage::TriageGate;
 
 use exec_rs::supervisor::BotSupervisor;
-use tot_goal_contract::{wire, GoalSink, GoalStatus, StatusSource};
+use tot_goal_contract::{wire, ChannelStatusSource, GoalSink, GoalSinkRegistry, GoalStatus, StatusSource};
 use tot_harness_client::HarnessClient;
 
 // ---------------------------------------------------------------------------
@@ -531,84 +531,61 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
         .trim_end_matches("/mcp/mcp")
         .to_string();
 
-    // ── G3: exec supervisor embed ─────────────────────────────────────────────
-    // When EXEC_BOT_GUID is set, wire in-process goal→exec channel and start the
-    // BotSupervisor. The sink is passed to LoopSupervisor; the supervisor + source
-    // are moved into long-lived tasks so neither is dropped while the process runs.
-    // When EXEC_BOT_GUID is absent, goal_sink stays None → pure parity mode.
-    let goal_sink: Option<Arc<dyn GoalSink>> = if let Some(guid) = settings.exec_bot_guid {
-        // Derive the harness REST base from the MCP URL (strip "/mcp/mcp").
-        let harness_base = settings
-            .harness_mcp_url
-            .trim_end_matches("/mcp/mcp")
-            .to_string();
-        let exec_harness = Arc::new(HarnessClient::new(
-            harness_base,
-            settings.harness_bearer.clone(),
-            std::time::Duration::from_secs(30),
-        ));
+    // ── G3 / M2-F: exec supervisor embed (roster) ─────────────────────────────
+    // For each enrolled bot, wire an in-process goal→exec channel and start a
+    // per_bot_loop on the shared BotSupervisor. All per-bot sinks are collected
+    // into a GoalSinkRegistry, which is the single Arc<dyn GoalSink> handed to
+    // LoopSupervisor — it routes set_goal(bot_guid) to the right channel.
+    // Empty roster → goal_sink stays None → pure parity mode.
+    let goal_sink: Option<Arc<dyn GoalSink>> = {
+        let roster = settings.exec_roster();
+        if roster.is_empty() {
+            None // pure parity mode
+        } else {
+            // Derive the harness REST base from the MCP URL (strip "/mcp/mcp").
+            let harness_base = settings
+                .harness_mcp_url
+                .trim_end_matches("/mcp/mcp")
+                .to_string();
+            let exec_harness = Arc::new(HarnessClient::new(
+                harness_base,
+                settings.harness_bearer.clone(),
+                std::time::Duration::from_secs(30),
+            ));
 
-        let (sink, source, goal_rx, status_tx) = wire(guid as u64);
-        let mut exec_sup = BotSupervisor::new();
-        exec_sup.start(guid as u64, exec_harness, goal_rx, status_tx);
+            let mut exec_sup = BotSupervisor::new();
+            let mut registry = GoalSinkRegistry::new();
+            let mut sources: Vec<(u64, ChannelStatusSource)> = Vec::new();
 
-        // Spawn a status-drain task that polls exec→brain status and info!-logs it.
-        // The task owns `source` and `exec_sup` for process lifetime — neither is
-        // dropped until the process exits.
-        //
-        // Shutdown: dropping the `sink` (returned below) closes goal_rx →
-        // per_bot_loop releases ownership and exits → exec_sup becomes idle.
-        // M1 uses process-exit as the only shutdown path; join_all is M2.
-        tokio::spawn(async move {
-            // Keep exec_sup alive for process lifetime. It has no poll interface;
-            // ownership alone prevents the drop that would close the task channels.
-            let _exec_sup_lifetime = exec_sup;
+            for &guid in &roster {
+                let (sink, source, goal_rx, status_tx) = wire(guid);
+                exec_sup.start(guid, exec_harness.clone(), goal_rx, status_tx);
+                registry.register(guid, sink);
+                sources.push((guid, source));
+            }
 
-            loop {
-                match source.poll_status(guid as u64).await {
-                    Ok(Some(status)) => {
-                        match &status {
-                            GoalStatus::Running { progress } => {
-                                info!(
-                                    "exec_status bot_guid={} status=Running progress={:?}",
-                                    guid, progress
-                                );
-                            }
-                            GoalStatus::Completed { summary } => {
-                                info!(
-                                    "exec_status bot_guid={} status=Completed summary={:?}",
-                                    guid, summary
-                                );
-                            }
-                            GoalStatus::NeedsDecision { event } => {
-                                // M1: log only. Re-decide hook is M2 (plan deferred list).
-                                info!(
-                                    "exec_status bot_guid={} status=NeedsDecision event={:?}",
-                                    guid, event
-                                );
-                            }
-                            GoalStatus::Blocked { reason, detail } => {
-                                warn!(
-                                    "exec_status bot_guid={} status=Blocked reason={:?} detail={:?}",
-                                    guid, reason, detail
-                                );
-                            }
+            // One drain task owns the supervisor (lifetime) + all status sources.
+            // It owns exec_sup for process lifetime; ownership alone prevents the
+            // drop that would close the per-bot task channels. M1/F shutdown =
+            // process exit (join_all is wired but not invoked here).
+            tokio::spawn(async move {
+                let _exec_sup_lifetime = exec_sup;
+                loop {
+                    for (guid, source) in &sources {
+                        match source.poll_status(*guid).await {
+                            Ok(Some(status)) => log_exec_status(*guid, &status),
+                            Ok(None) => {}
+                            Err(e) => warn!("exec_status_poll_error bot_guid={} err={:?}", guid, e),
                         }
                     }
-                    Ok(None) => {}
-                    Err(e) => {
-                        warn!("exec_status_poll_error bot_guid={} err={:?}", guid, e);
-                    }
+                    // Poll all sources at ~1s cadence — inexpensive mpsc try_recv.
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
-                // Poll at ~1s cadence — inexpensive mpsc try_recv.
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            }
-        });
+            });
 
-        info!("exec_embed_started bot_guid={} goal_sink=Some", guid);
-        Some(Arc::new(sink) as Arc<dyn GoalSink>)
-    } else {
-        None // pure parity mode
+            info!("exec_embed_started roster={:?}", roster);
+            Some(Arc::new(registry) as Arc<dyn GoalSink>)
+        }
     };
 
     let supervisor = LoopSupervisor::new(
@@ -887,6 +864,30 @@ async fn enroll_via_api(
     }
 
     supervisor.start(bot_guid);
+}
+
+// ---------------------------------------------------------------------------
+// Exec-embed helpers
+// ---------------------------------------------------------------------------
+
+/// Log one exec→brain status line for a bot. Extracted so the multi-bot status
+/// drain can call it per source without duplicating the match arms.
+fn log_exec_status(guid: u64, status: &GoalStatus) {
+    match status {
+        GoalStatus::Running { progress } => {
+            info!("exec_status bot_guid={} status=Running progress={:?}", guid, progress);
+        }
+        GoalStatus::Completed { summary } => {
+            info!("exec_status bot_guid={} status=Completed summary={:?}", guid, summary);
+        }
+        GoalStatus::NeedsDecision { event } => {
+            // M1/F: log only. Re-decide hook is a later slice.
+            info!("exec_status bot_guid={} status=NeedsDecision event={:?}", guid, event);
+        }
+        GoalStatus::Blocked { reason, detail } => {
+            warn!("exec_status bot_guid={} status=Blocked reason={:?} detail={:?}", guid, reason, detail);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
