@@ -73,7 +73,6 @@ EXAMPLE D: organic-wakeup tick with no immediate task — bot picks low engageme
 
   alternative organic-wakeup tick — bot creates a goal because none active:
   → {{"kind": "action", "tool": "goals.create",
-     "args": {{"bot_id": "1003", "goal_text": "Find a BFD raid group this evening",
-               "expires_at": null}},
+     "args": {{"bot_id": "1003", "text": "Find a BFD raid group this evening"}},
      "confidence": 0.85, "reasoning": "No active goals; my raid_appetite says I want BFD",
      "wakeup_in_ms": 300000}}

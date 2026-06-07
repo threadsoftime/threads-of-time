@@ -41,6 +41,7 @@ pub static RISK_TABLE: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| 
     m.insert("memory.write", "low");
     m.insert("memory_write", "low");
     m.insert("memory.goals.create", "low");
+    m.insert("goals.create", "low");   // dot-notation form — was missing; defaulted to "high"
     m.insert("goals_create", "low");
     m.insert("memory.goals.update", "low");
     m.insert("goals_update", "low");
@@ -140,6 +141,7 @@ static TOOL_DISPLAY_NAMES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new
     m.insert("memory.update", "update that memory");
     m.insert("memory_update", "update that memory");
     m.insert("memory.goals.create", "set that as a goal");
+    m.insert("goals.create", "set that as a goal");  // dot-notation form — was missing
     m.insert("goals_create", "set that as a goal");
     m.insert("memory.goals.update", "update that goal");
     m.insert("goals_update", "update that goal");

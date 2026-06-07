@@ -524,3 +524,95 @@ async fn test_no_policy_does_not_block_any_bot_tool() {
     // Without tool_policy, the policy gate is skipped; passes through to execute
     assert_eq!(result.disposition, "executed");
 }
+
+// ---------------------------------------------------------------------------
+// Regression: goals.create missing from RISK_TABLE (defaults to "high")
+// and few-shot example used wrong field name "goal_text" instead of "text".
+//
+// Before the fix:
+//   - "goals.create" not in RISK_TABLE → default "high" → confidence 0.85 < 0.95
+//     → dispatcher emits confirmation instead of executing.
+//   - The few-shot example in decide_v1.txt taught the model to emit
+//     {"goal_text": "...", "expires_at": null} which is rejected by the
+//     memory sidecar GoalCreateArgs that requires {"bot_id", "text"}.
+//
+// This test pins the RISK_TABLE fix: goals.create must be "low" risk so that
+// a well-formed call at confidence 0.85 (above LOW_RISK_THRESHOLD 0.7) executes.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_goals_create_dot_notation_is_low_risk_and_executes() {
+    // Regression for: "goals.create" absent from RISK_TABLE → defaulted to "high"
+    // → confirmation emitted for any confidence < 0.95 (typical LLM range: 0.7-0.9).
+    //
+    // After the fix, "goals.create" must be in RISK_TABLE as "low" and a call
+    // at confidence 0.85 (above LOW_RISK_THRESHOLD 0.7) must execute.
+    let harness = MockMcp::new();
+    let memory = MockMcp::new();
+    let dispatcher = make_dispatcher(harness.clone(), memory.clone(), None);
+
+    // LLM-authored goals.create — correct args shape {bot_id, text}.
+    // bot_id as string "1001" matches the bot_guid i64 1001 (string compare passes
+    // cross-bot guard: "1001".parse::<i64>() == Ok(1001) == bot_guid 1001).
+    let d = Decision {
+        kind: DecisionKind::Action,
+        tool: Some("goals.create".to_string()),
+        args: Some(serde_json::json!({
+            "bot_id": "1001",
+            "text": "reach level 25 by grinding Kobolds in Echo Ridge Mine"
+        })),
+        confidence: 0.85, // typical organic-wakeup confidence — above LOW (0.7) but below HIGH (0.95)
+        reasoning: "No active goals; want to level up".to_string(),
+        wakeup_in_ms: None,
+    };
+    let result = dispatcher.dispatch(1001, &d, "full").await.unwrap();
+    // MUST execute — not "confirmation_emitted" (which was the pre-fix behaviour
+    // because "goals.create" defaulted to "high" risk and 0.85 < 0.95).
+    assert_eq!(
+        result.disposition,
+        "executed",
+        "goals.create at confidence 0.85 must execute (low risk), not emit confirmation; \
+         got: {} — this means 'goals.create' is still missing from RISK_TABLE",
+        result.disposition
+    );
+
+    // The call must land on the memory MCP (not harness).
+    let harness_calls = harness.calls();
+    let exec_calls: Vec<_> = harness_calls
+        .iter()
+        .filter(|c| c.tool == "goals.create")
+        .collect();
+    assert!(
+        exec_calls.is_empty(),
+        "goals.create must route to memory MCP, not harness; found on harness: {:?}",
+        exec_calls
+    );
+    let mem_calls = memory.calls();
+    let goal_create_calls: Vec<_> = mem_calls
+        .iter()
+        .filter(|c| c.tool == "goals.create")
+        .collect();
+    assert_eq!(
+        goal_create_calls.len(),
+        1,
+        "goals.create must be dispatched exactly once to memory MCP; calls: {:?}",
+        mem_calls.iter().map(|c| &c.tool).collect::<Vec<_>>()
+    );
+
+    // The dispatched args must be a well-formed object with bot_id and text.
+    let dispatched_args = &goal_create_calls[0].args;
+    assert!(
+        dispatched_args.is_object(),
+        "dispatched args for goals.create must be a top-level JSON object, got: {:?}",
+        dispatched_args
+    );
+    assert_eq!(
+        dispatched_args["bot_id"].as_str().unwrap_or(""),
+        "1001",
+        "bot_id field must be present and correct"
+    );
+    assert!(
+        dispatched_args["text"].as_str().is_some(),
+        "text field must be present in dispatched args"
+    );
+}
