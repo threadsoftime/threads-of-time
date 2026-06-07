@@ -593,7 +593,7 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
         .unwrap_or_else(|_| "/opt/containers/brain/profiles.toml".to_string());
     let profile_registry = std::sync::Arc::new(
         crate::profile::ProfileRegistry::load(std::path::Path::new(&profiles_path))
-            .unwrap_or_else(|e| panic!("failed to load grind profiles from {profiles_path}: {e}")),
+            .map_err(|e| anyhow::anyhow!("failed to load grind profiles from {profiles_path}: {e}"))?,
     );
     let profile_map: std::collections::HashMap<i64, String> = settings
         .exec_profile_map()
@@ -602,7 +602,9 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
         .collect();
     for (guid, pid) in &profile_map {
         if !profile_registry.contains(pid) {
-            panic!("roster bot {guid} references unknown profile '{pid}' (not in {profiles_path})");
+            return Err(anyhow::anyhow!(
+                "roster bot {guid} references unknown profile '{pid}' (not in {profiles_path})"
+            ));
         }
     }
     info!("profiles_loaded count={} roster_bound={}", profile_registry.len(), profile_map.len());
