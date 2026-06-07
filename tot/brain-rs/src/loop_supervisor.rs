@@ -125,6 +125,10 @@ pub struct LoopSupervisor {
     /// Dedup map: bot_guid → last emitted goal_id. Prevents re-emitting the
     /// same goal every tick. StdMutex — never held across an `.await`.
     emitted_goals: StdMutex<HashMap<i64, String>>,
+
+    // ── M2 slice 2.1: declarative grind profiles ────────────────────────────
+    profile_registry: Arc<crate::profile::ProfileRegistry>,
+    profile_map: std::collections::HashMap<i64, String>,  // bot_guid → profile_id
 }
 
 impl LoopSupervisor {
@@ -151,6 +155,8 @@ impl LoopSupervisor {
         memory_bearer: String,
         brain_sse_coalesce_ms: u64,
         goal_sink: Option<Arc<dyn GoalSink>>,
+        profile_registry: Arc<crate::profile::ProfileRegistry>,
+        profile_map: std::collections::HashMap<i64, String>,
     ) -> Arc<Self> {
         Arc::new(Self {
             triage,
@@ -173,6 +179,8 @@ impl LoopSupervisor {
             sse_cancel_flags: StdMutex::new(HashMap::new()),
             goal_sink,
             emitted_goals: StdMutex::new(HashMap::new()),
+            profile_registry,
+            profile_map,
         })
     }
 
@@ -824,7 +832,20 @@ impl LoopSupervisor {
         // the same cap. For now, resolve via the Decider's public field.
         let max_level = self.decider.max_player_level;
 
-        let envelope = match crate::goal_emitter::synthesize_grind(bot_guid, &state_summary, max_level) {
+        // Resolve this bot's grind profile (roster binding → registry). A missing mapping
+        // is a config error caught at startup (app.rs cross-check); at runtime we log + skip
+        // rather than panic the tick (matches the best-effort emission discipline).
+        let profile = match self.profile_map.get(&bot_guid)
+            .and_then(|pid| self.profile_registry.get(pid))
+        {
+            Some(p) => p,
+            None => {
+                warn!("goal_emit_skip bot_guid={} reason=no_profile", bot_guid);
+                return;
+            }
+        };
+
+        let envelope = match crate::goal_emitter::synthesize_grind(bot_guid, &state_summary, max_level, profile) {
             Some(e) => e,
             None => return, // at cap → no goal
         };
@@ -1199,6 +1220,7 @@ mod tests {
         let triage = Arc::new(TriageGate::new(Arc::clone(&mcp), Arc::clone(&mcp)));
         let dispatcher = Arc::new(Dispatcher::new(Arc::clone(&mcp), Arc::clone(&mcp), "whisper", None));
 
+        let (reg, map) = test_registry_and_map(1003);
         LoopSupervisor::new(
             triage, decider, dispatcher, store,
             5.0, 300.0,
@@ -1206,7 +1228,25 @@ mod tests {
             None, None, 3,
             false, String::new(), String::new(), 200,
             goal_sink,
+            reg,
+            map,
         )
+    }
+
+    fn test_registry_and_map(bot_guid: i64) -> (std::sync::Arc<crate::profile::ProfileRegistry>, std::collections::HashMap<i64, String>) {
+        let reg = crate::profile::ProfileRegistry::from_toml_str(r#"
+[test_camp]
+anchor = { map_id = 0, x = 1.0, y = 2.0, z = 3.0 }
+level_band = { below = 3, above = 2 }
+creature_type = "humanoid"
+wander_radius = 90.0
+max_search_radius = 35.0
+rest_threshold = 0.35
+rotation_id = "auto_attack"
+"#).unwrap();
+        let mut map = std::collections::HashMap::new();
+        map.insert(bot_guid, "test_camp".to_string());
+        (std::sync::Arc::new(reg), map)
     }
 
     fn hot_inputs_with_level(level: u64) -> HashMap<String, serde_json::Value> {

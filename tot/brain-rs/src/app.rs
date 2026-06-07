@@ -588,6 +588,25 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
         }
     };
 
+    // ── M2 slice 2.1: load grind profiles + resolve the roster→profile map ─────
+    let profiles_path = std::env::var("BRAIN_PROFILES_PATH")
+        .unwrap_or_else(|_| "/opt/containers/brain/profiles.toml".to_string());
+    let profile_registry = std::sync::Arc::new(
+        crate::profile::ProfileRegistry::load(std::path::Path::new(&profiles_path))
+            .unwrap_or_else(|e| panic!("failed to load grind profiles from {profiles_path}: {e}")),
+    );
+    let profile_map: std::collections::HashMap<i64, String> = settings
+        .exec_profile_map()
+        .into_iter()
+        .map(|(g, pid)| (g as i64, pid))
+        .collect();
+    for (guid, pid) in &profile_map {
+        if !profile_registry.contains(pid) {
+            panic!("roster bot {guid} references unknown profile '{pid}' (not in {profiles_path})");
+        }
+    }
+    info!("profiles_loaded count={} roster_bound={}", profile_registry.len(), profile_map.len());
+
     let supervisor = LoopSupervisor::new(
         triage.clone(),
         decider.clone(),
@@ -604,6 +623,8 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
         settings.memory_bearer.clone(),
         settings.brain_sse_coalesce_ms,
         goal_sink,
+        profile_registry,
+        profile_map,
     );
 
     // ── Rehydrate active bots ─────────────────────────────────────────────────

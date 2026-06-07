@@ -158,6 +158,9 @@ fn make_supervisor(
         None,
     ));
 
+    let empty_reg = std::sync::Arc::new(
+        brain_rs::profile::ProfileRegistry::from_toml_str("").unwrap(),
+    );
     LoopSupervisor::new(
         triage,
         Arc::new(Decider::new_test_with_max_level(1001, test_card(), "{}", 25)),
@@ -174,6 +177,8 @@ fn make_supervisor(
         String::new(),
         200,
         None, // goal_sink: None → pure parity mode
+        empty_reg,
+        std::collections::HashMap::new(),
     )
 }
 
@@ -272,6 +277,9 @@ fn make_supervisor_with_llm(
         max_player_level: 25,
     });
 
+    let empty_reg = std::sync::Arc::new(
+        brain_rs::profile::ProfileRegistry::from_toml_str("").unwrap(),
+    );
     LoopSupervisor::new(
         triage,
         decider,
@@ -288,6 +296,8 @@ fn make_supervisor_with_llm(
         String::new(),
         200,
         None, // goal_sink: None → pure parity mode
+        empty_reg,
+        std::collections::HashMap::new(),
     )
 }
 
