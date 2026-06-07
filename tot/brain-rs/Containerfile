@@ -168,6 +168,10 @@ COPY --from=builder \
     /build/target/x86_64-unknown-linux-musl/release/brain-rs \
     /brain-rs
 
+# M2 slice 2.1: grind profiles (read at startup; BRAIN_PROFILES_PATH default).
+# COPY creates /opt/containers/brain/ automatically even on scratch.
+COPY brain-rs/profiles/profiles.toml /opt/containers/brain/profiles.toml
+
 # Default env — all overridable via EnvironmentFile in the Quadlet.
 ENV BRAIN_BIND_HOST=0.0.0.0 \
     BRAIN_BIND_PORT=8091

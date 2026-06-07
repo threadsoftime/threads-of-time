@@ -1,0 +1,29 @@
+# M2 grind profiles (slice 2.1). Coords marked (PROVISIONAL) are refined to verified
+# live camp coordinates during the deploy data pre-flight (kb_6950a902 #3).
+
+[elwynn_fargodeep]
+anchor = { map_id = 0, x = -9384.5, y = 63.5, z = 54.0 }   # M1-verified Elwynn mine anchor
+level_band = { below = 3, above = 2 }
+creature_type = "humanoid"
+wander_radius = 90.0
+max_search_radius = 35.0
+rest_threshold = 0.35
+rotation_id = "auto_attack"
+
+[dun_morogh_camp]
+anchor = { map_id = 0, x = -5604.0, y = -527.0, z = 400.0 }   # (PROVISIONAL) Dun Morogh — near where bot 1173 grinds
+level_band = { below = 3, above = 2 }
+creature_type = "humanoid"
+wander_radius = 90.0
+max_search_radius = 35.0
+rest_threshold = 0.35
+rotation_id = "auto_attack"
+
+[westfall_camp]
+anchor = { map_id = 0, x = -10500.0, y = 1300.0, z = 40.0 }   # (PROVISIONAL) Westfall low-level humanoids
+level_band = { below = 3, above = 2 }
+creature_type = "humanoid"
+wander_radius = 90.0
+max_search_radius = 35.0
+rest_threshold = 0.35
+rotation_id = "auto_attack"

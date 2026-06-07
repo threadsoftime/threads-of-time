@@ -225,4 +225,13 @@ rotation_id = "auto_attack"
         let s = VALID.replace("max_search_radius = 35.0", "max_search_radius = 0.0");
         assert!(matches!(ProfileRegistry::from_toml_str(&s).unwrap_err(), ProfileError::Validation { .. }));
     }
+
+    #[test]
+    fn ships_valid_profiles_toml() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/profiles/profiles.toml");
+        let reg = ProfileRegistry::load(std::path::Path::new(path))
+            .expect("shipped profiles.toml must load + validate");
+        assert!(reg.len() >= 2, "expect 2-3 camp profiles");
+        assert!(reg.contains("elwynn_fargodeep"));
+    }
 }
