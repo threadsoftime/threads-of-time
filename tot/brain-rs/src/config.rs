@@ -70,6 +70,10 @@ pub struct Settings {
     /// M1 exec embed: bot guid that gets an in-process exec loop + goal emission.
     /// Env: `EXEC_BOT_GUID` (integer). Absent / invalid → `None` (pure parity mode).
     pub exec_bot_guid: Option<i64>,
+    /// M2 exec embed roster: bot guids that each get an in-process exec loop.
+    /// Env: `EXEC_BOT_GUIDS` (comma-separated integers). Preferred over the
+    /// singular `EXEC_BOT_GUID`; resolved via [`Settings::exec_roster`].
+    pub exec_bot_guids: Vec<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +122,19 @@ impl Settings {
         Ok(s)
     }
 
+    /// The exec enrollment roster as `u64` guids. Prefers `EXEC_BOT_GUIDS`
+    /// (comma-separated); falls back to the singular `EXEC_BOT_GUID` (M1
+    /// back-compat); empty → no exec embed (pure parity mode).
+    pub fn exec_roster(&self) -> Vec<u64> {
+        if !self.exec_bot_guids.is_empty() {
+            self.exec_bot_guids.iter().map(|&g| g as u64).collect()
+        } else if let Some(g) = self.exec_bot_guid {
+            vec![g as u64]
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Construct settings from an arbitrary key→value lookup.
     ///
     /// Separated from `from_env_with_defaults` so tests can inject values without
@@ -144,6 +161,15 @@ impl Settings {
         };
         let get_opt_i64 = |key: &str| -> Option<i64> {
             get(key).and_then(|v| v.trim().parse::<i64>().ok())
+        };
+        let get_csv_i64 = |key: &str| -> Vec<i64> {
+            get(key)
+                .map(|v| {
+                    v.split(',')
+                        .filter_map(|s| s.trim().parse::<i64>().ok())
+                        .collect()
+                })
+                .unwrap_or_default()
         };
 
         let living_bot_count = get_usize("TOT_LIVING_BOT_COUNT", 10);
@@ -175,6 +201,7 @@ impl Settings {
             subset_enroll_backoff_s:        get_f64("TOT_SUBSET_ENROLL_BACKOFF_S", 300.0),
             reduced_tick_interval_s:        get_f64("TOT_REDUCED_TICK_INTERVAL_S", 300.0),
             exec_bot_guid:                  get_opt_i64("EXEC_BOT_GUID"),
+            exec_bot_guids:                 get_csv_i64("EXEC_BOT_GUIDS"),
         }
     }
 }
@@ -301,6 +328,39 @@ mod tests {
     // ---------------------------------------------------------------------------
     // exec_bot_guid (Rust-only; no Python parity)
     // ---------------------------------------------------------------------------
+
+    #[test]
+    fn exec_roster_parses_csv_guids() {
+        let s = Settings::build(getter(HashMap::from([("EXEC_BOT_GUIDS", "1001, 1002 ,1003")])));
+        assert_eq!(s.exec_roster(), vec![1001u64, 1002, 1003]);
+    }
+
+    #[test]
+    fn exec_roster_falls_back_to_singular_guid() {
+        let s = Settings::build(getter(HashMap::from([("EXEC_BOT_GUID", "1173")])));
+        assert_eq!(s.exec_roster(), vec![1173u64]);
+    }
+
+    #[test]
+    fn exec_roster_prefers_plural_over_singular() {
+        let s = Settings::build(getter(HashMap::from([
+            ("EXEC_BOT_GUIDS", "1001,1002"),
+            ("EXEC_BOT_GUID", "1173"),
+        ])));
+        assert_eq!(s.exec_roster(), vec![1001u64, 1002]);
+    }
+
+    #[test]
+    fn exec_roster_empty_when_neither_set() {
+        let s = Settings::build(getter(HashMap::new()));
+        assert!(s.exec_roster().is_empty());
+    }
+
+    #[test]
+    fn exec_roster_skips_non_numeric_entries() {
+        let s = Settings::build(getter(HashMap::from([("EXEC_BOT_GUIDS", "1001,nope,1003")])));
+        assert_eq!(s.exec_roster(), vec![1001u64, 1003]);
+    }
 
     #[test]
     fn test_exec_bot_guid_absent_is_none() {
