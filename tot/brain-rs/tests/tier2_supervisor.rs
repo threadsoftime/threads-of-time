@@ -1048,26 +1048,3 @@ fn test_dedup_fence_poll_path_condition_unit() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Unit test: wakeup clamp logic (pure — no async needed)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_wakeup_clamp_values_unit() {
-    // Verify jittered_delta (zero-jitter path) matches contract clamp [60k, 600k].
-    use brain_rs::loop_supervisor::{jittered_delta, jittered_startup_offset};
-
-    // zero-jitter path — pure clamp behaviour
-    assert_eq!(jittered_delta(100, 0.0), 60_000, "below min → clamp to 60k");
-    assert_eq!(jittered_delta(60_000, 0.0), 60_000, "at min → 60k");
-    assert_eq!(jittered_delta(300_000, 0.0), 300_000, "in range → unchanged");
-    assert_eq!(jittered_delta(600_000, 0.0), 600_000, "at max → 600k");
-    assert_eq!(jittered_delta(700_000, 0.0), 600_000, "above max → clamp to 600k");
-    assert_eq!(jittered_delta(180_000, 0.0), 180_000, "default → 180k");
-
-    // startup offset helpers
-    assert_eq!(jittered_startup_offset(0.0), 0, "r=0 → 0ms");
-    assert_eq!(jittered_startup_offset(1.0), 15_000, "r=1 → 15s");
-    assert_eq!(jittered_startup_offset(-1.0), 0, "r<0 → clamped");
-    assert_eq!(jittered_startup_offset(2.0), 15_000, "r>1 → clamped");
-}

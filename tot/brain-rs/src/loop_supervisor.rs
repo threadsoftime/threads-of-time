@@ -968,16 +968,16 @@ fn _now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// Startup wakeup jitter: map a uniform random `r ∈ [0,1]` to a 0–15s offset (ms).
+/// Startup wakeup jitter: map a uniform random `r ∈ [0,1)` to a 0–15s offset (ms).
 /// Pure (random input injected by the caller) so it is deterministically testable.
-pub fn jittered_startup_offset(r: f64) -> i64 {
-    (r.clamp(0.0, 1.0) * 15_000.0) as i64
+pub(crate) fn jittered_startup_offset(r: f64) -> i64 {
+    (r.clamp(0.0, 1.0) * 15_000.0).round() as i64
 }
 
 /// Apply a steady-state jitter factor to a wakeup delta, then re-apply the
 /// contract clamp `[60_000, 600_000]ms`. `jitter_frac` is the caller-supplied
 /// random fraction in `[-0.15, 0.15]`. Pure → deterministically testable.
-pub fn jittered_delta(delta: i64, jitter_frac: f64) -> i64 {
+pub(crate) fn jittered_delta(delta: i64, jitter_frac: f64) -> i64 {
     let j = (delta as f64 * (1.0 + jitter_frac)).round() as i64;
     j.clamp(60_000, 600_000)
 }
