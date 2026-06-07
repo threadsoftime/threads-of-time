@@ -3,7 +3,7 @@
 /// Faithful Rust port of brain_sidecar/triage.py TriageGate.
 ///
 /// Priority order (from Python evaluate()):
-///   1. last_tick_ms == 0         → "first_tick"       (always fire)
+///   1. last_tick_ms == 0 && next_wakeup_at_ms.is_none() → "first_tick"  (un-seeded only)
 ///   2. sse_inputs.fresh_chat     → skip chat poll; fan-out obs+combat;
 ///                                   return "fresh_chat"
 ///   3. Fan-out all 4 parallel    → obs.get_state, obs.get_combat_log,
@@ -621,7 +621,7 @@ mod tests {
         // organic_wakeup not yet due → no decision this tick.
         let result = gate.evaluate(1001, &state, 1000, None, Some(9000)).await;
         assert!(!result.should_decide, "seeded+unexpired first tick must not decide");
-        assert_ne!(result.reason, "first_tick", "first_tick must be suppressed when seeded");
+        assert_eq!(result.reason, "no_change", "seeded+unexpired first tick falls through to no_change");
     }
 
     /// When the seeded wakeup has expired, the bot's FIRST decision is organic_wakeup
