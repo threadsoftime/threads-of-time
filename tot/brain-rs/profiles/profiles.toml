@@ -11,7 +11,7 @@ rest_threshold = 0.35
 rotation_id = "auto_attack"
 
 [dun_morogh_camp]
-anchor = { map_id = 0, x = -5604.0, y = -527.0, z = 400.0 }   # (PROVISIONAL) Dun Morogh — near where bot 1173 grinds
+anchor = { map_id = 0, x = -6375.0, y = 295.0, z = 388.0 }   # VERIFIED: Coldridge Valley Rockjaw Trogg/Frostmane camp centroid (SQL: 31 Rockjaw Trogg L1-2 @ avg -6368,283,389 + 24 Burly Rockjaw L2 @ avg -6333,370,387; data-preflight 2026-06-07)
 level_band = { below = 3, above = 2 }
 creature_type = "humanoid"
 wander_radius = 90.0
@@ -20,7 +20,7 @@ rest_threshold = 0.35
 rotation_id = "auto_attack"
 
 [westfall_camp]
-anchor = { map_id = 0, x = -10500.0, y = 1300.0, z = 40.0 }   # (PROVISIONAL) Westfall low-level humanoids
+anchor = { map_id = 0, x = -10000.0, y = 617.0, z = 37.0 }   # VERIFIED: Riverpaw Gnoll camp centroid (SQL: 10 Riverpaw Runt L8-9 + 31 Riverpaw Outrunner L9-10 @ avg -10001,617,37; data-preflight 2026-06-07)
 level_band = { below = 3, above = 2 }
 creature_type = "humanoid"
 wander_radius = 90.0
