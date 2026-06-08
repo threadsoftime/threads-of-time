@@ -7,10 +7,39 @@
 // here causes Cargo to re-run the build script (and therefore re-compile) when
 // the embedded files change.
 fn main() {
-    // Migrations embedded in src/state.rs
+    // Existing: re-run when embedded resources change.
     println!("cargo:rerun-if-changed=migrations/0001_living_bots.sql");
     println!("cargo:rerun-if-changed=migrations/0002_add_last_event_id.sql");
     println!("cargo:rerun-if-changed=migrations/0004_subset_tier.sql");
-    // Prompt template embedded in src/app.rs (Phase 4)
     println!("cargo:rerun-if-changed=prompts/decide_v1.txt");
+
+    // Build identity. Priority: BRAIN_BUILD_SHA env-arg → git → "unknown".
+    println!("cargo:rerun-if-env-changed=BRAIN_BUILD_SHA");
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs");
+
+    let sha = std::env::var("BRAIN_BUILD_SHA")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            std::process::Command::new("git")
+                .args(["rev-parse", "--short", "HEAD"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("cargo:rustc-env=BRAIN_BUILD_SHA={sha}");
+
+    let build_time = std::process::Command::new("date")
+        .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("cargo:rustc-env=BRAIN_BUILD_TIME={build_time}");
 }
