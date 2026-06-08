@@ -129,22 +129,22 @@ pub async fn morph_personality(
     match result {
         Err(e) => {
             warn!(
-                "morph_personality LLM exception bot={} err={}; keeping seed values",
+                "morph_personality LLM error bot={} {}; keeping seed values",
                 card.name, e
             );
             apply_v2_fields(card.clone(), &seed)
         }
-        Ok((None, raw, _)) => {
+        Ok(r) if r.parsed.is_none() => {
             warn!(
                 "morph_personality LLM unparseable bot={} raw={:?}; keeping seed values",
                 card.name,
-                &raw[..raw.len().min(120)]
+                &r.raw[..r.raw.len().min(120)]
             );
             apply_v2_fields(card.clone(), &seed)
         }
-        Ok((Some(parsed), _, _)) => {
-            // LLM happy path: trust the parsed dict; json_schema enforced strict shape.
-            apply_v2_fields_from_json(card.clone(), &parsed)
+        Ok(r) => {
+            // Happy path: parsed dict present; json_schema enforced strict shape.
+            apply_v2_fields_from_json(card.clone(), &r.parsed.unwrap())
         }
     }
 }
