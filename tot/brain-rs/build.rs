@@ -15,8 +15,21 @@ fn main() {
 
     // Build identity. Priority: BRAIN_BUILD_SHA env-arg → git → "unknown".
     println!("cargo:rerun-if-env-changed=BRAIN_BUILD_SHA");
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=.git/refs");
+    // Re-run when the resolved git HEAD/refs change. The .git dir lives at the
+    // workspace/repo root, not the crate dir, so resolve it via `git rev-parse
+    // --absolute-git-dir` (absolute path) rather than a fragile crate-relative path.
+    if let Ok(out) = std::process::Command::new("git")
+        .args(["rev-parse", "--absolute-git-dir"])
+        .output()
+    {
+        if out.status.success() {
+            let git_dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !git_dir.is_empty() {
+                println!("cargo:rerun-if-changed={git_dir}/HEAD");
+                println!("cargo:rerun-if-changed={git_dir}/refs");
+            }
+        }
+    }
 
     let sha = std::env::var("BRAIN_BUILD_SHA")
         .ok()
