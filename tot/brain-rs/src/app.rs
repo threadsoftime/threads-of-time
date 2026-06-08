@@ -492,6 +492,8 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
         .as_array()
         .map(|a| a.len())
         .unwrap_or(0);
+    // Provable-deploy banner: journald shows exactly which binary is running.
+    info!(target: "brain_build", "{}", crate::build_info::banner());
     // soak gate line — must match Python exactly
     info!(
         "schema_loaded harness_tools={} memory_tools={} oneof_branches={}",
