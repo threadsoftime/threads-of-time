@@ -13,6 +13,114 @@ use std::collections::{BTreeMap, HashMap};
 use serde_json::{Map, Value};
 
 // ---------------------------------------------------------------------------
+// Bare-boolean subschema sanitizer
+// ---------------------------------------------------------------------------
+
+/// Convert a bare JSON Schema boolean shorthand into its object equivalent.
+///
+/// JSON Schema allows `true` (any value is valid) and `false` (no value is
+/// valid) wherever a subschema is expected.  llama.cpp's json-schema→GBNF
+/// compiler does **not** support this form and returns HTTP 400
+/// `"Unrecognized schema: true"`.
+///
+/// - `true`  → `{}` (empty schema = allow anything)
+/// - `false` → `{"not": {}}` (matches nothing)
+fn bool_to_schema(b: bool) -> Value {
+    if b {
+        Value::Object(Map::new())
+    } else {
+        let mut m = Map::new();
+        m.insert("not".to_string(), Value::Object(Map::new()));
+        Value::Object(m)
+    }
+}
+
+/// Recursively sanitize bare-boolean subschemas in a JSON Schema value.
+///
+/// JSON Schema permits `true`/`false` in positions where a subschema is
+/// expected (RFC draft-07 §4.3.2).  llama.cpp's GBNF converter rejects
+/// them with HTTP 400.  This function replaces them with their object
+/// equivalents (`true → {}`, `false → {"not": {}}`) but **only** at
+/// recognised subschema positions:
+///
+/// | Position kind | Keys |
+/// |---|---|
+/// | Single subschema | `items`, `additionalItems`, `contains`, `not`, `propertyNames`, `if`, `then`, `else` |
+/// | Map of subschemas | `properties`, `patternProperties`, `$defs`, `definitions`, `dependentSchemas` |
+/// | Array of subschemas | `allOf`, `anyOf`, `oneOf`, `prefixItems` |
+///
+/// Booleans at **non-subschema positions** are left untouched:
+/// `additionalProperties` (llama.cpp handles it), `default`, `const`,
+/// enum elements, `required` entries, `strict`, `readOnly`, etc.
+pub fn sanitize_bool_schemas(node: &Value) -> Value {
+    match node {
+        Value::Object(obj) => {
+            let mut out = Map::with_capacity(obj.len());
+            for (k, v) in obj.iter() {
+                let sanitized = match k.as_str() {
+                    // ── Single-subschema positions ────────────────────────
+                    "items"
+                    | "additionalItems"
+                    | "contains"
+                    | "not"
+                    | "propertyNames"
+                    | "if"
+                    | "then"
+                    | "else" => match v {
+                        Value::Bool(b) => bool_to_schema(*b),
+                        other => sanitize_bool_schemas(other),
+                    },
+                    // ── Map-of-subschemas positions ───────────────────────
+                    "properties"
+                    | "patternProperties"
+                    | "$defs"
+                    | "definitions"
+                    | "dependentSchemas" => {
+                        if let Value::Object(map) = v {
+                            let mut new_map = Map::with_capacity(map.len());
+                            for (prop_k, prop_v) in map.iter() {
+                                let sanitized_prop = match prop_v {
+                                    Value::Bool(b) => bool_to_schema(*b),
+                                    other => sanitize_bool_schemas(other),
+                                };
+                                new_map.insert(prop_k.clone(), sanitized_prop);
+                            }
+                            Value::Object(new_map)
+                        } else {
+                            sanitize_bool_schemas(v)
+                        }
+                    }
+                    // ── Array-of-subschemas positions ─────────────────────
+                    "allOf" | "anyOf" | "oneOf" | "prefixItems" => {
+                        if let Value::Array(arr) = v {
+                            let new_arr: Vec<Value> = arr
+                                .iter()
+                                .map(|elem| match elem {
+                                    Value::Bool(b) => bool_to_schema(*b),
+                                    other => sanitize_bool_schemas(other),
+                                })
+                                .collect();
+                            Value::Array(new_arr)
+                        } else {
+                            sanitize_bool_schemas(v)
+                        }
+                    }
+                    // ── Everything else: recurse structurally, no bool fix ─
+                    _ => sanitize_bool_schemas(v),
+                };
+                out.insert(k.clone(), sanitized);
+            }
+            Value::Object(out)
+        }
+        Value::Array(arr) => {
+            Value::Array(arr.iter().map(sanitize_bool_schemas).collect())
+        }
+        // Scalars pass through unchanged (includes booleans at non-schema positions)
+        other => other.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // $ref resolution
 // ---------------------------------------------------------------------------
 
@@ -122,7 +230,11 @@ pub fn unwrap_fastmcp_args(
         _ => &empty_defs,
     };
 
-    resolve_refs(args_schema, defs, &[])
+    let resolved = resolve_refs(args_schema, defs, &[])?;
+    // Sanitize bare-boolean subschemas (`items: true`, property values of
+    // `true`/`false`, etc.) that schemars emits for `Vec<Value>` and similar
+    // types.  llama.cpp's json-schema→GBNF compiler rejects them with HTTP 400.
+    Ok(sanitize_bool_schemas(&resolved))
 }
 
 // ---------------------------------------------------------------------------
@@ -409,5 +521,123 @@ impl ListTools for crate::mcp_client::McpClient {
         Box<dyn std::future::Future<Output = anyhow::Result<Vec<rmcp::model::Tool>>> + Send + '_>,
     > {
         Box::pin(async move { self.list_tools().await })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests — sanitize_bool_schemas
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitizes_items_true_to_empty_object() {
+        let s = serde_json::json!({"type": "array", "items": true});
+        let out = sanitize_bool_schemas(&s);
+        assert_eq!(out["items"], serde_json::json!({}), "items:true -> {{}}");
+    }
+
+    #[test]
+    fn sanitizes_property_value_bool() {
+        let s = serde_json::json!({
+            "type": "object",
+            "properties": {"foo": true, "bar": {"type": "string"}}
+        });
+        let out = sanitize_bool_schemas(&s);
+        assert_eq!(out["properties"]["foo"], serde_json::json!({}));
+        assert_eq!(
+            out["properties"]["bar"],
+            serde_json::json!({"type": "string"})
+        );
+    }
+
+    #[test]
+    fn sanitizes_false_to_not_empty() {
+        let s = serde_json::json!({"items": false});
+        let out = sanitize_bool_schemas(&s);
+        assert_eq!(out["items"], serde_json::json!({"not": {}}));
+    }
+
+    #[test]
+    fn sanitizes_oneof_anyof_allof_elements() {
+        let s = serde_json::json!({"oneOf": [true, {"type": "string"}]});
+        let out = sanitize_bool_schemas(&s);
+        assert_eq!(out["oneOf"][0], serde_json::json!({}));
+        assert_eq!(out["oneOf"][1], serde_json::json!({"type": "string"}));
+    }
+
+    #[test]
+    fn leaves_additional_properties_bool_untouched() {
+        let s = serde_json::json!({"type": "object", "additionalProperties": false});
+        let out = sanitize_bool_schemas(&s);
+        assert_eq!(
+            out["additionalProperties"],
+            serde_json::json!(false),
+            "additionalProperties bool is valid -> untouched"
+        );
+    }
+
+    #[test]
+    fn leaves_non_schema_booleans_untouched() {
+        // strict/default/required/enum booleans are NOT subschemas.
+        let s = serde_json::json!({
+            "type": "object",
+            "properties": {"x": {"type": "boolean", "default": true}},
+            "required": ["x"]
+        });
+        let out = sanitize_bool_schemas(&s);
+        assert_eq!(
+            out["properties"]["x"]["default"],
+            serde_json::json!(true),
+            "a boolean default is not a subschema"
+        );
+        assert_eq!(out["properties"]["x"]["type"], serde_json::json!("boolean"));
+    }
+
+    #[test]
+    fn nested_sanitization_recurses() {
+        let s = serde_json::json!({"properties": {"a": {"type": "array", "items": true}}});
+        let out = sanitize_bool_schemas(&s);
+        assert_eq!(out["properties"]["a"]["items"], serde_json::json!({}));
+    }
+
+    /// Verify the exact `memory.write` `relations` arg shape that caused the
+    /// production 400.  schemars emits `{"type":"array","items":true}` for
+    /// `Vec<Value>`.  After `unwrap_fastmcp_args` the `items:true` must become
+    /// `items:{}` so llama.cpp's GBNF compiler accepts the schema.
+    #[test]
+    fn pipeline_items_true_sanitized_via_unwrap_fastmcp_args() {
+        // Simulate the schemars-generated inputSchema for a tool whose `args`
+        // object has a `relations` field typed `Vec<Value>`.
+        let input_schema: std::collections::HashMap<String, Value> =
+            serde_json::from_value(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "args": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string"},
+                            "relations": {"type": "array", "items": true}
+                        },
+                        "required": ["key"]
+                    }
+                }
+            }))
+            .unwrap();
+
+        let out = unwrap_fastmcp_args(&input_schema).unwrap();
+        assert_eq!(
+            out["properties"]["relations"]["items"],
+            serde_json::json!({}),
+            "items:true from schemars Vec<Value> must become {{}} after unwrap pipeline"
+        );
+        // Ensure non-schema booleans survive
+        let schema_str = serde_json::to_string(&out).unwrap();
+        assert!(
+            !schema_str.contains(":true}") && !schema_str.contains(":false}"),
+            "no bare-boolean subschemas must remain after sanitization: {schema_str}"
+        );
     }
 }
