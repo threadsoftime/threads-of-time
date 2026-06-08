@@ -507,6 +507,8 @@ impl LoopSupervisor {
             "confidence": null,
             "dispatch_result": null,
             "error": null,
+            "llm_error_class": null,
+            "json_schema_fell_back": false,
             "wakeup_at_ms": null,
             "wakeup_in_ms": null,
             "event_source": if has_sse_chat { "sse" } else { "poll" },
@@ -706,6 +708,10 @@ impl LoopSupervisor {
         record["llm_latency_ms"] = llm_latency_ms
             .and_then(|ms| serde_json::Number::from_f64(ms).map(Value::Number))
             .unwrap_or(Value::Null);
+        record["llm_error_class"] = outcome.error_class
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null);
+        record["json_schema_fell_back"] = serde_json::Value::Bool(outcome.json_schema_fell_back);
 
         // ── Wakeup clamp ─────────────────────────────────────────────────
         // V3.7.1: brain-returned delta is clamped to [60_000, 600_000] ms.
@@ -969,7 +975,13 @@ impl LoopSupervisor {
     // Internal: telemetry log
     // ------------------------------------------------------------------
 
-    fn _log(&self, record: Value) {
+    fn _log(&self, mut record: Value) {
+        // Stamp brain_sha on EVERY record centrally so both the busy-skip path
+        // (~line 393) and the main decision path receive it.
+        if let Value::Object(ref mut m) = record {
+            m.entry("brain_sha".to_string())
+                .or_insert_with(|| Value::String(crate::build_info::BUILD_SHA.to_string()));
+        }
         // Mirror Python: `try: self.decision_log_writer.write(record)`
         //                 `except Exception: log.exception(...)`
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -979,6 +991,16 @@ impl LoopSupervisor {
             warn!("decision_log_write_panicked: {:?}", e);
         }
     }
+
+}
+
+/// Test-only: the default record field set, for asserting observability fields exist.
+#[doc(hidden)]
+pub fn default_record_fields_for_test() -> serde_json::Value {
+    serde_json::json!({
+        "llm_error_class": null,
+        "json_schema_fell_back": false,
+    })
 }
 
 // ---------------------------------------------------------------------------

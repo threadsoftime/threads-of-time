@@ -966,6 +966,17 @@ async fn test_stop_aborts_stuck_tick_within_10s() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 14: decision_record_defaults_include_observability_fields
+// ---------------------------------------------------------------------------
+
+#[test]
+fn decision_record_defaults_include_observability_fields() {
+    let v = brain_rs::loop_supervisor::default_record_fields_for_test();
+    assert_eq!(v["llm_error_class"], serde_json::Value::Null);
+    assert_eq!(v["json_schema_fell_back"], serde_json::Value::Bool(false));
+}
+
+// ---------------------------------------------------------------------------
 // Test 13: SSE dedup fence is poll-path-only — SSE path is not re-filtered
 // ---------------------------------------------------------------------------
 //
