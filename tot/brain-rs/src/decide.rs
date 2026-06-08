@@ -200,6 +200,20 @@ fn python_json<T: Serialize + ?Sized>(value: &T) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// DecideOutcome — returned by Decider::decide()
+// ---------------------------------------------------------------------------
+
+/// Result of `Decider::decide` — decision plus observability metadata.
+pub struct DecideOutcome {
+    pub decision: Decision,
+    pub latency_ms: Option<f64>,
+    pub at_cap: bool,
+    /// None on success; else "timeout"|"transport"|"http_<code>"|"parse"|"invalid_schema"|"personality_error".
+    pub error_class: Option<String>,
+    pub json_schema_fell_back: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Prompt return type
 // ---------------------------------------------------------------------------
 
@@ -381,15 +395,17 @@ impl Decider {
 
     /// Assemble context, call LLM, parse and return a Decision.
     ///
-    /// Returns `(Decision, latency_ms_option, at_cap)`.
+    /// Returns a `DecideOutcome` carrying the decision plus observability metadata.
     /// * `latency_ms` = duration of the most recent LLM call in ms, or `None`.
     /// * `at_cap` = true when the bot's level >= `self.max_player_level`.
+    /// * `error_class` = None on success; else the error class string.
+    /// * `json_schema_fell_back` = true when the LLM did not support structured output.
     pub async fn decide(
         &self,
         bot_guid: i64,
         hot_inputs: &HashMap<String, serde_json::Value>,
         triage_reason: Option<&str>,
-    ) -> (Decision, Option<f64>, bool) {
+    ) -> DecideOutcome {
         // V3.6: derive at_cap up front
         let state_summary = hot_inputs.get("state_summary").cloned().unwrap_or(serde_json::json!({}));
         let at_cap = self.derive_at_cap(&state_summary);
@@ -399,18 +415,16 @@ impl Decider {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("decide: personality_cache.get failed bot_guid={bot_guid}: {e}");
-                return (
-                    Decision {
-                        kind: DecisionKind::NoOp,
-                        tool: None,
-                        args: None,
-                        confidence: 0.0,
-                        reasoning: format!("personality_error: {e}"),
+                return DecideOutcome {
+                    decision: Decision {
+                        kind: DecisionKind::NoOp, tool: None, args: None,
+                        confidence: 0.0, reasoning: format!("personality_error: {e}"),
                         wakeup_in_ms: None,
                     },
-                    None,
-                    at_cap,
-                );
+                    latency_ms: None, at_cap,
+                    error_class: Some("personality_error".to_string()),
+                    json_schema_fell_back: false,
+                };
             }
         };
 
@@ -472,6 +486,7 @@ impl Decider {
         let system = prompt.system;
         let mut user = prompt.user;
         let mut last_latency_ms: Option<f64> = None;
+        let mut json_schema_fell_back = false;
 
         for attempt in 0..=(self.max_retries as usize) {
             let result = self
@@ -485,25 +500,27 @@ impl Decider {
                 )
                 .await;
 
-            let (parsed, raw, latency_ms) = match result {
-                Ok(t) => t,
+            let r = match result {
+                Ok(r) => r,
                 Err(e) => {
                     tracing::error!("decide: llm_client error attempt={attempt}: {e}");
-                    return (
-                        Decision {
-                            kind: DecisionKind::NoOp,
-                            tool: None,
-                            args: None,
-                            confidence: 0.0,
-                            reasoning: format!("llm_error: {e}"),
+                    if e.json_schema_fell_back { json_schema_fell_back = true; }
+                    return DecideOutcome {
+                        decision: Decision {
+                            kind: DecisionKind::NoOp, tool: None, args: None,
+                            confidence: 0.0, reasoning: format!("llm_error: {e}"),
                             wakeup_in_ms: None,
                         },
-                        last_latency_ms,
-                        at_cap,
-                    );
+                        latency_ms: Some(e.elapsed_ms), at_cap,
+                        error_class: Some(e.class.as_str()),
+                        json_schema_fell_back,
+                    };
                 }
             };
-            last_latency_ms = Some(latency_ms);
+            last_latency_ms = Some(r.latency_ms);
+            if r.json_schema_fell_back { json_schema_fell_back = true; }
+            let parsed = r.parsed;
+            let raw = r.raw;
 
             if parsed.is_none() {
                 // Unparseable — retry once with a precise restatement of the schema.
@@ -518,24 +535,25 @@ impl Decider {
                 // &raw[..120] panics when byte 120 is not a UTF-8 char boundary.
                 // chars().take(120).collect() is byte-safe AND matches Python semantics.
                 let snippet: String = raw.chars().take(120).collect();
-                return (
-                    Decision {
-                        kind: DecisionKind::NoOp,
-                        tool: None,
-                        args: None,
-                        confidence: 0.0,
-                        reasoning: format!("llm_unparseable: {snippet}"),
+                return DecideOutcome {
+                    decision: Decision {
+                        kind: DecisionKind::NoOp, tool: None, args: None,
+                        confidence: 0.0, reasoning: format!("llm_unparseable: {snippet}"),
                         wakeup_in_ms: None,
                     },
-                    last_latency_ms,
-                    at_cap,
-                );
+                    latency_ms: last_latency_ms, at_cap,
+                    error_class: Some("parse".to_string()),
+                    json_schema_fell_back,
+                };
             }
 
             let parsed_val = parsed.unwrap();
             match serde_json::from_value::<Decision>(parsed_val) {
                 Ok(decision) => {
-                    return (decision, last_latency_ms, at_cap);
+                    return DecideOutcome {
+                        decision, latency_ms: last_latency_ms, at_cap,
+                        error_class: None, json_schema_fell_back,
+                    };
                 }
                 Err(_) => {
                     if attempt < self.max_retries as usize {
@@ -545,35 +563,31 @@ impl Decider {
                         ));
                         continue;
                     }
-                    return (
-                        Decision {
-                            kind: DecisionKind::NoOp,
-                            tool: None,
-                            args: None,
-                            confidence: 0.0,
-                            reasoning: "llm_invalid_schema".to_string(),
+                    return DecideOutcome {
+                        decision: Decision {
+                            kind: DecisionKind::NoOp, tool: None, args: None,
+                            confidence: 0.0, reasoning: "llm_invalid_schema".to_string(),
                             wakeup_in_ms: None,
                         },
-                        last_latency_ms,
-                        at_cap,
-                    );
+                        latency_ms: last_latency_ms, at_cap,
+                        error_class: Some("invalid_schema".to_string()),
+                        json_schema_fell_back,
+                    };
                 }
             }
         }
 
         // Should not be reached
-        (
-            Decision {
-                kind: DecisionKind::NoOp,
-                tool: None,
-                args: None,
-                confidence: 0.0,
-                reasoning: "decide_path_exhausted".to_string(),
+        DecideOutcome {
+            decision: Decision {
+                kind: DecisionKind::NoOp, tool: None, args: None,
+                confidence: 0.0, reasoning: "decide_path_exhausted".to_string(),
                 wakeup_in_ms: None,
             },
-            last_latency_ms,
-            at_cap,
-        )
+            latency_ms: last_latency_ms, at_cap,
+            error_class: Some("path_exhausted".to_string()),
+            json_schema_fell_back,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1705,6 +1719,58 @@ mod tests {
             status, "active,pending",
             "M2 fix: decide() must pass status='active,pending' to goals.list"
         );
+    }
+
+    // --- DecideOutcome error-mapping tests ---
+    use axum::{routing::post, Router, response::IntoResponse};
+
+    async fn spawn_status_llm(status: axum::http::StatusCode, body: &'static str) -> String {
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || async move { (status, body).into_response() }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        format!("http://127.0.0.1:{}", addr.port())
+    }
+
+    #[tokio::test]
+    async fn decide_http_error_sets_class_and_latency() {
+        let card = fixture_card();
+        let mut decider = Decider::new_test(1001, card.clone(), "{tools_summary}");
+        // Seed the personality card so decide() reaches the LLM call.
+        decider.personality_cache.seed(1001, card).await.unwrap();
+        let base = spawn_status_llm(axum::http::StatusCode::BAD_REQUEST, "no").await;
+        decider.llm_client = std::sync::Arc::new(crate::llm_client::LlmClient {
+            base_url: base, model: "test".into(), timeout_s: 5.0,
+        });
+        decider.decision_schema = Some(serde_json::json!({"oneOf": []}));
+        let out = decider.decide(1001, &std::collections::HashMap::new(), Some("organic_wakeup")).await;
+        assert_eq!(out.decision.kind, DecisionKind::NoOp);
+        assert!(out.latency_ms.is_some(), "latency must be recorded even on error");
+        assert_eq!(out.error_class.as_deref(), Some("http_400"));
+        assert!(out.json_schema_fell_back);
+    }
+
+    #[tokio::test]
+    async fn decide_success_has_no_error_class() {
+        let card = fixture_card();
+        let mut decider = Decider::new_test(1001, card.clone(), "{tools_summary}");
+        // Seed the personality card so decide() reaches the LLM call.
+        decider.personality_cache.seed(1001, card).await.unwrap();
+        let base = spawn_status_llm(
+            axum::http::StatusCode::OK,
+            r#"{"choices":[{"message":{"content":"{\"kind\":\"no_op\",\"tool\":null,\"args\":null,\"confidence\":0.2,\"reasoning\":\"ok\"}"}}]}"#,
+        ).await;
+        decider.llm_client = std::sync::Arc::new(crate::llm_client::LlmClient {
+            base_url: base, model: "test".into(), timeout_s: 5.0,
+        });
+        let out = decider.decide(1001, &std::collections::HashMap::new(), None).await;
+        assert_eq!(out.decision.kind, DecisionKind::NoOp);
+        assert!(out.error_class.is_none());
+        assert!(!out.json_schema_fell_back);
+        assert!(out.latency_ms.is_some());
     }
 
     /// M2 behavior: a pending goal fed directly to assemble_prompt_test appears in the

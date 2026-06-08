@@ -683,10 +683,13 @@ impl LoopSupervisor {
         record["llm_called"] = Value::Bool(true);
         let triage_reason_str = triage.reason.clone();
 
-        let (decision, llm_latency_ms, at_cap) = self
+        let outcome = self
             .decider
             .decide(bot_guid, &hot_inputs, Some(&triage_reason_str))
             .await;
+        let decision = outcome.decision;
+        let llm_latency_ms = outcome.latency_ms;
+        let at_cap = outcome.at_cap;
 
         record["at_cap"] = Value::Bool(at_cap);
         record["decision_kind"] = serde_json::to_value(&decision.kind)
