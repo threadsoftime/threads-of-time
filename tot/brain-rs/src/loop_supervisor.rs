@@ -402,6 +402,8 @@ impl LoopSupervisor {
                         "confidence": null,
                         "dispatch_result": null,
                         "error": null,
+                        "llm_error_class": null,
+                        "json_schema_fell_back": false,
                     }));
                 }
                 Ok(_guard) => {

@@ -434,13 +434,33 @@ async fn test_tick_skipped_busy_drops_when_lock_held() {
     sup.stop(3001).await;
 
     let recs = records.lock().unwrap();
-    let skipped = recs.iter().any(|r| {
+    let skipped_rec = recs.iter().find(|r| {
         r.get("triage_reason")
             .and_then(|v| v.as_str())
             .map(|s| s == "tick_skipped_busy")
             .unwrap_or(false)
     });
-    assert!(skipped, "tick_skipped_busy record should be emitted when lock is held");
+    assert!(skipped_rec.is_some(), "tick_skipped_busy record should be emitted when lock is held");
+
+    // Verify the busy-skip record is schema-uniform: brain_sha stamped centrally,
+    // plus the two observability fields added to keep parity with the main record.
+    let rec = skipped_rec.unwrap();
+    let brain_sha = rec.get("brain_sha").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        !brain_sha.is_empty(),
+        "busy-skip record must carry a non-empty brain_sha (stamped by _log); got: {:?}",
+        rec.get("brain_sha")
+    );
+    assert_eq!(
+        rec.get("llm_error_class"),
+        Some(&serde_json::Value::Null),
+        "busy-skip record must have llm_error_class: null"
+    );
+    assert_eq!(
+        rec.get("json_schema_fell_back"),
+        Some(&serde_json::Value::Bool(false)),
+        "busy-skip record must have json_schema_fell_back: false"
+    );
 }
 
 // ---------------------------------------------------------------------------
