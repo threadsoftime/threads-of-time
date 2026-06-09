@@ -112,6 +112,12 @@ pub const _MAX_REASONING_CHARS: usize = 100;
 /// Hard cap on the number of memory items included in the prompt.
 /// Limits the variable suffix length so changed-suffix ticks stay within timeout.
 pub const MAX_MEMORY_ITEMS: usize = 3;
+/// Hard cap on goal items rendered in the prompt (active first, then pending).
+pub const MAX_GOAL_ITEMS: usize = 6;
+/// Maximum characters for a single goal's text field in the rendered prompt.
+pub const MAX_GOAL_TEXT_CHARS: usize = 160;
+/// Pending goals older than this (in seconds) are eligible for abandonment.
+pub const GOAL_PENDING_TTL_S: i64 = 3600;
 
 // ---------------------------------------------------------------------------
 // Regex: extract sender from whisper memory content written by T3 chat brain.
@@ -466,7 +472,7 @@ impl Decider {
                     // (status IN (...)). Intentional Rust-side divergence from the Python
                     // brain; the fetched-goals change is upstream of assemble_prompt, so
                     // the prompt-assembly goldens are unaffected.
-                    serde_json::json!({"bot_id": bot_guid.to_string(), "status": "active,pending"}),
+                    serde_json::json!({"bot_id": bot_guid.to_string(), "status": "active,pending", "limit": 12}),
                 )
                 .await
             {
@@ -484,6 +490,58 @@ impl Decider {
                 Err(_) => vec![],
             }
         };
+
+        // 1c: fire-and-forget age-prune — mark stale pending goals as "abandoned".
+        // created_ts is Unix SECONDS (confirmed in triage.rs:166 comment + memory-rs schema).
+        // We compare against now_s = current Unix seconds to compute age correctly.
+        // Must never touch active goals; must not add latency (spawned/detached).
+        {
+            let now_s = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let stale_ids: Vec<String> = goals
+                .iter()
+                .filter(|g| {
+                    // Only pending goals (never active or other statuses)
+                    g.get("status").and_then(|v| v.as_str()) == Some("pending")
+                        && g.get("created_ts")
+                            .and_then(|v| v.as_i64())
+                            .map(|ts| {
+                                // created_ts is seconds; detect if mistakenly stored as ms
+                                // (epoch seconds are ~1.7e9 in 2024; epoch ms are ~1.7e12).
+                                // If value > 1e11, treat as milliseconds and convert.
+                                let ts_s = if ts > 100_000_000_000 { ts / 1000 } else { ts };
+                                now_s - ts_s > GOAL_PENDING_TTL_S
+                            })
+                            .unwrap_or(false)
+                })
+                .filter_map(|g| g.get("id").and_then(|v| v.as_str()).map(str::to_string))
+                .collect();
+            if !stale_ids.is_empty() {
+                let memory_mcp = self.memory_mcp.clone();
+                let bot_id_str = bot_guid.to_string();
+                tokio::spawn(async move {
+                    for goal_id in stale_ids {
+                        let result = memory_mcp
+                            .call(
+                                "goals.update",
+                                serde_json::json!({
+                                    "bot_id": bot_id_str,
+                                    "goal_id": goal_id,
+                                    "status": "abandoned"
+                                }),
+                            )
+                            .await;
+                        if let Err(e) = result {
+                            tracing::warn!(
+                                "goals age-prune: failed to abandon goal {goal_id} bot={bot_id_str}: {e}"
+                            );
+                        }
+                    }
+                });
+            }
+        }
 
         // recent memories
         let memories = self.gather_memories(bot_guid, hot_inputs).await;
@@ -739,7 +797,7 @@ impl Decider {
             &self.prompt_template,
             &[
                 ("state_json",    &python_json(&slimmed_state)),
-                ("goals_json",    &python_json(goals)),
+                ("goals_json",    &python_json(&truncate_goal_items(&cap_goals(goals)))),
                 ("memories_json", &python_json(&truncated_memories)),
                 ("recent_decisions_json", &python_json(&truncated_decisions)),
                 ("hot_inputs_json", &python_json(&projected_hot_inputs)),
@@ -1234,6 +1292,56 @@ fn cap_memories(items: Vec<serde_json::Value>, max: usize) -> Vec<serde_json::Va
     } else {
         items.into_iter().take(max).collect()
     }
+}
+
+/// Cap goal items to at most `MAX_GOAL_ITEMS` entries.
+///
+/// Stable partition: all goals whose `status == "active"` are moved to the
+/// front (preserving their relative input order), followed by all other goals
+/// (pending / completed / etc., preserving their relative input order).
+/// Then `.take(MAX_GOAL_ITEMS)` is applied.
+///
+/// This ensures active goals are NEVER dropped from the render window even
+/// when there are many pending goals, and keeps the rendered `goals_json`
+/// bounded regardless of how many self-authored pending goals accumulate.
+pub fn cap_goals(goals: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let active: Vec<serde_json::Value> = goals
+        .iter()
+        .filter(|g| g.get("status").and_then(|v| v.as_str()) == Some("active"))
+        .cloned()
+        .collect();
+    let others: Vec<serde_json::Value> = goals
+        .iter()
+        .filter(|g| g.get("status").and_then(|v| v.as_str()) != Some("active"))
+        .cloned()
+        .collect();
+    active.into_iter().chain(others).take(MAX_GOAL_ITEMS).collect()
+}
+
+/// Clip the `text` field of each goal item to at most `MAX_GOAL_TEXT_CHARS`
+/// characters, appending an ellipsis (U+2026) when clipped.
+///
+/// Mirrors `truncate_memory_items` but operates on the `text` field only
+/// (goals have no `content` alias).
+pub fn truncate_goal_items(items: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    items
+        .iter()
+        .map(|item| {
+            let mut clipped = item.clone();
+            if let serde_json::Value::Object(ref mut map) = clipped {
+                if let Some(serde_json::Value::String(ref s)) = map.get("text").cloned() {
+                    if s.chars().count() > MAX_GOAL_TEXT_CHARS {
+                        let truncated = truncate_str(s, MAX_GOAL_TEXT_CHARS);
+                        map.insert(
+                            "text".to_string(),
+                            serde_json::Value::String(format!("{truncated}\u{2026}")),
+                        );
+                    }
+                }
+            }
+            clipped
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -2130,6 +2238,80 @@ mod tests {
         assert!(
             projected["social"]["nearby_humans"].as_array().unwrap().len() == 1,
             "nearby_humans must be preserved"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Slice 1: goals cap + text clip tests (added before implementation — MUST FAIL first)
+    // -----------------------------------------------------------------------
+
+    /// cap_goals: active goals always come before pending; total capped at MAX_GOAL_ITEMS;
+    /// active goal is never dropped even when 50 pending goals are present.
+    #[test]
+    fn cap_goals_keeps_active_first_and_caps() {
+        // 50 pending goals with varied priorities
+        let mut goals: Vec<serde_json::Value> = (0..50)
+            .map(|i| serde_json::json!({
+                "id": format!("p{i}"),
+                "bot_id": "1001",
+                "text": format!("pending goal number {i}"),
+                "status": "pending",
+                "source": "self",
+                "priority": (i % 5) as f64 * 0.2,
+                "origin_memory": null,
+                "created_ts": 1700000000_i64,
+                "updated_ts": 1700000000_i64,
+                "completed_ts": null
+            }))
+            .collect();
+        // Insert one active goal at a known position
+        goals.push(serde_json::json!({
+            "id": "a1",
+            "bot_id": "1001",
+            "text": "active goal: reach level 20",
+            "status": "active",
+            "source": "self",
+            "priority": 0.5,
+            "origin_memory": null,
+            "created_ts": 1700000000_i64,
+            "updated_ts": 1700000000_i64,
+            "completed_ts": null
+        }));
+
+        let capped = cap_goals(&goals);
+
+        // Must be at most MAX_GOAL_ITEMS long
+        assert_eq!(capped.len(), MAX_GOAL_ITEMS, "cap_goals must limit output to MAX_GOAL_ITEMS");
+
+        // Active goal must appear in output
+        let has_active = capped.iter().any(|g| g["status"].as_str() == Some("active"));
+        assert!(has_active, "active goal must be present in capped output");
+
+        // Active goal must appear BEFORE any pending goal
+        let first_pending_pos = capped.iter().position(|g| g["status"].as_str() == Some("pending"));
+        let active_pos = capped.iter().position(|g| g["status"].as_str() == Some("active"));
+        if let (Some(ap), Some(pp)) = (active_pos, first_pending_pos) {
+            assert!(ap < pp, "active goal must appear before any pending goal in capped output");
+        }
+    }
+
+    /// truncate_goal_items: a goal with text > MAX_GOAL_TEXT_CHARS chars is clipped to
+    /// MAX_GOAL_TEXT_CHARS + ellipsis (mirrors test_truncate_memory_items_clips_text).
+    #[test]
+    fn truncate_goal_items_clips_text() {
+        let long_text = "g".repeat(400);
+        let goals = vec![serde_json::json!({
+            "id": "g1",
+            "status": "active",
+            "text": long_text
+        })];
+        let truncated = truncate_goal_items(&goals);
+        let t = truncated[0]["text"].as_str().unwrap();
+        assert!(t.ends_with('\u{2026}'), "truncated goal text must end with ellipsis");
+        assert_eq!(
+            t.chars().count(),
+            MAX_GOAL_TEXT_CHARS + 1,
+            "truncated goal text must be MAX_GOAL_TEXT_CHARS chars + 1 ellipsis char"
         );
     }
 
