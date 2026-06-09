@@ -276,6 +276,7 @@ fn make_supervisor_with_llm(
         max_retries: 1,
         known_tools,
         max_player_level: 25,
+        decide_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(1024)),
     });
 
     let empty_reg = std::sync::Arc::new(

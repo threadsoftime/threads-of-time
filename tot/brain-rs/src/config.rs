@@ -29,6 +29,7 @@
 //! | `TOT_SUBSET_HYSTERESIS_IN_TICKS`  | `1`                                        | `subset_hysteresis_in_ticks`   |
 //! | `TOT_SUBSET_ENROLL_BACKOFF_S`   | `300.0`                                      | `subset_enroll_backoff_s`      |
 //! | `TOT_REDUCED_TICK_INTERVAL_S`   | `300.0`                                      | `reduced_tick_interval_s`      |
+//! | `BRAIN_DECIDE_MAX_CONCURRENT`   | `5`                                           | `decide_max_concurrent`        |
 
 // ---------------------------------------------------------------------------
 // Settings struct
@@ -70,6 +71,10 @@ pub struct Settings {
     pub subset_hysteresis_in_ticks: u32,
     pub subset_enroll_backoff_s: f64,
     pub reduced_tick_interval_s: f64,
+    /// Maximum number of concurrent LLM decide calls allowed fleet-wide (across all bots
+    /// sharing this `Decider`). Bounds the GPU-serialize burst when 16-18 bots cold-start
+    /// simultaneously. Env: `BRAIN_DECIDE_MAX_CONCURRENT`. Default: 5.
+    pub decide_max_concurrent: usize,
     /// M1 exec embed: bot guid that gets an in-process exec loop + goal emission.
     /// Env: `EXEC_BOT_GUID` (integer). Absent / invalid → `None` (pure parity mode).
     pub exec_bot_guid: Option<i64>,
@@ -224,6 +229,7 @@ impl Settings {
             subset_hysteresis_in_ticks:     get_u32("TOT_SUBSET_HYSTERESIS_IN_TICKS", 1),
             subset_enroll_backoff_s:        get_f64("TOT_SUBSET_ENROLL_BACKOFF_S", 300.0),
             reduced_tick_interval_s:        get_f64("TOT_REDUCED_TICK_INTERVAL_S", 300.0),
+            decide_max_concurrent:          get_usize("BRAIN_DECIDE_MAX_CONCURRENT", 5),
             exec_bot_guid:                  get_opt_i64("EXEC_BOT_GUID"),
             exec_roster_entries:            get_roster("EXEC_BOT_GUIDS"),
             exec_default_profile:           get_str("EXEC_DEFAULT_PROFILE", "elwynn_fargodeep"),
@@ -279,6 +285,7 @@ mod tests {
         assert_eq!(s.subset_hysteresis_in_ticks, 1);
         assert_eq!(s.subset_enroll_backoff_s, 300.0);
         assert_eq!(s.reduced_tick_interval_s, 300.0);
+        assert_eq!(s.decide_max_concurrent, 5);
     }
 
     // ---------------------------------------------------------------------------
@@ -430,6 +437,18 @@ mod tests {
     fn roster_skips_unparseable_guid() {
         let s = Settings::build(getter(HashMap::from([("EXEC_BOT_GUIDS", "1173:elwynn_fargodeep,nope:x")])));
         assert_eq!(s.exec_roster(), vec![1173u64]);
+    }
+
+    #[test]
+    fn test_decide_max_concurrent_default_is_5() {
+        let s = Settings::build(getter(empty()));
+        assert_eq!(s.decide_max_concurrent, 5, "default BRAIN_DECIDE_MAX_CONCURRENT must be 5");
+    }
+
+    #[test]
+    fn test_decide_max_concurrent_override() {
+        let s = Settings::build(getter(HashMap::from([("BRAIN_DECIDE_MAX_CONCURRENT", "12")])));
+        assert_eq!(s.decide_max_concurrent, 12);
     }
 
     #[test]

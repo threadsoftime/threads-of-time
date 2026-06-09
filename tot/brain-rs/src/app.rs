@@ -530,6 +530,7 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
         prompt_template,
         system_template,
         settings.max_player_level,
+        settings.decide_max_concurrent,
     );
     decider.decision_schema = Some(decision_schema);
     decider.tools_summary = Some(tools_summary);

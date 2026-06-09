@@ -259,6 +259,13 @@ pub struct Decider {
     pub max_retries: u32,
     pub known_tools: HashSet<String>,
     pub max_player_level: u32,
+    /// Shared semaphore that limits the number of concurrent LLM calls across all
+    /// bots sharing this `Decider`. Acquired AFTER context gathering (goals/memories)
+    /// and held across the full retry loop, so only the prefill/GPU-bound call is
+    /// rate-limited — cheap context fetch never holds a scarce permit.
+    ///
+    /// Configured by `BRAIN_DECIDE_MAX_CONCURRENT` (default 5).
+    pub decide_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl Decider {
@@ -271,6 +278,7 @@ impl Decider {
         prompt_template: String,
         system_template: String,
         max_player_level: u32,
+        decide_max_concurrent: usize,
     ) -> Self {
         let known_tools: HashSet<String> =
             KNOWN_TOOLS.iter().map(|s| s.to_string()).collect();
@@ -286,6 +294,7 @@ impl Decider {
             max_retries: 1,
             known_tools,
             max_player_level,
+            decide_semaphore: Arc::new(tokio::sync::Semaphore::new(decide_max_concurrent)),
         }
     }
 
@@ -359,6 +368,8 @@ impl Decider {
             max_retries: 1,
             known_tools,
             max_player_level,
+            // Large pool: test helpers never serialize/block on the semaphore.
+            decide_semaphore: Arc::new(tokio::sync::Semaphore::new(1024)),
         }
     }
 
@@ -559,6 +570,19 @@ impl Decider {
 
         // V3.7.1: organic-wakeup ticks get higher temperature for action variety.
         let temperature = if triage_reason == Some("organic_wakeup") { 0.7 } else { 0.5 };
+
+        // Acquire the shared semaphore permit AFTER context gathering (goals/memories)
+        // and BEFORE the LLM retry loop so only the GPU-bound prefill is rate-limited.
+        // OwnedSemaphorePermit is RAII: dropped automatically on early return/abort.
+        // acquire_owned() errors only if the semaphore is closed (which we never do);
+        // on that rare error we log and proceed without the permit rather than fail.
+        let _permit = match self.decide_semaphore.clone().acquire_owned().await {
+            Ok(permit) => Some(permit),
+            Err(e) => {
+                tracing::warn!("decide: semaphore acquire failed (semaphore closed?): {e}; proceeding without permit");
+                None
+            }
+        };
 
         // Call LLM with one retry on parse failure
         let system = prompt.system;
@@ -2045,6 +2069,7 @@ mod tests {
             max_retries: 1,
             known_tools,
             max_player_level: 25,
+            decide_semaphore: Arc::new(tokio::sync::Semaphore::new(1024)),
         }
     }
 
@@ -2345,5 +2370,198 @@ mod tests {
             "pending goal description must appear in assembled user prompt; got: {}",
             &prompt.user[..200.min(prompt.user.len())]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Slice 2: decide_semaphore — burst-limiter tests (TDD: must fail first)
+    // -----------------------------------------------------------------------
+
+    /// decide_bounds_concurrency: with N=2, spawn N+K concurrent decide() calls against
+    /// a mock LLM that sleeps briefly and counts concurrent in-flight requests via an
+    /// AtomicUsize; assert the max observed concurrent count never exceeds N.
+    #[tokio::test]
+    async fn decide_bounds_concurrency() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use axum::{routing::post, Router, response::IntoResponse};
+
+        let max_concurrent = Arc::new(AtomicUsize::new(0));
+        let current_concurrent = Arc::new(AtomicUsize::new(0));
+
+        let max_concurrent_clone = max_concurrent.clone();
+        let current_concurrent_clone = current_concurrent.clone();
+
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let max_c = max_concurrent_clone.clone();
+                let cur_c = current_concurrent_clone.clone();
+                async move {
+                    let cur = cur_c.fetch_add(1, Ordering::SeqCst) + 1;
+                    // Track peak
+                    let mut observed_max = max_c.load(Ordering::SeqCst);
+                    while cur > observed_max {
+                        match max_c.compare_exchange(
+                            observed_max,
+                            cur,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        ) {
+                            Ok(_) => break,
+                            Err(actual) => observed_max = actual,
+                        }
+                    }
+                    // Brief sleep so overlapping calls accumulate
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                    cur_c.fetch_sub(1, Ordering::SeqCst);
+                    (
+                        axum::http::StatusCode::OK,
+                        r#"{"choices":[{"message":{"content":"{\"kind\":\"no_op\",\"tool\":null,\"args\":null,\"confidence\":0.2,\"reasoning\":\"ok\"}"}}]}"#,
+                    ).into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let base_url = format!("http://127.0.0.1:{}", addr.port());
+
+        const N: usize = 2;
+        const K: usize = 4; // total = N + K = 6 concurrent callers
+
+        // Build a Decider with semaphore(N=2) to assert bounding
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(N));
+        let card = fixture_card();
+        let decider = {
+            use std::num::NonZeroUsize;
+            let mcp: Arc<dyn McpCallable + Send + Sync> = Arc::new(NullMcp);
+            let cache = Arc::new(crate::personality::PersonalityCache::new_with_options(
+                mcp.clone(),
+                300.0,
+                NonZeroUsize::new(8).unwrap().get(),
+                Arc::new(|| 0.0),
+                None,
+            ));
+            cache.seed(1001, card.clone()).await.unwrap();
+            let state_store = Arc::new(
+                crate::state::StateStore::open(":memory:").expect("in-memory state store"),
+            );
+            state_store.migrate().unwrap();
+            let known_tools: HashSet<String> =
+                KNOWN_TOOLS.iter().map(|s| s.to_string()).collect();
+            Arc::new(Decider {
+                llm_client: Arc::new(LlmClient {
+                    base_url: base_url.clone(),
+                    model: "test".to_string(),
+                    timeout_s: 10.0,
+                }),
+                personality_cache: cache,
+                memory_mcp: mcp,
+                state_store,
+                prompt_template: "t".to_string(),
+                system_template: include_str!("../prompts/decide_system_v2.txt").to_string(),
+                decision_schema: None,
+                tools_summary: None,
+                max_retries: 0,
+                known_tools,
+                max_player_level: 25,
+                decide_semaphore: semaphore,
+            })
+        };
+
+        let mut handles = Vec::new();
+        for _ in 0..(N + K) {
+            let d = decider.clone();
+            handles.push(tokio::spawn(async move {
+                d.decide(1001, &std::collections::HashMap::new(), None).await
+            }));
+        }
+        for h in handles {
+            let _ = h.await;
+        }
+
+        let peak = max_concurrent.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            peak <= N,
+            "observed max concurrent LLM calls ({peak}) must be <= N ({N})"
+        );
+    }
+
+    /// decide_semaphore_released_on_error: with N=1 and a mock LLM that returns 400,
+    /// two sequential-via-spawn decide() calls must both complete (no deadlock from
+    /// a leaked permit on the error path).
+    #[tokio::test]
+    async fn decide_semaphore_released_on_error() {
+        use axum::{routing::post, Router, response::IntoResponse};
+
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                (axum::http::StatusCode::BAD_REQUEST, "bad request").into_response()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let base_url = format!("http://127.0.0.1:{}", addr.port());
+
+        const N: usize = 1;
+
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(N));
+        let card = fixture_card();
+        let decider = {
+            use std::num::NonZeroUsize;
+            let mcp: Arc<dyn McpCallable + Send + Sync> = Arc::new(NullMcp);
+            let cache = Arc::new(crate::personality::PersonalityCache::new_with_options(
+                mcp.clone(),
+                300.0,
+                NonZeroUsize::new(8).unwrap().get(),
+                Arc::new(|| 0.0),
+                None,
+            ));
+            cache.seed(1001, card.clone()).await.unwrap();
+            let state_store = Arc::new(
+                crate::state::StateStore::open(":memory:").expect("in-memory state store"),
+            );
+            state_store.migrate().unwrap();
+            let known_tools: HashSet<String> =
+                KNOWN_TOOLS.iter().map(|s| s.to_string()).collect();
+            Arc::new(Decider {
+                llm_client: Arc::new(LlmClient {
+                    base_url: base_url.clone(),
+                    model: "test".to_string(),
+                    timeout_s: 5.0,
+                }),
+                personality_cache: cache,
+                memory_mcp: mcp,
+                state_store,
+                prompt_template: "t".to_string(),
+                system_template: include_str!("../prompts/decide_system_v2.txt").to_string(),
+                decision_schema: None,
+                tools_summary: None,
+                max_retries: 0,
+                known_tools,
+                max_player_level: 25,
+                decide_semaphore: semaphore,
+            })
+        };
+
+        // First call — will fail at LLM (400) but must release the permit
+        let out1 = decider.decide(1001, &std::collections::HashMap::new(), None).await;
+        assert!(out1.error_class.is_some(), "first call must fail");
+
+        // Second call — must not deadlock; if permit leaked, this would hang forever
+        // Wrap in a timeout to detect hangs
+        let d = decider.clone();
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_secs(5),
+            d.decide(1001, &std::collections::HashMap::new(), None),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "second call timed out — permit was not released after error (deadlock!)"
+        );
+        let out2 = result.unwrap();
+        assert!(out2.error_class.is_some(), "second call should also fail (mock LLM returns 400)");
     }
 }
