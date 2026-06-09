@@ -16,6 +16,7 @@ pub mod models;
 pub mod morph;
 pub mod personality;
 pub mod profile;
+pub mod recovery;
 pub mod salience;
 pub mod schema_builder;
 pub mod sse_consumer;

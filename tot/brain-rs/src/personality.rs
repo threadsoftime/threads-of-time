@@ -55,6 +55,30 @@ pub trait MorphCallable: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// PersonalityRecovery — injectable self-heal hook.
+//
+// Invoked by `get()` when the stored persona is unusable (empty / blank / null /
+// missing / unparseable / parseable-but-invalid). Implementations decide the
+// identity source and MUST return a fully-valid, morphed PersonalityCard
+// reflecting the bot's real in-game identity where possible. `get()` then
+// persists the returned card so the bot heals permanently (no per-tick spam).
+//
+// Production wires a LiveRecovery (state_store seed → obs.get_state identity →
+// degraded generic, then morph). Tests inject a mock. None in a minimal cache
+// preserves the old fail-loud behavior.
+// ---------------------------------------------------------------------------
+
+/// Async trait for the self-heal step. Allows tests to inject a fake recovery.
+pub trait PersonalityRecovery: Send + Sync {
+    fn recover<'a>(
+        &'a self,
+        bot_guid: i64,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<PersonalityCard, anyhow::Error>> + Send + 'a>,
+    >;
+}
+
+// ---------------------------------------------------------------------------
 // V2 field names — mirrors morph.py _V2_FIELD_NAMES
 // ---------------------------------------------------------------------------
 
@@ -89,6 +113,10 @@ pub struct PersonalityCache {
     now_fn: Arc<dyn Fn() -> f64 + Send + Sync>,
     /// Optional v2 morph hook. None in production until Phase 9 wiring.
     morph: Option<Arc<dyn MorphCallable + Send + Sync>>,
+    /// Optional self-heal hook. When set, `get()` recovers (instead of erroring)
+    /// from an unusable persona, then persists the recovered card. When None,
+    /// `get()` preserves the old fail-loud behavior on an unusable persona.
+    recovery: Option<Arc<dyn PersonalityRecovery + Send + Sync>>,
 }
 
 impl PersonalityCache {
@@ -112,7 +140,18 @@ impl PersonalityCache {
                     .unwrap_or(0.0)
             }),
             morph: None,
+            recovery: None,
         }
+    }
+
+    /// Builder: attach a self-heal hook. Returns `self` for chaining at the
+    /// construction site (app.rs wires the production LiveRecovery here).
+    pub fn with_recovery(
+        mut self,
+        recovery: Arc<dyn PersonalityRecovery + Send + Sync>,
+    ) -> Self {
+        self.recovery = Some(recovery);
+        self
     }
 
     /// Full constructor — injectable clock + morph hook (used in tests).
@@ -131,6 +170,7 @@ impl PersonalityCache {
             bot_locks: Mutex::new(HashMap::new()),
             now_fn,
             morph,
+            recovery: None,
         }
     }
 
@@ -184,12 +224,72 @@ impl PersonalityCache {
             )
             .await?;
         let payload = raw.get("result").unwrap_or(&raw);
-        let persona_json = payload
+
+        // Decide whether the stored persona is USABLE. Treat all of these as
+        // "not usable" → self-heal (or fail-loud if no recovery is wired):
+        //   - key missing or JSON null            → as_str() == None
+        //   - empty / whitespace-only string      → trim().is_empty()
+        //   - unparseable JSON                     → from_str(..).is_err()
+        //   - parseable but not a valid card       → from_str(..).is_err()
+        //     (e.g. "{}" — PersonalityCard has required identity fields)
+        let usable_card: Option<PersonalityCard> = payload
             .get("persona")
             .and_then(|v| v.as_str())
-            .unwrap_or("{}");
-        let mut card: PersonalityCard = serde_json::from_str(persona_json)
-            .map_err(|e| anyhow::anyhow!("personality JSON parse error: {e}"))?;
+            .filter(|s| !s.trim().is_empty())
+            .and_then(|s| serde_json::from_str::<PersonalityCard>(s).ok());
+
+        let mut card: PersonalityCard = match usable_card {
+            Some(c) => c,
+            None => {
+                // Stored persona is unusable. Self-heal if a recovery hook is
+                // wired; else preserve the old fail-loud behavior so nothing
+                // silently degrades where recovery is not configured.
+                match &self.recovery {
+                    Some(recovery) => {
+                        tracing::warn!(
+                            "PersonalityCache.get bot_guid={bot_guid}: stored persona \
+                             unusable (empty/blank/null/unparseable); recovering."
+                        );
+                        let recovered = recovery.recover(bot_guid).await.map_err(|e| {
+                            anyhow::anyhow!("personality recovery failed: {e}")
+                        })?;
+                        // Persist the recovered card so the bot heals
+                        // permanently (no per-tick spam). Soft-fail on persist
+                        // error — matches the migration-persist soft-fail below.
+                        let persona_str = serde_json::to_string(&recovered)
+                            .unwrap_or_else(|_| "{}".to_string());
+                        if let Err(e) = self
+                            .mcp
+                            .call(
+                                "memory.personality_set",
+                                serde_json::json!({
+                                    "bot_id": bot_guid.to_string(),
+                                    "persona": persona_str,
+                                }),
+                            )
+                            .await
+                        {
+                            tracing::error!(
+                                "PersonalityCache.get bot_guid={bot_guid}: recovery \
+                                 persist failed: {e}. Cache populated; will retry on eviction."
+                            );
+                        }
+                        // Recovery returns a fully-morphed card; cache + return
+                        // directly (skip the v2 morph-migration branch below).
+                        let fetched_at = (self.now_fn)();
+                        let mut inner = self.inner.lock().await;
+                        inner.cache.put(bot_guid, (recovered.clone(), fetched_at));
+                        return Ok(recovered);
+                    }
+                    None => {
+                        return Err(anyhow::anyhow!(
+                            "personality unusable for bot_guid={bot_guid} and no \
+                             recovery hook configured"
+                        ));
+                    }
+                }
+            }
+        };
 
         // V3.6 lazy migration: if any v2 field is None, run morph + persist back.
         if needs_morph(&card) {
@@ -350,6 +450,96 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let mock = Arc::new(MockMcp { call_count: counter.clone(), card });
         (mock, counter)
+    }
+
+    // ----- Scripted MCP: returns a fixed persona payload for personality_get,
+    // counts personality_set calls separately. Lets recovery tests simulate
+    // empty/blank/null/malformed personas and assert the persist-back happens. --
+
+    struct ScriptedMcp {
+        /// Raw JSON returned for memory.personality_get (the `result`-less form).
+        get_response: serde_json::Value,
+        get_count: Arc<AtomicUsize>,
+        set_count: Arc<AtomicUsize>,
+        /// Captures the persona string passed to the most recent personality_set.
+        last_set_persona: std::sync::Mutex<Option<String>>,
+    }
+
+    impl McpCallable for ScriptedMcp {
+        fn call<'a>(
+            &'a self,
+            tool: &'a str,
+            args: serde_json::Value,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<serde_json::Value, anyhow::Error>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                if tool == "memory.personality_set" {
+                    self.set_count.fetch_add(1, Ordering::SeqCst);
+                    if let Some(p) = args.get("persona").and_then(|v| v.as_str()) {
+                        *self.last_set_persona.lock().unwrap() = Some(p.to_string());
+                    }
+                    Ok(serde_json::json!({"ok": true}))
+                } else {
+                    // personality_get (and any other read)
+                    self.get_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(self.get_response.clone())
+                }
+            })
+        }
+    }
+
+    fn make_scripted_mcp(
+        get_response: serde_json::Value,
+    ) -> (Arc<ScriptedMcp>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let get_count = Arc::new(AtomicUsize::new(0));
+        let set_count = Arc::new(AtomicUsize::new(0));
+        let mock = Arc::new(ScriptedMcp {
+            get_response,
+            get_count: get_count.clone(),
+            set_count: set_count.clone(),
+            last_set_persona: std::sync::Mutex::new(None),
+        });
+        (mock, get_count, set_count)
+    }
+
+    // ----- Mock recovery hook -----
+
+    struct MockRecovery {
+        call_count: Arc<AtomicUsize>,
+        card: PersonalityCard,
+    }
+
+    impl PersonalityRecovery for MockRecovery {
+        fn recover<'a>(
+            &'a self,
+            _bot_guid: i64,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<PersonalityCard, anyhow::Error>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+                Ok(self.card.clone())
+            })
+        }
+    }
+
+    fn make_mock_recovery(
+        card: PersonalityCard,
+    ) -> (Arc<dyn PersonalityRecovery + Send + Sync>, Arc<AtomicUsize>) {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let rec: Arc<dyn PersonalityRecovery + Send + Sync> =
+            Arc::new(MockRecovery { call_count: counter.clone(), card });
+        (rec, counter)
     }
 
     // ----- Mock morph hook -----
@@ -546,5 +736,143 @@ mod tests {
         let got = cache.get(55).await.unwrap();
         assert_eq!(got.name, "Eve");
         assert_eq!(counter.load(Ordering::SeqCst), 1, "get after seed must be a cache hit");
+    }
+
+    // ----- Self-heal recovery tests (empty / blank / null / malformed) -----
+
+    /// Build a cache wired with a scripted MCP + a recovery hook.
+    fn cache_with_recovery(
+        mcp: Arc<ScriptedMcp>,
+        recovery: Arc<dyn PersonalityRecovery + Send + Sync>,
+    ) -> PersonalityCache {
+        PersonalityCache::new_with_options(
+            mcp,
+            300.0,
+            10,
+            frozen_clock(1000.0),
+            None, // no v2 morph hook here; recovery returns a complete card
+        )
+        .with_recovery(recovery)
+    }
+
+    #[tokio::test]
+    async fn test_empty_string_persona_triggers_recovery_and_persists() {
+        // personality_get returns {"persona": ""} (bot 1083's live data shape).
+        let (mcp, _get_c, set_c) = make_scripted_mcp(serde_json::json!({"persona": ""}));
+        let (recovery, rec_c) = make_mock_recovery(make_card("Morenette"));
+        let cache = cache_with_recovery(mcp, recovery);
+
+        let card = cache
+            .get(1083)
+            .await
+            .expect("empty persona must recover, NOT error");
+        assert_eq!(card.name, "Morenette", "recovered identity preserved");
+
+        assert_eq!(rec_c.load(Ordering::SeqCst), 1, "recovery called exactly once");
+        assert_eq!(set_c.load(Ordering::SeqCst), 1, "recovered card persisted via personality_set");
+
+        // Second get must be a cache hit — NO second recovery, NO spam.
+        let card2 = cache.get(1083).await.expect("cache hit");
+        assert_eq!(card2.name, "Morenette");
+        assert_eq!(rec_c.load(Ordering::SeqCst), 1, "no re-recovery on cache hit (no spam)");
+    }
+
+    #[tokio::test]
+    async fn test_blank_whitespace_persona_triggers_recovery() {
+        let (mcp, _g, set_c) = make_scripted_mcp(serde_json::json!({"persona": "   \n\t "}));
+        let (recovery, rec_c) = make_mock_recovery(make_card("Whitey"));
+        let cache = cache_with_recovery(mcp, recovery);
+
+        let card = cache.get(7).await.expect("blank persona must recover");
+        assert_eq!(card.name, "Whitey");
+        assert_eq!(rec_c.load(Ordering::SeqCst), 1);
+        assert_eq!(set_c.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_null_persona_triggers_recovery() {
+        // memory.personality_get returns {"persona": null} for a missing/NULL row.
+        let (mcp, _g, set_c) = make_scripted_mcp(serde_json::json!({"persona": null}));
+        let (recovery, rec_c) = make_mock_recovery(make_card("Nullsy"));
+        let cache = cache_with_recovery(mcp, recovery);
+
+        let card = cache.get(8).await.expect("null persona must recover");
+        assert_eq!(card.name, "Nullsy");
+        assert_eq!(rec_c.load(Ordering::SeqCst), 1);
+        assert_eq!(set_c.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_missing_persona_key_triggers_recovery() {
+        // Payload entirely missing the persona key.
+        let (mcp, _g, _s) = make_scripted_mcp(serde_json::json!({"ok": true}));
+        let (recovery, rec_c) = make_mock_recovery(make_card("Missy"));
+        let cache = cache_with_recovery(mcp, recovery);
+
+        let card = cache.get(9).await.expect("missing persona key must recover");
+        assert_eq!(card.name, "Missy");
+        assert_eq!(rec_c.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_malformed_json_persona_triggers_recovery() {
+        let (mcp, _g, set_c) =
+            make_scripted_mcp(serde_json::json!({"persona": "{not valid json"}));
+        let (recovery, rec_c) = make_mock_recovery(make_card("Fixxy"));
+        let cache = cache_with_recovery(mcp, recovery);
+
+        let card = cache.get(10).await.expect("malformed persona must recover");
+        assert_eq!(card.name, "Fixxy");
+        assert_eq!(rec_c.load(Ordering::SeqCst), 1);
+        assert_eq!(set_c.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_empty_object_persona_triggers_recovery() {
+        // "{}" parses as JSON but fails PersonalityCard (missing required fields) —
+        // must be treated as "not usable" → recover, not error.
+        let (mcp, _g, _s) = make_scripted_mcp(serde_json::json!({"persona": "{}"}));
+        let (recovery, rec_c) = make_mock_recovery(make_card("Empty"));
+        let cache = cache_with_recovery(mcp, recovery);
+
+        let card = cache.get(11).await.expect("'{}' persona must recover");
+        assert_eq!(card.name, "Empty");
+        assert_eq!(rec_c.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_valid_persona_does_not_trigger_recovery() {
+        // A complete v2 card → existing path; recovery must NOT be called.
+        let valid = make_card("Healthy");
+        let persona_str = serde_json::to_string(&valid).unwrap();
+        let (mcp, _g, set_c) =
+            make_scripted_mcp(serde_json::json!({"persona": persona_str}));
+        let (recovery, rec_c) = make_mock_recovery(make_card("ShouldNotAppear"));
+        let cache = cache_with_recovery(mcp, recovery);
+
+        let card = cache.get(12).await.expect("valid persona loads");
+        assert_eq!(card.name, "Healthy", "stored persona used, not recovery");
+        assert_eq!(rec_c.load(Ordering::SeqCst), 0, "recovery must NOT run for a valid persona");
+        assert_eq!(set_c.load(Ordering::SeqCst), 0, "no persist for an already-valid persona");
+    }
+
+    #[tokio::test]
+    async fn test_empty_persona_without_recovery_preserves_error() {
+        // recovery=None (e.g. a minimal cache) + empty persona → Err, NOT a silent
+        // degraded path. Preserves the old fail-loud behavior where unconfigured.
+        let (mcp, _g, _s) = make_scripted_mcp(serde_json::json!({"persona": ""}));
+        let cache = PersonalityCache::new_with_options(
+            mcp,
+            300.0,
+            10,
+            frozen_clock(1000.0),
+            None,
+        ); // NO .with_recovery
+
+        let result = cache.get(13).await;
+        assert!(
+            result.is_err(),
+            "empty persona with no recovery wired must still error (fail-loud)"
+        );
     }
 }

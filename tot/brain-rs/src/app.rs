@@ -168,45 +168,13 @@ async fn enroll_route(
     }
 
     // Auto-populate identity from obs.get_state (best-effort, 5s timeout).
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        state
-            .harness_mcp
-            .call("obs.get_state", &serde_json::json!({"target_guid": req.bot_guid})),
+    // Shared helper (also used by the subset-gate enroll + LiveRecovery self-heal).
+    crate::recovery::fill_identity_from_obs(
+        &state.harness_mcp,
+        req.bot_guid,
+        &mut req.personality_seed,
     )
-    .await
-    {
-        Ok(Ok(raw)) => {
-            let obs = raw.get("result").cloned().unwrap_or(raw);
-            let self_obj = obs.get("self").and_then(|v| v.as_object()).cloned().unwrap_or_default();
-            let live_name = self_obj.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let live_race = self_obj.get("race").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let live_class = self_obj.get("class").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if !live_name.is_empty() && !live_race.is_empty() && !live_class.is_empty() {
-                req.personality_seed.name = live_name;
-                req.personality_seed.race = live_race;
-                req.personality_seed.class_ = live_class;
-            } else {
-                warn!(
-                    "enroll bot_guid={}: obs.get_state missing identity fields \
-                     (name={:?} race={:?} class={:?}); keeping seed values",
-                    req.bot_guid, live_name, live_race, live_class
-                );
-            }
-        }
-        Ok(Err(e)) => {
-            warn!(
-                "enroll bot_guid={}: obs.get_state failed ({}); keeping seed values",
-                req.bot_guid, e
-            );
-        }
-        Err(_timeout) => {
-            warn!(
-                "enroll bot_guid={}: obs.get_state timed out; keeping seed values",
-                req.bot_guid
-            );
-        }
-    }
+    .await;
 
     // V3.6: morph personality v2 fields.
     req.personality_seed = morph_personality(
@@ -514,11 +482,22 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
     );
 
     // ── Build components ──────────────────────────────────────────────────────
-    let personality_cache = Arc::new(PersonalityCache::new(
-        memory_mcp.clone(),
-        settings.personality_ttl_s,
-        32,
-    ));
+    // Self-heal: when a bot's stored persona is unusable (empty/blank/null/
+    // unparseable), PersonalityCache.get() recovers via LiveRecovery instead of
+    // spamming personality_error → no_op every tick. LiveRecovery rebuilds a
+    // real, identity-preserving card (state_store seed → obs identity →
+    // degraded), morphs v2 fields, and get() persists it so the bot heals
+    // permanently.
+    let recovery: Arc<dyn crate::personality::PersonalityRecovery + Send + Sync> =
+        Arc::new(crate::recovery::LiveRecovery::new(
+            state_store.clone(),
+            harness_mcp.clone(),
+            llm_client.clone(),
+        ));
+    let personality_cache = Arc::new(
+        PersonalityCache::new(memory_mcp.clone(), settings.personality_ttl_s, 32)
+            .with_recovery(recovery),
+    );
 
     let triage = Arc::new(TriageGate::new(harness_mcp.clone(), memory_mcp.clone()));
 
@@ -858,28 +837,8 @@ async fn enroll_via_api(
         profession_appetite: None,
     };
 
-    // Auto-populate identity.
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        harness_mcp.call("obs.get_state", &serde_json::json!({"target_guid": bot_guid})),
-    )
-    .await
-    {
-        Ok(Ok(raw)) => {
-            let obs = raw.get("result").cloned().unwrap_or(raw);
-            let self_obj = obs.get("self").and_then(|v| v.as_object()).cloned().unwrap_or_default();
-            let live_name = self_obj.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let live_race = self_obj.get("race").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let live_class = self_obj.get("class").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if !live_name.is_empty() && !live_race.is_empty() && !live_class.is_empty() {
-                seed.name = live_name;
-                seed.race = live_race;
-                seed.class_ = live_class;
-            }
-        }
-        Ok(Err(e)) => warn!("subset_gate enroll bot_guid={bot_guid}: obs.get_state failed ({e}); keeping seed values"),
-        Err(_) => warn!("subset_gate enroll bot_guid={bot_guid}: obs.get_state timed out; keeping seed values"),
-    }
+    // Auto-populate identity (shared helper; also used by /enroll + LiveRecovery).
+    crate::recovery::fill_identity_from_obs(harness_mcp, bot_guid, &mut seed).await;
 
     // v2 morph.
     seed = morph_personality(&seed, llm_client, None::<&mut rand::rngs::StdRng>).await;
