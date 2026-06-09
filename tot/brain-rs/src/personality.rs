@@ -256,8 +256,12 @@ impl PersonalityCache {
                         // Persist the recovered card so the bot heals
                         // permanently (no per-tick spam). Soft-fail on persist
                         // error — matches the migration-persist soft-fail below.
+                        // On the (practically-impossible) serialize failure, persist
+                        // "" not "{}" — both re-trigger recovery on a future cold fetch,
+                        // but "" is the unambiguous "unusable" sentinel the classifier
+                        // already keys on (avoids storing a parseable-but-invalid blob).
                         let persona_str = serde_json::to_string(&recovered)
-                            .unwrap_or_else(|_| "{}".to_string());
+                            .unwrap_or_else(|_| String::new());
                         if let Err(e) = self
                             .mcp
                             .call(
