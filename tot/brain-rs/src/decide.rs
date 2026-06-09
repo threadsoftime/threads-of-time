@@ -238,7 +238,13 @@ pub struct Decider {
     pub personality_cache: Arc<PersonalityCache>,
     pub memory_mcp: Arc<dyn McpCallable + Send + Sync>,
     pub state_store: Arc<StateStore>,
+    /// Variable (per-bot/per-tick) USER template — `prompts/decide_v1.txt`.
     pub prompt_template: String,
+    /// Invariant (fleet-wide, byte-identical) SYSTEM template — `prompts/decide_system_v2.txt`.
+    /// Rendered with only fleet-constant `{tools_summary}` + `{schema_literal}` so the
+    /// resulting system message is identical for every bot AND tick, enabling
+    /// llama.cpp's prefix cache to hit across the fleet.
+    pub system_template: String,
     pub decision_schema: Option<serde_json::Value>,
     pub tools_summary: Option<String>,
     pub max_retries: u32,
@@ -254,6 +260,7 @@ impl Decider {
         memory_mcp: Arc<dyn McpCallable + Send + Sync>,
         state_store: Arc<StateStore>,
         prompt_template: String,
+        system_template: String,
         max_player_level: u32,
     ) -> Self {
         let known_tools: HashSet<String> =
@@ -264,6 +271,7 @@ impl Decider {
             memory_mcp,
             state_store,
             prompt_template,
+            system_template,
             decision_schema: None,
             tools_summary: None,
             max_retries: 1,
@@ -334,6 +342,9 @@ impl Decider {
             memory_mcp: mcp,
             state_store,
             prompt_template: template.to_string(),
+            // Test helpers always use the REAL invariant system template so the
+            // byte-identity (prefix-cache) contract is exercised by tests.
+            system_template: include_str!("../prompts/decide_system_v2.txt").to_string(),
             decision_schema: None,
             tools_summary: None,
             max_retries: 1,
@@ -612,13 +623,49 @@ impl Decider {
         let default_role =
             class_default_role(&personality.class_.to_lowercase());
 
+        // =====================================================================
+        // SYSTEM = INVARIANT block (byte-identical for EVERY bot AND tick).
+        //
+        // Rendered from self.system_template (prompts/decide_system_v2.txt) with
+        // ONLY fleet-constant substitutions: {tools_summary} and {schema_literal}.
+        // No persona, no state, no at-cap, no organic-wakeup — nothing per-bot or
+        // per-tick. This is the shared prefix that llama.cpp's prefix cache reuses
+        // across the whole fleet (Slice A: prompt prefix-cache reorder).
+        //
+        // tools_summary uses the fleet-constant path: the startup-fetched summary
+        // override if present, else sorted KNOWN_TOOLS — both identical for every
+        // bot/tick within the process, so the system stays byte-identical.
+        // Use python_format() (NOT plain .replace()) because the system template
+        // carries `{{`/`}}` escape sequences (the few-shot JSON examples) that
+        // Python's str.format() unescapes to literal `{`/`}`.
+        // =====================================================================
+        let tools_summary = self.tools_summary.as_deref().map(str::to_string).unwrap_or_else(|| {
+            let mut sorted: Vec<&str> = self.known_tools.iter().map(|s| s.as_str()).collect();
+            sorted.sort_unstable();
+            python_json(&sorted)
+        });
+        let system = python_format(
+            &self.system_template,
+            &[
+                ("tools_summary", tools_summary.as_str()),
+                ("schema_literal", _DECISION_SCHEMA_LITERAL),
+            ],
+        );
+
+        // =====================================================================
+        // USER = VARIABLE block (per-bot + per-tick). Persona + at-cap + the
+        // trimmed game-state template + organic-wakeup + closing line.
+        // =====================================================================
+
         // (1) Persona line + bot_guid + traits + party_invite_policy + default role
+        // under a YOU ARE: header.
         //
         // Route each f64 trait through format_f64_python so that whole-number
         // values (0.0, 1.0, -1.0) render as "0.0" / "1.0" / "-1.0", matching
         // the Python f-string behaviour rather than Rust Display's "0" / "1" / "-1".
-        let mut system = format!(
-            "You are {name}, a {race} {class_} \
+        let mut user = format!(
+            "YOU ARE:\n\
+             You are {name}, a {race} {class_} \
              in World of Warcraft. {backstory}\n\
              Your bot_guid is {bot_guid}. When a tool's args require bot_guid, \
              use exactly this integer ({bot_guid}). Do not use 0 or guess.\n\
@@ -644,7 +691,7 @@ impl Decider {
 
         // (2) At-cap paragraph — only when at cap
         if at_cap {
-            system.push_str(&format!(
+            user.push_str(&format!(
                 "\nYou are at max level (L{max_level}). XP from quests no longer matters. \
                  Your end-game preferences (0..1): \
                  pvp_appetite={pvp}, \
@@ -666,22 +713,30 @@ impl Decider {
             ));
         }
 
-        // (3) Goal-management paragraph (ALWAYS rendered)
-        system.push_str(concat!(
-            "\nYour goals shape what you do across ticks. If you have no \
-             active goals, create one now via goals.create — pick something \
-             concrete that fits your personality (e.g., \"reach level 25\", \
-             \"earn 5 gold by tomorrow\", \"run BFD with a group\"). Goals you \
-             write here are your own — the brain owns them, they persist \
-             across ticks, and you reference them in future decisions. If \
-             you have an active goal, check whether you're making progress; \
-             use goals.update to record progress or change tack, and \
-             goals.complete when done.\n"
-        ));
+        // (3) Variable game-state block — the trimmed decide_v1.txt template.
+        //
+        // Use python_format() — NOT plain .replace() — for str.format() parity
+        // (kept for consistency even though the trimmed template no longer carries
+        // `{{`/`}}` examples).
+        let truncated_memories = self.truncate_memory_items(memories);
+        let truncated_decisions = self.truncate_recent_decisions(recent_decisions);
+        let projected_hot_inputs = self.project_hot_inputs(hot_inputs);
+        let variable_block = python_format(
+            &self.prompt_template,
+            &[
+                ("state_json",    &python_json(state)),
+                ("goals_json",    &python_json(goals)),
+                ("memories_json", &python_json(&truncated_memories)),
+                ("recent_decisions_json", &python_json(&truncated_decisions)),
+                ("hot_inputs_json", &python_json(&projected_hot_inputs)),
+            ],
+        );
+        user.push('\n');
+        user.push_str(&variable_block);
 
         // (4) Organic-wakeup paragraph — only when triage_reason == "organic_wakeup"
         if triage_reason == Some("organic_wakeup") {
-            system.push_str(concat!(
+            user.push_str(concat!(
                 "\nYou woke up on your own — no one is asking you anything, no \
                  combat is happening, no invitations are pending. This is your \
                  own time. Decide what YOU want to do next based on your \
@@ -701,38 +756,9 @@ impl Decider {
             ));
         }
 
-        // (5) JSON-only constraint + schema literal
-        system.push_str(concat!(
-            "\nYou make ONE decision per call. Respond with ONLY a single JSON object \
-             matching this exact schema, and nothing else (no prose, no markdown, no preamble):\n"
-        ));
-        system.push_str(_DECISION_SCHEMA_LITERAL);
-
-        // User carries only variable game-state context; no persona duplication.
-        let tools_summary = self.tools_summary.as_deref().map(str::to_string).unwrap_or_else(|| {
-            let mut sorted: Vec<&str> = self.known_tools.iter().map(|s| s.as_str()).collect();
-            sorted.sort_unstable();
-            python_json(&sorted)
-        });
-
-        let truncated_memories = self.truncate_memory_items(memories);
-        let truncated_decisions = self.truncate_recent_decisions(recent_decisions);
-        let projected_hot_inputs = self.project_hot_inputs(hot_inputs);
-
-        // Use python_format() — NOT plain .replace() — because the template contains
-        // `{{`/`}}` escape sequences (JSON examples in few-shot blocks) that Python's
-        // str.format() unescapes to literal `{`/`}`.  Plain .replace() would leave
-        // them as `{{`/`}}`, corrupting every JSON example the LLM sees in the prompt.
-        let user = python_format(
-            &self.prompt_template,
-            &[
-                ("tools_summary", tools_summary.as_str()),
-                ("state_json",    &python_json(state)),
-                ("goals_json",    &python_json(goals)),
-                ("memories_json", &python_json(&truncated_memories)),
-                ("recent_decisions_json", &python_json(&truncated_decisions)),
-                ("hot_inputs_json", &python_json(&projected_hot_inputs)),
-            ],
+        // (5) Closing instruction (moved verbatim from the old decide_v1.txt tail).
+        user.push_str(
+            "\nDecide ONE action that best fits this character and situation. Respond with a single JSON object.\n"
         );
 
         Prompt { system, user }
@@ -1167,24 +1193,24 @@ mod tests {
             1001,
             None,
         );
-        // Must contain "You are Kael, a Blood Elf Paladin in World of Warcraft."
+        // Slice A: persona is now in the USER message (per-bot), under a YOU ARE: header.
         assert!(
-            prompt.system.starts_with("You are Kael, a Blood Elf Paladin in World of Warcraft."),
-            "system prompt must start with persona line; got: {}",
-            &prompt.system[..80.min(prompt.system.len())]
+            prompt.user.starts_with("YOU ARE:\nYou are Kael, a Blood Elf Paladin in World of Warcraft."),
+            "user prompt must start with YOU ARE: header + persona line; got: {}",
+            &prompt.user[..80.min(prompt.user.len())]
         );
-        assert!(prompt.system.contains("bot_guid is 1001"));
-        assert!(prompt.system.contains("talkativeness=0.7"));
-        // Integration-level guard for the format_f64_python reroute (decide.rs ~L612):
+        assert!(prompt.user.contains("bot_guid is 1001"));
+        assert!(prompt.user.contains("talkativeness=0.7"));
+        // Integration-level guard for the format_f64_python reroute (decide.rs ~L648):
         // attitude_to_master=0.0 is the whole-number case — must render "0.0", not "0"
         // (Python f"{0.0}" -> "0.0"). courage/greed lock the other rerouted f64 traits.
-        assert!(prompt.system.contains("attitude_to_master=0.0"),
+        assert!(prompt.user.contains("attitude_to_master=0.0"),
             "whole-number trait must render as 0.0 not 0; got: {}",
-            &prompt.system[..200.min(prompt.system.len())]);
-        assert!(prompt.system.contains("courage=0.8"));
-        assert!(prompt.system.contains("greed=0.3"));
-        assert!(prompt.system.contains("party_invite_policy=accept_from_known"));
-        assert!(prompt.system.contains("Your default dungeon role: tank or healer."));
+            &prompt.user[..200.min(prompt.user.len())]);
+        assert!(prompt.user.contains("courage=0.8"));
+        assert!(prompt.user.contains("greed=0.3"));
+        assert!(prompt.user.contains("party_invite_policy=accept_from_known"));
+        assert!(prompt.user.contains("Your default dungeon role: tank or healer."));
     }
 
     #[test]
@@ -1195,9 +1221,10 @@ mod tests {
         let prompt = decider.assemble_prompt_test(
             &card, &state, &[], &[], &[], &HashMap::new(), 1001, None,
         );
-        assert!(prompt.system.contains("at max level"), "at-cap paragraph missing");
-        assert!(prompt.system.contains("pvp_appetite=0.4"), "pvp_appetite must appear");
-        assert!(prompt.system.contains("raid_appetite=0.9"), "raid_appetite must appear");
+        // Slice A: at-cap paragraph is now in the USER message (per-bot/per-tick).
+        assert!(prompt.user.contains("at max level"), "at-cap paragraph missing");
+        assert!(prompt.user.contains("pvp_appetite=0.4"), "pvp_appetite must appear");
+        assert!(prompt.user.contains("raid_appetite=0.9"), "raid_appetite must appear");
     }
 
     #[test]
@@ -1208,7 +1235,10 @@ mod tests {
         let prompt = decider.assemble_prompt_test(
             &card, &state, &[], &[], &[], &HashMap::new(), 1001, None,
         );
-        assert!(!prompt.system.contains("at max level"), "not-at-cap must not have at-cap para");
+        // Slice A: at-cap paragraph lives in USER now; assert it is absent there.
+        assert!(!prompt.user.contains("at max level"), "not-at-cap must not have at-cap para");
+        // And it must never appear in the invariant SYSTEM block.
+        assert!(!prompt.system.contains("at max level"), "system must never carry at-cap para");
     }
 
     #[test]
@@ -1232,9 +1262,10 @@ mod tests {
             &card, &serde_json::json!({}), &[], &[], &[], &HashMap::new(), 1001,
             Some("organic_wakeup"),
         );
+        // Slice A: organic-wakeup paragraph is now in the USER message (per-tick).
         assert!(
-            prompt.system.contains("woke up on your own"),
-            "organic_wakeup paragraph must be present"
+            prompt.user.contains("woke up on your own"),
+            "organic_wakeup paragraph must be present in user"
         );
     }
 
@@ -1246,22 +1277,49 @@ mod tests {
             &card, &serde_json::json!({}), &[], &[], &[], &HashMap::new(), 1001,
             Some("fresh_chat"),
         );
+        // Slice A: organic-wakeup paragraph lives in USER; assert absent there for
+        // a non-organic reason, and never present in the invariant SYSTEM block.
+        assert!(
+            !prompt.user.contains("woke up on your own"),
+            "organic_wakeup paragraph must NOT be present for non-organic reason"
+        );
         assert!(
             !prompt.system.contains("woke up on your own"),
-            "organic_wakeup paragraph must NOT be present for non-organic reason"
+            "system must never carry the organic_wakeup paragraph"
         );
     }
 
     #[test]
-    fn test_schema_literal_at_end_of_system_prompt() {
+    fn test_schema_literal_in_system_prompt_and_order_locked() {
+        // Slice A: the schema literal is no longer last in the system prompt — the
+        // AVAILABLE TOOLS block and the few-shot EXAMPLES now follow it. Assert it
+        // is CONTAINED in system and lock the new invariant ordering:
+        //   goal-mgmt → JSON-only constraint → schema_literal → AVAILABLE TOOLS → EXAMPLES.
         let card = fixture_card();
         let decider = Decider::new_test(1001, card.clone(), "t");
         let prompt = decider.assemble_prompt_test(
             &card, &serde_json::json!({}), &[], &[], &[], &HashMap::new(), 1001, None,
         );
         assert!(
-            prompt.system.ends_with(_DECISION_SCHEMA_LITERAL),
-            "system prompt must end with _DECISION_SCHEMA_LITERAL"
+            prompt.system.contains(_DECISION_SCHEMA_LITERAL),
+            "system prompt must contain _DECISION_SCHEMA_LITERAL"
+        );
+        let goal_pos = prompt.system.find("Your goals shape what you do across ticks")
+            .expect("goal-management paragraph must be in system");
+        let constraint_pos = prompt.system.find("You make ONE decision per call")
+            .expect("JSON-only constraint must be in system");
+        let schema_pos = prompt.system.find(_DECISION_SCHEMA_LITERAL)
+            .expect("schema literal must be in system");
+        let tools_pos = prompt.system.find("AVAILABLE TOOLS (call only one per decision):")
+            .expect("AVAILABLE TOOLS header must be in system");
+        let examples_pos = prompt.system.find("EXAMPLE A: party invitation received")
+            .expect("EXAMPLE A must be in system");
+        assert!(
+            goal_pos < constraint_pos
+                && constraint_pos < schema_pos
+                && schema_pos < tools_pos
+                && tools_pos < examples_pos,
+            "system block order must be goal-mgmt < constraint < schema < tools < examples"
         );
     }
 
@@ -1347,15 +1405,17 @@ mod tests {
 
     #[test]
     fn test_user_prompt_substitutes_all_fields() {
+        // Slice A: tools_summary moved to the SYSTEM template; the USER template now
+        // carries only the 5 variable JSON fields.
         let card = fixture_card();
-        let template = "{tools_summary}|{state_json}|{goals_json}|{memories_json}|{recent_decisions_json}|{hot_inputs_json}";
+        let template = "{state_json}|{goals_json}|{memories_json}|{recent_decisions_json}|{hot_inputs_json}";
         let decider = Decider::new_test(1001, card.clone(), template);
         let prompt = decider.assemble_prompt_test(
             &card, &serde_json::json!({}), &[], &[], &[], &HashMap::new(), 1001, None,
         );
-        // All 6 named placeholders must be replaced
+        // All 5 named variable placeholders must be replaced
         for placeholder in [
-            "{tools_summary}", "{state_json}", "{goals_json}",
+            "{state_json}", "{goals_json}",
             "{memories_json}", "{recent_decisions_json}", "{hot_inputs_json}",
         ] {
             assert!(
@@ -1363,8 +1423,13 @@ mod tests {
                 "user prompt must not contain placeholder: {placeholder}"
             );
         }
-        // The user string must contain 5 separator '|' characters (from our template)
-        assert_eq!(prompt.user.chars().filter(|&c| c == '|').count(), 5);
+        // The user string must contain 4 separator '|' characters (from our template)
+        assert_eq!(prompt.user.chars().filter(|&c| c == '|').count(), 4);
+        // tools_summary must NOT be substituted into the user prompt.
+        assert!(
+            !prompt.user.contains("{tools_summary}"),
+            "user template must not reference tools_summary anymore"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1682,6 +1747,7 @@ mod tests {
             memory_mcp: recording as Arc<dyn McpCallable + Send + Sync>,
             state_store,
             prompt_template: "t".to_string(),
+            system_template: include_str!("../prompts/decide_system_v2.txt").to_string(),
             decision_schema: None,
             tools_summary: None,
             max_retries: 1,

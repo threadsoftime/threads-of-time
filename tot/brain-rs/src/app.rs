@@ -54,10 +54,16 @@ use tot_harness_client::HarnessClient;
 // Compile-time default prompt template
 // ---------------------------------------------------------------------------
 
-/// Default prompt template embedded at compile time.
+/// Default (variable / per-bot) USER prompt template embedded at compile time.
 /// Runtime override: set BRAIN_PROMPT_PATH env var.
 const DEFAULT_PROMPT_TEMPLATE: &str =
     include_str!("../prompts/decide_v1.txt");
+
+/// Default (invariant / fleet-wide) SYSTEM prompt template embedded at compile time.
+/// This is the byte-identical shared prefix that enables llama.cpp's prefix cache.
+/// Runtime override: set BRAIN_SYSTEM_PROMPT_PATH env var.
+const DEFAULT_SYSTEM_TEMPLATE: &str =
+    include_str!("../prompts/decide_system_v2.txt");
 
 // ---------------------------------------------------------------------------
 // Shared app state — injected into route handlers
@@ -454,6 +460,13 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
         _ => DEFAULT_PROMPT_TEMPLATE.to_string(),
     };
 
+    // ── System template (compile-time default or BRAIN_SYSTEM_PROMPT_PATH override) ──
+    let system_template: String = match std::env::var("BRAIN_SYSTEM_PROMPT_PATH") {
+        Ok(path) if !path.is_empty() => std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("BRAIN_SYSTEM_PROMPT_PATH read failed ({path}): {e}"))?,
+        _ => DEFAULT_SYSTEM_TEMPLATE.to_string(),
+    };
+
     // ── MCP clients ───────────────────────────────────────────────────────────
     let harness_mcp = Arc::new(McpClient::new(
         settings.harness_mcp_url.clone(),
@@ -515,6 +528,7 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
         memory_mcp.clone(),
         state_store.clone(),
         prompt_template,
+        system_template,
         settings.max_player_level,
     );
     decider.decision_schema = Some(decision_schema);

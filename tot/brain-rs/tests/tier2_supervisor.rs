@@ -270,6 +270,7 @@ fn make_supervisor_with_llm(
         memory_mcp: mem_mcp_for_cache,
         state_store: Arc::clone(&state_store),
         prompt_template: "{}".to_string(),
+        system_template: "sys".to_string(),
         decision_schema: None,
         tools_summary: None,
         max_retries: 1,

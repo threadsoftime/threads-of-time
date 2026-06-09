@@ -25,6 +25,103 @@ fn fixture_card() -> PersonalityCard {
     }
 }
 
+/// A second, distinct personality card — different name/race/class/traits — used
+/// to prove the SYSTEM prompt does NOT vary by persona (prefix-cache contract).
+fn fixture_card_b() -> PersonalityCard {
+    PersonalityCard {
+        name: "Grimna".into(),
+        race: "Orc".into(),
+        class_: "Warrior".into(),
+        backstory: "A grizzled veteran of countless battles.".into(),
+        talkativeness: 0.2,
+        courage: 1.0,
+        greed: 0.9,
+        attitude_to_master: -1.0,
+        party_invite_policy: "accept_all".into(),
+        pvp_appetite: Some(0.95),
+        raid_appetite: Some(0.1),
+        completionist_streak: Some(0.0),
+        gold_motivation: Some(0.8),
+        profession_appetite: Some(0.2),
+    }
+}
+
+/// PREFIX-CACHE CONTRACT (load-bearing guard for Slice A):
+/// `prompt.system` MUST be byte-identical for every bot AND every tick, so that
+/// llama.cpp's prefix cache (which reuses the KV of the longest common prefix)
+/// hits across the whole fleet. Here we assemble prompts for TWO distinct cards
+/// × TWO triage reasons (None, organic_wakeup) with different per-bot/per-tick
+/// state, and assert all four `prompt.system` strings are EQUAL.
+#[test]
+fn system_prompt_is_byte_identical_across_bots_and_ticks() {
+    // Card A: bot 1001, no triage reason, one state shape.
+    let decider_a = Decider::new_test(1001, fixture_card(), "test_template");
+    let prompt_a1 = decider_a.assemble_prompt_test(
+        &fixture_card(),
+        &serde_json::json!({"self": {"level": 12, "in_group": false}}),
+        &[serde_json::json!({"text": "reach level 25"})],
+        &[serde_json::json!({"text": "talked to Alice"})],
+        &[],
+        &HashMap::new(),
+        1001,
+        None,
+    );
+    // Card A again, but organic_wakeup tick with different state.
+    let prompt_a2 = decider_a.assemble_prompt_test(
+        &fixture_card(),
+        &serde_json::json!({"self": {"level": 13, "in_group": true}}),
+        &[],
+        &[],
+        &[],
+        &HashMap::new(),
+        1001,
+        Some("organic_wakeup"),
+    );
+
+    // Card B: a different bot (1002), distinct persona, distinct state.
+    let decider_b = Decider::new_test(1002, fixture_card_b(), "test_template");
+    let prompt_b1 = decider_b.assemble_prompt_test(
+        &fixture_card_b(),
+        &serde_json::json!({"self": {"level": 25, "in_group": false}}),
+        &[serde_json::json!({"text": "win 10 battlegrounds"})],
+        &[],
+        &[],
+        &HashMap::new(),
+        1002,
+        None,
+    );
+    let prompt_b2 = decider_b.assemble_prompt_test(
+        &fixture_card_b(),
+        &serde_json::json!({"self": {"level": 25, "in_group": true}}),
+        &[],
+        &[serde_json::json!({"text": "fought a murloc"})],
+        &[],
+        &HashMap::new(),
+        1002,
+        Some("organic_wakeup"),
+    );
+
+    // All four SYSTEM prompts must be byte-identical — the shared fleet prefix.
+    assert_eq!(
+        prompt_a1.system, prompt_a2.system,
+        "system must not vary across ticks for the same bot"
+    );
+    assert_eq!(
+        prompt_a1.system, prompt_b1.system,
+        "system must not vary across bots (persona must be in USER, not SYSTEM)"
+    );
+    assert_eq!(
+        prompt_a1.system, prompt_b2.system,
+        "system must be byte-identical for all bots and all triage reasons"
+    );
+
+    // Sanity: the USER prompts SHOULD differ (they carry the per-bot persona).
+    assert_ne!(
+        prompt_a1.user, prompt_b1.user,
+        "user prompts must differ between distinct personas"
+    );
+}
+
 #[test]
 fn test_system_prompt_contains_persona_and_bot_guid() {
     let decider = Decider::new_test(1001, fixture_card(), "test_template");
@@ -38,9 +135,13 @@ fn test_system_prompt_contains_persona_and_bot_guid() {
         1001,
         None,
     );
-    assert!(prompt.system.contains("Kael"), "system must contain bot name");
-    assert!(prompt.system.contains("1001"), "system must contain bot_guid");
-    assert!(prompt.system.contains("Paladin"), "system must contain class");
+    // Slice A: persona (name/guid/class) moved to the USER message (per-bot).
+    assert!(prompt.user.contains("Kael"), "user must contain bot name");
+    assert!(prompt.user.contains("1001"), "user must contain bot_guid");
+    assert!(prompt.user.contains("Paladin"), "user must contain class");
+    // Persona must NOT leak into the invariant system block.
+    assert!(!prompt.system.contains("Kael"), "system must not contain per-bot name");
+    // The schema literal stays in the invariant SYSTEM block.
     assert!(
         prompt.system.contains(_DECISION_SCHEMA_LITERAL),
         "system must contain schema literal"
@@ -63,9 +164,10 @@ fn test_system_at_cap_adds_end_game_paragraph() {
         1001,
         None,
     );
-    assert!(prompt.system.contains("at max level"), "at-cap paragraph missing");
+    // Slice A: at-cap paragraph moved to the USER message.
+    assert!(prompt.user.contains("at max level"), "at-cap paragraph missing");
     assert!(
-        prompt.system.contains("pvp_appetite"),
+        prompt.user.contains("pvp_appetite"),
         "v2 fields must appear at cap"
     );
 }
@@ -85,8 +187,9 @@ fn test_system_not_at_cap_no_end_game_paragraph() {
         1001,
         None,
     );
+    // Slice A: at-cap paragraph lives in USER; absent there when below cap.
     assert!(
-        !prompt.system.contains("at max level"),
+        !prompt.user.contains("at max level"),
         "not-at-cap must not have at-cap paragraph"
     );
 }
@@ -105,8 +208,9 @@ fn test_system_organic_wakeup_adds_wakeup_paragraph() {
         1001,
         Some("organic_wakeup"),
     );
+    // Slice A: organic-wakeup paragraph moved to the USER message (per-tick).
     assert!(
-        prompt.system.contains("woke up on your own"),
+        prompt.user.contains("woke up on your own"),
         "organic_wakeup paragraph missing"
     );
 }
@@ -161,26 +265,23 @@ fn test_schema_literal_exact() {
     assert_eq!(_DECISION_SCHEMA_LITERAL, expected, "_DECISION_SCHEMA_LITERAL must match Python exactly");
 }
 
-/// Tier-1: the real decide_v1.txt template, when rendered by assemble_prompt, must
-/// contain no `{{` / `}}` double-brace artifacts and no unresolved `{name}` placeholders.
+/// Tier-1 (Slice A): the few-shot EXAMPLES (with `{{`/`}}` escaping) moved from the
+/// USER template (decide_v1.txt) into the INVARIANT SYSTEM template (decide_system_v2.txt).
 ///
 /// This locks in parity with Python str.format(): the LLM sees clean JSON examples
-/// like `{"kind": "action"}`, not corrupted `{{"kind": "action"}}`.
-///
-/// Uses the in-crate `brain-rs/prompts/decide_v1.txt` template.
+/// like `{"kind": "action"}`, not corrupted `{{"kind": "action"}}` — and now in the
+/// SYSTEM message. The trimmed USER template must contain NO brace artifacts at all.
 #[test]
-fn test_user_prompt_with_real_template_no_double_braces() {
-    let template_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/prompts/decide_v1.txt"
-    );
-    let tmpl = match std::fs::read_to_string(template_path) {
+fn test_system_prompt_examples_unescaped_and_user_clean() {
+    let card = fixture_card();
+    // Use real templates: new_test wires the real decide_system_v2.txt for system,
+    // and we pass the real decide_v1.txt for the user template.
+    let user_template_path = concat!(env!("CARGO_MANIFEST_DIR"), "/prompts/decide_v1.txt");
+    let user_tmpl = match std::fs::read_to_string(user_template_path) {
         Ok(s) => s,
         Err(_) => return, // template not reachable in this build env — skip
     };
-
-    let card = fixture_card();
-    let decider = Decider::new_test(1001, card.clone(), &tmpl);
+    let decider = Decider::new_test(1001, card.clone(), &user_tmpl);
     let prompt = decider.assemble_prompt_test(
         &card,
         &serde_json::json!({}),
@@ -192,24 +293,48 @@ fn test_user_prompt_with_real_template_no_double_braces() {
         None,
     );
 
+    // --- SYSTEM: carries the few-shot examples, unescaped by python_format(). ---
     // After python_format(), ALL `{{` escape sequences must be unescaped to `{`.
-    // Python .format() produces zero remaining `{{` in this template.
     assert!(
-        !prompt.user.contains("{{"),
-        "user prompt must not contain '{{' — decide_v1.txt double-open-braces must be unescaped"
+        !prompt.system.contains("{{"),
+        "system prompt must not contain '{{' — decide_system_v2.txt double-open-braces must be unescaped"
     );
-    // Note: `}}` (two adjacent `}`) can legitimately remain — the template has `}}}}`
-    // for nested JSON closes; Python .format() reduces `}}}}` → `}}` (two literal `}`).
-    // We verify the count matches Python's expected 4.
-    let double_close_count = prompt.user.match_indices("}}").count();
+    // `}}` (two adjacent `}`) can legitimately remain — the few-shot examples use
+    // `}}}}` for nested JSON closes; Python .format() reduces `}}}}` → `}}`.
+    // The examples block is unchanged from the old decide_v1.txt, so the count is 4.
+    let double_close_count = prompt.system.match_indices("}}").count();
     assert_eq!(
         double_close_count, 4,
-        "user prompt must have exactly 4 remaining '}}' sequences matching Python .format() output, got {double_close_count}"
+        "system prompt must have exactly 4 remaining '}}' sequences matching Python .format() output, got {double_close_count}"
+    );
+    // The system must contain clean JSON example fragments (single-brace).
+    assert!(
+        prompt.system.contains(r#"{"party_invite_received""#)
+            || prompt.system.contains(r#"{"kind": "action""#),
+        "system prompt must contain unescaped JSON example fragments"
+    );
+    // The {schema_literal} placeholder must be resolved in system.
+    assert!(
+        !prompt.system.contains("{schema_literal}"),
+        "system must not contain unresolved {{schema_literal}} placeholder"
+    );
+    assert!(
+        prompt.system.contains(_DECISION_SCHEMA_LITERAL),
+        "system must contain the resolved schema literal"
     );
 
-    // All 6 named placeholders must be resolved (none of {tools_summary} etc. remain)
+    // --- USER: trimmed variable block — no brace artifacts, no unresolved vars. ---
+    assert!(
+        !prompt.user.contains("{{"),
+        "user prompt must not contain '{{'"
+    );
+    assert_eq!(
+        prompt.user.match_indices("}}").count(),
+        0,
+        "trimmed user prompt must have zero '}}' sequences"
+    );
     for placeholder in [
-        "{tools_summary}", "{state_json}", "{goals_json}",
+        "{state_json}", "{goals_json}",
         "{memories_json}", "{recent_decisions_json}", "{hot_inputs_json}",
     ] {
         assert!(
@@ -217,12 +342,9 @@ fn test_user_prompt_with_real_template_no_double_braces() {
             "user prompt must not contain unresolved placeholder: {placeholder}"
         );
     }
-
-    // The rendered user prompt must contain clean JSON example fragments
-    // (single-brace, not double-brace) — spot-check one from EXAMPLE A.
+    // tools_summary no longer belongs to the user template.
     assert!(
-        prompt.user.contains(r#"{"party_invite_received""#)
-            || prompt.user.contains(r#"{"kind": "action""#),
-        "user prompt must contain unescaped JSON example fragments from decide_v1.txt"
+        !prompt.user.contains("{tools_summary}"),
+        "user prompt must not reference tools_summary"
     );
 }
