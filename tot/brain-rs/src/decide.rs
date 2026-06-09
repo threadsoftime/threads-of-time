@@ -394,6 +394,12 @@ impl Decider {
         serde_json::to_value(projected).expect("project_hot_inputs_test: to_value")
     }
 
+    /// Expose `project_state` for integration tests.
+    #[doc(hidden)]
+    pub fn project_state_test(&self, state: &serde_json::Value) -> serde_json::Value {
+        project_state(state)
+    }
+
     /// Expose `_truncate_memory_items` for integration tests.
     #[doc(hidden)]
     pub fn truncate_memory_items_test(
@@ -724,10 +730,15 @@ impl Decider {
         let truncated_memories = self.truncate_memory_items(memories);
         let truncated_decisions = self.truncate_recent_decisions(recent_decisions);
         let projected_hot_inputs = self.project_hot_inputs(hot_inputs);
+        // Win B: slim the state digest (remove dead fields, cap large arrays)
+        // before serialising it into the prompt. project_state is a safe
+        // "remove known dead/heavy fields + cap, keep everything else" transform;
+        // absent fields are silently ignored so this degrades gracefully.
+        let slimmed_state = project_state(state);
         let variable_block = python_format(
             &self.prompt_template,
             &[
-                ("state_json",    &python_json(state)),
+                ("state_json",    &python_json(&slimmed_state)),
                 ("goals_json",    &python_json(goals)),
                 ("memories_json", &python_json(&truncated_memories)),
                 ("recent_decisions_json", &python_json(&truncated_decisions)),
@@ -955,6 +966,12 @@ impl Decider {
     ) -> serde_json::Map<String, serde_json::Value> {
         let mut out = serde_json::Map::new();
         for (key, val) in hot_inputs {
+            // Win A: state_summary is triage→decide plumbing rendered separately as
+            // {state_json}; passing it through would duplicate the full digest in
+            // {hot_inputs_json} (~55 % of the prompt budget wasted).
+            if key == "state_summary" {
+                continue;
+            }
             if key == "fresh_chat" {
                 if let serde_json::Value::Array(chats) = val {
                     let projected: Vec<serde_json::Value> = chats
@@ -1003,6 +1020,132 @@ impl Decider {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// project_state — Win B: slim the per-tick state digest before rendering
+// ---------------------------------------------------------------------------
+//
+// Safe "remove known dead/heavy fields + cap known-large arrays, KEEP everything
+// else" transform.  Operates on a clone; never panics on missing/wrong-typed
+// fields (all access is guarded by .get / as_array / as_object / as_str).
+//
+// Removed fields:
+//   location.near_npcs   — always empty array
+//   location.position    — raw x/y/z; no tool consumes them; zone/subzone carry
+//                          actionable location info
+//   social.recent_whispers — always empty
+//   inventory_highlights.consumables — if empty/absent
+//   inventory_highlights.junk_value / junk_value_copper — if zero/absent
+//
+// Capped arrays (trailing-biased — keep the most recent / last N):
+//   event_log  → MAX_EVENT_LOG entries; string entries clipped to ~120 chars
+//   quest_log  → MAX_QUEST_LOG entries; prefer turn-in-ready if entries have
+//               a completion/progress signal, else first MAX_QUEST_LOG
+
+const MAX_EVENT_LOG: usize = 8;
+const MAX_QUEST_LOG: usize = 5;
+
+fn project_state(state: &serde_json::Value) -> serde_json::Value {
+    let mut out = match state.as_object() {
+        Some(obj) => obj.clone(),
+        None => return state.clone(),
+    };
+
+    // --- location sub-object ---
+    if let Some(loc) = out.get_mut("location").and_then(|v| v.as_object_mut()) {
+        loc.remove("near_npcs");
+        loc.remove("position");
+    }
+
+    // --- social sub-object ---
+    if let Some(soc) = out.get_mut("social").and_then(|v| v.as_object_mut()) {
+        soc.remove("recent_whispers");
+    }
+
+    // --- inventory_highlights sub-object ---
+    if let Some(inv) = out.get_mut("inventory_highlights").and_then(|v| v.as_object_mut()) {
+        // remove consumables if empty/absent
+        let drop_consumables = inv
+            .get("consumables")
+            .map(|v| match v {
+                serde_json::Value::Array(a) => a.is_empty(),
+                serde_json::Value::Null => true,
+                _ => false,
+            })
+            .unwrap_or(true);
+        if drop_consumables {
+            inv.remove("consumables");
+        }
+        // remove junk_value if absent or zero
+        let drop_junk = inv
+            .get("junk_value")
+            .map(|v| v.as_f64().map(|f| f == 0.0).unwrap_or(true))
+            .unwrap_or(true);
+        if drop_junk {
+            inv.remove("junk_value");
+        }
+        // remove junk_value_copper if absent or zero
+        let drop_junk_copper = inv
+            .get("junk_value_copper")
+            .map(|v| v.as_f64().map(|f| f == 0.0).unwrap_or(true))
+            .unwrap_or(true);
+        if drop_junk_copper {
+            inv.remove("junk_value_copper");
+        }
+    }
+
+    // --- event_log: keep LAST MAX_EVENT_LOG entries, clip string entries ---
+    if let Some(el) = out.get_mut("event_log").and_then(|v| v.as_array_mut()) {
+        // Clip string entries to ~120 chars first
+        for entry in el.iter_mut() {
+            if let Some(s) = entry.as_str() {
+                if s.chars().count() > 120 {
+                    let clipped: String = s.chars().take(120).collect();
+                    *entry = serde_json::Value::String(clipped);
+                }
+            }
+        }
+        let len = el.len();
+        if len > MAX_EVENT_LOG {
+            let start = len - MAX_EVENT_LOG;
+            *el = el[start..].to_vec();
+        }
+    }
+
+    // --- quest_log: keep at most MAX_QUEST_LOG ---
+    // Prefer entries that signal completion / turn-in-ready; fall back to first N.
+    if let Some(ql) = out.get_mut("quest_log").and_then(|v| v.as_array_mut()) {
+        if ql.len() > MAX_QUEST_LOG {
+            // Partition: turn-in-ready first (complete==true or progress==1.0 etc.)
+            let is_ready = |entry: &serde_json::Value| -> bool {
+                entry.get("complete").and_then(|v| v.as_bool()).unwrap_or(false)
+                    || entry.get("turn_in_ready").and_then(|v| v.as_bool()).unwrap_or(false)
+                    || entry
+                        .get("progress")
+                        .and_then(|v| v.as_f64())
+                        .map(|f| f >= 1.0)
+                        .unwrap_or(false)
+            };
+            let mut ready: Vec<serde_json::Value> = ql
+                .iter()
+                .filter(|e| is_ready(e))
+                .cloned()
+                .collect();
+            let mut rest: Vec<serde_json::Value> = ql
+                .iter()
+                .filter(|e| !is_ready(e))
+                .cloned()
+                .collect();
+            ready.truncate(MAX_QUEST_LOG);
+            let remaining = MAX_QUEST_LOG.saturating_sub(ready.len());
+            rest.truncate(remaining);
+            ready.extend(rest);
+            *ql = ready;
+        }
+    }
+
+    serde_json::Value::Object(out)
+}
 
 /// Format an `Option<f64>` exactly as Python does: `0.4` not `0.40000000000000002`.
 /// For values that are None, outputs "None" (matching Python's str() repr).
@@ -1878,6 +2021,116 @@ mod tests {
         assert!(out.error_class.is_none());
         assert!(!out.json_schema_fell_back);
         assert!(out.latency_ms.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Win A: project_hot_inputs must drop state_summary
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn project_hot_inputs_drops_state_summary() {
+        let card = fixture_card();
+        let decider = Decider::new_test(1001, card, "t");
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "state_summary".to_string(),
+            serde_json::json!({"self": {"level": 10}, "zone": "Durotar"}),
+        );
+        inputs.insert(
+            "fresh_chat".to_string(),
+            serde_json::json!([{"text": "received whisper from Alice: hi", "from": "Alice"}]),
+        );
+        inputs.insert(
+            "combat_events".to_string(),
+            serde_json::json!([{"type": "hit", "damage": 42}]),
+        );
+        let projected = decider.project_hot_inputs_test(&inputs);
+        assert!(
+            projected.get("state_summary").is_none(),
+            "project_hot_inputs must drop the state_summary key (it is already rendered as state_json)"
+        );
+        assert!(
+            projected.get("fresh_chat").is_some(),
+            "fresh_chat must be retained (projected to {{sender, message}})"
+        );
+        assert!(
+            projected.get("combat_events").is_some(),
+            "combat_events must be retained verbatim"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Win B: project_state removes dead fields and caps arrays
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn project_state_removes_dead_and_caps() {
+        let card = fixture_card();
+        let decider = Decider::new_test(1001, card, "t");
+
+        // Build a digest with all the dead fields plus 20 event_log + 10 quest_log
+        let event_log: Vec<serde_json::Value> =
+            (0..20).map(|i| serde_json::json!(format!("event_{}", i))).collect();
+        let quest_log: Vec<serde_json::Value> =
+            (0..10).map(|i| serde_json::json!({"id": i, "name": format!("quest_{}", i)})).collect();
+
+        let state = serde_json::json!({
+            "self": {"level": 15, "hp": 100},
+            "goal": "reach level 20",
+            "location": {
+                "zone": "Elwynn Forest",
+                "subzone": "Northshire",
+                "map": "EasternKingdoms",
+                "near_npcs": [],
+                "position": {"x": 1.0, "y": 2.0, "z": 3.0}
+            },
+            "social": {
+                "in_group": false,
+                "nearby_humans": ["Player1"],
+                "recent_whispers": []
+            },
+            "event_log": event_log,
+            "quest_log": quest_log
+        });
+
+        let projected = decider.project_state_test(&state);
+
+        // Dead fields must be absent
+        assert!(
+            projected["location"].get("near_npcs").is_none(),
+            "near_npcs must be removed"
+        );
+        assert!(
+            projected["location"].get("position").is_none(),
+            "position must be removed"
+        );
+        assert!(
+            projected["social"].get("recent_whispers").is_none(),
+            "recent_whispers must be removed"
+        );
+
+        // Arrays must be capped
+        let el = projected["event_log"].as_array().expect("event_log must be array");
+        assert_eq!(el.len(), 8, "event_log must be capped to 8 (was 20)");
+
+        let ql = projected["quest_log"].as_array().expect("quest_log must be array");
+        assert_eq!(ql.len(), 5, "quest_log must be capped to 5 (was 10)");
+
+        // Live fields must be preserved
+        assert_eq!(projected["self"]["level"], 15, "self.level must be preserved");
+        assert_eq!(projected["goal"], "reach level 20", "goal must be preserved");
+        assert_eq!(
+            projected["location"]["zone"], "Elwynn Forest",
+            "location.zone must be preserved"
+        );
+        assert_eq!(
+            projected["location"]["subzone"], "Northshire",
+            "location.subzone must be preserved"
+        );
+        assert!(
+            projected["social"]["nearby_humans"].as_array().unwrap().len() == 1,
+            "nearby_humans must be preserved"
+        );
     }
 
     /// M2 behavior: a pending goal fed directly to assemble_prompt_test appears in the
