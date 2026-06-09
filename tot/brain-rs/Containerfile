@@ -145,6 +145,16 @@ RUN find /build/brain-rs/src -name "*.rs" -exec touch {} \+ \
     && find /build/tot-goal-contract/src -name "*.rs" -exec touch {} \+ \
     && find /build/tot-harness-client/src -name "*.rs" -exec touch {} \+
 
+# Build identity: the deploy pipeline passes `--build-arg BRAIN_BUILD_SHA=<short-sha>`.
+# build.rs reads BRAIN_BUILD_SHA (rerun-if-env-changed) and embeds it via
+# cargo:rustc-env, so the binary self-reports its build (the `brain_build` startup
+# banner + per-record `brain_sha`) — making a deploy provable. Declared here (not
+# earlier) so a SHA change only busts THIS final build layer, not the dep cache.
+# `.git` is excluded from the build context, so the env-arg is the authoritative
+# SHA source; without it the SHA falls back to "unknown".
+ARG BRAIN_BUILD_SHA=unknown
+ENV BRAIN_BUILD_SHA=${BRAIN_BUILD_SHA}
+
 RUN cargo build --release -p brain-rs --bin brain-rs
 
 # Verify the binary is real: grep for the UNIQUE startup log string
