@@ -107,8 +107,11 @@ pub const _DECISION_SCHEMA_LITERAL: &str =
 // ---------------------------------------------------------------------------
 
 /// Keep context under the LLM window budget.
-pub const _MAX_CONTENT_CHARS: usize = 300;
+pub const _MAX_CONTENT_CHARS: usize = 200;
 pub const _MAX_REASONING_CHARS: usize = 100;
+/// Hard cap on the number of memory items included in the prompt.
+/// Limits the variable suffix length so changed-suffix ticks stay within timeout.
+pub const MAX_MEMORY_ITEMS: usize = 3;
 
 // ---------------------------------------------------------------------------
 // Regex: extract sender from whisper memory content written by T3 chat brain.
@@ -850,7 +853,7 @@ impl Decider {
                     }
                 }
             }
-            return merged;
+            return cap_memories(merged, MAX_MEMORY_ITEMS);
         }
 
         // No entities — fall back to generic recall
@@ -869,11 +872,14 @@ impl Decider {
             Err(_) => vec![],
             Ok(resp) => {
                 let inner = resp.get("result").cloned().unwrap_or(resp);
-                inner
-                    .get("items")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default()
+                cap_memories(
+                    inner
+                        .get("items")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default(),
+                    MAX_MEMORY_ITEMS,
+                )
             }
         }
     }
@@ -1073,6 +1079,17 @@ fn truncate_str(s: &str, max_chars: usize) -> &str {
     match s.char_indices().nth(max_chars) {
         Some((byte_idx, _)) => &s[..byte_idx],
         None => s,
+    }
+}
+
+/// Cap a memory item list to at most `max` entries, preserving the existing
+/// order (highest-salience / most-relevant first — the caller is responsible
+/// for ordering before calling this).
+fn cap_memories(items: Vec<serde_json::Value>, max: usize) -> Vec<serde_json::Value> {
+    if items.len() <= max {
+        items
+    } else {
+        items.into_iter().take(max).collect()
     }
 }
 
@@ -1331,9 +1348,9 @@ mod tests {
         let items = vec![serde_json::json!({"text": long_text, "id": "abc"})];
         let truncated = decider.truncate_memory_items_test(&items);
         let t = truncated[0]["text"].as_str().unwrap();
-        // 300 bytes + "…" (3 UTF-8 bytes = 1 char)
+        // 200 chars + "…" (1 char) = 201
         assert!(t.ends_with('\u{2026}'), "must end with ellipsis");
-        assert_eq!(t.chars().count(), 301, "must be 300 chars + ellipsis");
+        assert_eq!(t.chars().count(), 201, "must be 200 chars + ellipsis");
     }
 
     #[test]
@@ -1345,7 +1362,32 @@ mod tests {
         let truncated = decider.truncate_memory_items_test(&items);
         let t = truncated[0]["content"].as_str().unwrap();
         assert!(t.ends_with('\u{2026}'));
-        assert_eq!(t.chars().count(), 301);
+        assert_eq!(t.chars().count(), 201);
+    }
+
+    /// cap_memories keeps the first MAX_MEMORY_ITEMS entries (highest-salience first)
+    /// and discards the rest, regardless of how many entities contributed items.
+    #[test]
+    fn gather_memories_caps_at_three() {
+        // Build 6 items with distinct salience scores descending 1.0..0.5.
+        let items: Vec<serde_json::Value> = (1usize..=6)
+            .map(|i| serde_json::json!({
+                "id": format!("m{i}"),
+                "salience": 1.0 - (i as f64 - 1.0) * 0.1,
+                "text": format!("memory item {i}")
+            }))
+            .collect();
+        let capped = cap_memories(items, MAX_MEMORY_ITEMS);
+        assert_eq!(
+            capped.len(),
+            MAX_MEMORY_ITEMS,
+            "cap_memories must truncate 6 items to MAX_MEMORY_ITEMS ({})",
+            MAX_MEMORY_ITEMS
+        );
+        // Highest-salience entries (m1, m2, m3) must be preserved in order.
+        assert_eq!(capped[0]["id"], "m1");
+        assert_eq!(capped[1]["id"], "m2");
+        assert_eq!(capped[2]["id"], "m3");
     }
 
     #[test]
@@ -1534,7 +1576,6 @@ mod tests {
         let rendered = python_format(
             &tmpl,
             &[
-                ("tools_summary", "TOOLS"),
                 ("state_json", "{}"),
                 ("goals_json", "[]"),
                 ("memories_json", "[]"),
@@ -1804,7 +1845,7 @@ mod tests {
     #[tokio::test]
     async fn decide_http_error_sets_class_and_latency() {
         let card = fixture_card();
-        let mut decider = Decider::new_test(1001, card.clone(), "{tools_summary}");
+        let mut decider = Decider::new_test(1001, card.clone(), "t");
         // Seed the personality card so decide() reaches the LLM call.
         decider.personality_cache.seed(1001, card).await.unwrap();
         let base = spawn_status_llm(axum::http::StatusCode::BAD_REQUEST, "no").await;
@@ -1822,7 +1863,7 @@ mod tests {
     #[tokio::test]
     async fn decide_success_has_no_error_class() {
         let card = fixture_card();
-        let mut decider = Decider::new_test(1001, card.clone(), "{tools_summary}");
+        let mut decider = Decider::new_test(1001, card.clone(), "t");
         // Seed the personality card so decide() reaches the LLM call.
         decider.personality_cache.seed(1001, card).await.unwrap();
         let base = spawn_status_llm(

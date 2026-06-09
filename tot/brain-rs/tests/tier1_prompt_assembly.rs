@@ -232,16 +232,16 @@ fn test_project_hot_inputs_flattens_fresh_chat() {
 }
 
 #[test]
-fn test_truncate_memory_items_clips_text_at_300() {
+fn test_truncate_memory_items_clips_text_at_200() {
     let decider = Decider::new_test(1001, fixture_card(), "t");
     let long_text = "x".repeat(400);
     let items = vec![serde_json::json!({"text": long_text, "id": "abc"})];
     let truncated = decider.truncate_memory_items_test(&items);
     assert!(truncated[0]["text"].as_str().unwrap().ends_with('…'));
-    // 300 chars + "…" (1 char, 3 UTF-8 bytes) = 301 chars total
+    // 200 chars + "…" (1 char, 3 UTF-8 bytes) = 201 chars total
     assert_eq!(
         truncated[0]["text"].as_str().unwrap().chars().count(),
-        301
+        201
     );
 }
 
@@ -346,5 +346,10 @@ fn test_system_prompt_examples_unescaped_and_user_clean() {
     assert!(
         !prompt.user.contains("{tools_summary}"),
         "user prompt must not reference tools_summary"
+    );
+    // Guard: the user header "YOU ARE:" must never drift into the system block.
+    assert!(
+        !prompt.system.contains("YOU ARE:"),
+        "system prompt must not contain user-section header 'YOU ARE:'"
     );
 }
