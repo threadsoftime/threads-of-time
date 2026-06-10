@@ -8,7 +8,7 @@
 //! JSON serialization of [`compose_oneof`] output preserves insertion order,
 //! matching Python's dict insertion order (guaranteed since Python 3.7).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::{Map, Value};
 
@@ -525,6 +525,70 @@ impl ListTools for crate::mcp_client::McpClient {
 }
 
 // ---------------------------------------------------------------------------
+// filter_to_allowlist — constrain the live tool surface to the dispatch allow-list
+// ---------------------------------------------------------------------------
+
+/// Partition the live tool surface by an allow-list. Pure (no logging) for testability.
+///
+/// Returns `(kept, excluded, missing)`:
+/// * `kept`     — entries whose name ∈ `allow` (BTreeMap, so sorted).
+/// * `excluded` — live tool names ∉ `allow` (sorted) — *advertised-but-not-allow-listed*.
+/// * `missing`  — `allow` names not present in `per_tool` (sorted) — *allow-listed-but-not-advertised*.
+pub fn partition_by_allowlist(
+    per_tool: BTreeMap<String, ToolEntry>,
+    allow: &HashSet<&str>,
+) -> (BTreeMap<String, ToolEntry>, Vec<String>, Vec<String>) {
+    let mut kept: BTreeMap<String, ToolEntry> = BTreeMap::new();
+    let mut excluded: Vec<String> = Vec::new();
+    for (name, entry) in per_tool {
+        if allow.contains(name.as_str()) {
+            kept.insert(name, entry);
+        } else {
+            excluded.push(name);
+        }
+    }
+    let mut missing: Vec<String> = allow
+        .iter()
+        .copied()
+        .filter(|a| !kept.contains_key(*a))
+        .map(|a| a.to_string())
+        .collect();
+    excluded.sort();
+    missing.sort();
+    (kept, excluded, missing)
+}
+
+/// Filter the live tool surface to the dispatch allow-list, logging drift both ways.
+///
+/// Guarantees the returned map ⊆ `allow`, so any grammar (`compose_oneof`) or prompt
+/// (`render_prompt_summary`) derived from it can only offer dispatchable tools.
+pub fn filter_to_allowlist(
+    per_tool: BTreeMap<String, ToolEntry>,
+    allow: &HashSet<&str>,
+) -> BTreeMap<String, ToolEntry> {
+    let (kept, excluded, missing) = partition_by_allowlist(per_tool, allow);
+    if !excluded.is_empty() {
+        tracing::warn!(
+            "tool_vocab drift: advertised-but-not-allow-listed (excluded from grammar+prompt): {:?}",
+            excluded
+        );
+    }
+    if !missing.is_empty() {
+        tracing::warn!(
+            "tool_vocab drift: allow-listed-but-not-advertised (no grammar branch): {:?}",
+            missing
+        );
+    }
+    tracing::info!(
+        "tool_vocab: {} kept, {} excluded, {} missing",
+        kept.len(),
+        excluded.len(),
+        missing.len()
+    );
+    kept
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests — sanitize_bool_schemas
 // ---------------------------------------------------------------------------
 
@@ -601,6 +665,60 @@ mod tests {
         let s = serde_json::json!({"properties": {"a": {"type": "array", "items": true}}});
         let out = sanitize_bool_schemas(&s);
         assert_eq!(out["properties"]["a"]["items"], serde_json::json!({}));
+    }
+
+    fn test_entry(src: &str) -> ToolEntry {
+        ToolEntry {
+            description: String::new(),
+            schema: serde_json::json!({"type": "object", "properties": {}}),
+            source_mcp: src.to_string(),
+        }
+    }
+
+    #[test]
+    fn partition_keeps_allowlisted_drops_rest_and_reports_drift() {
+        let mut per_tool: BTreeMap<String, ToolEntry> = BTreeMap::new();
+        per_tool.insert("bot.move_path".into(), test_entry("harness")); // allow-listed
+        per_tool.insert("gm.set_level".into(), test_entry("harness"));  // excluded (admin)
+        per_tool.insert("obs.list_players".into(), test_entry("harness")); // allow-listed
+        per_tool.insert("totally.unknown".into(), test_entry("harness")); // excluded
+        let allow: HashSet<&str> =
+            ["bot.move_path", "obs.list_players", "memory.write"].into_iter().collect();
+
+        let (kept, excluded, missing) = partition_by_allowlist(per_tool, &allow);
+
+        let kept_names: Vec<&str> = kept.keys().map(|s| s.as_str()).collect();
+        assert_eq!(kept_names, vec!["bot.move_path", "obs.list_players"]); // BTreeMap = sorted
+        assert_eq!(excluded, vec!["gm.set_level".to_string(), "totally.unknown".to_string()]);
+        assert_eq!(missing, vec!["memory.write".to_string()]); // in allow, not advertised
+    }
+
+    #[test]
+    fn grammar_is_subset_of_allowlist_after_filter() {
+        use crate::decide::KNOWN_TOOLS;
+        let allow: HashSet<&str> = KNOWN_TOOLS.iter().copied().collect();
+
+        let mut per_tool: BTreeMap<String, ToolEntry> = BTreeMap::new();
+        per_tool.insert("bot.move_path".into(), test_entry("harness"));    // allow-listed
+        per_tool.insert("obs.list_players".into(), test_entry("harness")); // allow-listed
+        per_tool.insert("gm.set_level".into(), test_entry("harness"));     // admin — must NOT reach grammar
+        per_tool.insert("gm.teleport".into(), test_entry("harness"));
+        per_tool.insert("event.start".into(), test_entry("harness"));
+
+        let filtered = filter_to_allowlist(per_tool, &allow);
+        let schema = compose_oneof(&filtered);
+
+        // Every action branch's tool const must be in the allow-list (no_op has tool=null → skipped).
+        for branch in schema["oneOf"].as_array().unwrap() {
+            if let Some(tool) = branch["properties"]["tool"]["const"].as_str() {
+                assert!(allow.contains(tool), "grammar offered non-allow-listed tool: {tool}");
+            }
+        }
+        // Excluded admin/orchestration tools must be absent entirely.
+        let serialized = serde_json::to_string(&schema).unwrap();
+        for forbidden in ["gm.set_level", "gm.teleport", "event.start"] {
+            assert!(!serialized.contains(forbidden), "{forbidden} leaked into the grammar");
+        }
     }
 
     /// Verify the exact `memory.write` `relations` arg shape that caused the
