@@ -925,6 +925,72 @@ pub struct BotAttackArgs {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotAttackWrapper { pub args: BotAttackArgs }
 
+// ── bot.cast_spell ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotCastSpellArgs {
+    /// Low-32 GUID of the externally-owned bot.
+    pub bot_guid: i64,
+    /// Rank-1/base spell id. The adapter upranks to the highest rank in the
+    /// bot's spellbook via the sSpellMgr spell chain.
+    pub spell_id: u32,
+    /// Packed target uint64 (raw ObjectGuid). Omit (or 0) for self-cast.
+    /// MUST be u64 (see BotAttackArgs.target_guid): packed GUIDs exceed i64::MAX.
+    #[serde(default)]
+    pub target_guid: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotCastSpellWrapper { pub args: BotCastSpellArgs }
+
+// ── bot.vendor_sell ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotVendorSellArgs {
+    /// Low-32 GUID of the externally-owned bot.
+    pub bot_guid: i64,
+    /// Packed vendor creature uint64 (raw ObjectGuid). MUST be u64.
+    pub vendor_guid: u64,
+    /// Sell items of quality <= this (0=grey only). Defaults to 0.
+    #[serde(default)]
+    pub max_quality: u8,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotVendorSellWrapper { pub args: BotVendorSellArgs }
+
+// ── bot.repair ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotRepairArgs {
+    /// Low-32 GUID of the externally-owned bot.
+    pub bot_guid: i64,
+    /// Packed repair-capable vendor creature uint64 (raw ObjectGuid). MUST be u64.
+    pub vendor_guid: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotRepairWrapper { pub args: BotRepairArgs }
+
+// ── bot.mail ──────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotMailArgs {
+    /// Low-32 GUID of the externally-owned bot.
+    pub bot_guid: i64,
+    /// Recipient character name (resolved server-side via the character cache).
+    pub recipient: String,
+    /// Packed item uint64 guids from the bot's bags. MUST be u64 elements.
+    #[serde(default)]
+    pub item_guids: Vec<u64>,
+    /// Copper to attach. The 30c postage is charged on top, server-side.
+    #[serde(default)]
+    pub copper: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotMailWrapper { pub args: BotMailArgs }
+
 // ── obs.get_nearby_hostiles ───────────────────────────────────────────────────
 
 fn default_hostiles_radius() -> f64 { 40.0 }
@@ -1008,7 +1074,7 @@ mod tests {
     }
 
     #[test]
-    fn all_54_wrappers_have_args_envelope() {
+    fn all_58_wrappers_have_args_envelope() {
         // gm (7)
         assert!(has_args_envelope(&schema_for!(GmAdditemWrapper)),     "gm.additem");
         assert!(has_args_envelope(&schema_for!(GmEquipAllWrapper)),    "gm.equip_all");
@@ -1073,6 +1139,11 @@ mod tests {
         assert!(has_args_envelope(&schema_for!(ObsGetNearbyHostilesWrapper)),    "obs.get_nearby_hostiles");
         assert!(has_args_envelope(&schema_for!(ObsGetLootableCorpsesWrapper)),   "obs.get_lootable_corpses");
         assert!(has_args_envelope(&schema_for!(BotLootWrapper)),                 "bot.loot");
+        // M2 slice 2.2 — cast + economy verb batch (4)
+        assert!(has_args_envelope(&schema_for!(BotCastSpellWrapper)),  "bot.cast_spell");
+        assert!(has_args_envelope(&schema_for!(BotVendorSellWrapper)), "bot.vendor_sell");
+        assert!(has_args_envelope(&schema_for!(BotRepairWrapper)),     "bot.repair");
+        assert!(has_args_envelope(&schema_for!(BotMailWrapper)),       "bot.mail");
     }
 
     // ── MCP default-fill parity tests ─────────────────────────────────────────

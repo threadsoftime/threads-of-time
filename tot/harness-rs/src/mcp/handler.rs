@@ -1,4 +1,4 @@
-//! MCP ServerHandler with all 54 V1 tools.
+//! MCP ServerHandler with all 58 V1 tools.
 //!
 //! Port of `harness_daemon/mcp_server.py:build_mcp_server`.
 //!
@@ -9,7 +9,7 @@
 //!   `impl ServerHandler for HarnessMcp` sets `serverInfo`.
 //! - Every tool is a direct `#[tool]` fn that forwards to `self.forward(...)`.
 //!
-//! IMPORTANT: All 54 tool methods must be defined DIRECTLY in the
+//! IMPORTANT: All 58 tool methods must be defined DIRECTLY in the
 //! `#[tool_router] impl HarnessMcp` block with `#[tool(...)]` attributes on
 //! each function. The `#[tool_router]` proc macro detects `#[tool]` attributes
 //! in the token stream BEFORE macro_rules expansion — so `macro_rules!`
@@ -177,7 +177,7 @@ impl HarnessMcp {
     }
 }
 
-// ── 54-tool #[tool_router] impl ───────────────────────────────────────────────
+// ── 58-tool #[tool_router] impl ───────────────────────────────────────────────
 //
 // CRITICAL: Each tool method MUST be defined directly with `#[tool(...)]` on
 // the function. Do NOT use macro_rules! invocations here — the `#[tool_router]`
@@ -298,6 +298,26 @@ impl HarnessMcp {
     #[tool(name = "bot.attack", description = "Assert melee attack on a target; core auto-swings while ownership holds. target_guid is the packed creature uint64 from obs.get_nearby_hostiles.")]
     async fn bot_attack(&self, Parameters(w): Parameters<schemas::BotAttackWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
         self.forward("bot.attack", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
+    }
+
+    #[tool(name = "bot.cast_spell", description = "Cast a spell: spell_id is the rank-1/base id (adapter upranks to the bot's best known rank). Omit target_guid for self-cast. Expected combat failures return ok:true with {casting:false, fail_code}.")]
+    async fn bot_cast_spell(&self, Parameters(w): Parameters<schemas::BotCastSpellWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
+        self.forward("bot.cast_spell", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
+    }
+
+    #[tool(name = "bot.vendor_sell", description = "Sell unequipped bag items of quality <= max_quality (0=grey) to a vendor in interact range. vendor_guid is the packed creature uint64.")]
+    async fn bot_vendor_sell(&self, Parameters(w): Parameters<schemas::BotVendorSellWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
+        self.forward("bot.vendor_sell", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
+    }
+
+    #[tool(name = "bot.repair", description = "Repair all items at a repair-capable vendor in interact range. vendor_guid is the packed creature uint64.")]
+    async fn bot_repair(&self, Parameters(w): Parameters<schemas::BotRepairWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
+        self.forward("bot.repair", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
+    }
+
+    #[tool(name = "bot.mail", description = "Mail items and/or copper to a character by name; requires a mailbox in interact range. 30c postage charged.")]
+    async fn bot_mail(&self, Parameters(w): Parameters<schemas::BotMailWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
+        self.forward("bot.mail", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
     }
 
     #[tool(name = "bot.loot", description = "Loot a dead creature (must be tapped by this bot, solo loot only). target_guid is the packed creature uint64 from obs.get_lootable_corpses.")]
@@ -514,7 +534,7 @@ mod tests {
     // FAIL TO BOOT.
     //
     // This test asserts the representative case (obs.ping).  The full suite
-    // covering all 54 wrappers lives in mcp::schemas::tests::all_54_wrappers_have_args_envelope.
+    // covering all 58 wrappers lives in mcp::schemas::tests::all_58_wrappers_have_args_envelope.
     // (A live tools/list assertion previously lived in the Python parity gate,
     // retired along with the Python sidecars.)
     #[test]

@@ -239,8 +239,8 @@ mod tests {
     // ── test 5: HarnessMcp::new constructs with correct tool_router ───────────
 
     #[tokio::test]
-    async fn registry_contains_54_tools() {
-        // TODO(Phase-12): also assert the MCP tools/list surface exposes all 54
+    async fn registry_contains_58_tools() {
+        // TODO(Phase-12): also assert the MCP tools/list surface exposes all 58
         // (needs a full streamable-HTTP session — done in the parity gate).
         use crate::mcp::handler::HarnessMcp;
         use crate::mcp::schemas;
@@ -272,12 +272,12 @@ mod tests {
         let handler = HarnessMcp::new(state);
 
         // The #[tool_router] generates a ToolRouter; there is no public
-        // runtime count on it, but we can verify the registry has 54 tools.
+        // runtime count on it, but we can verify the registry has 58 tools.
         let registry = build_v1_registry();
         assert_eq!(
             registry.names().len(),
-            54,
-            "registry must have 54 tools matching the 54 #[tool] methods"
+            58,
+            "registry must have 58 tools matching the 58 #[tool] methods"
         );
 
         // Verify that the flat Args types (no wrapper) serialize correctly.

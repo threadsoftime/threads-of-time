@@ -117,7 +117,7 @@ impl Registry {
 
 /// Build the V1 registry per spec §6.
 ///
-/// Verbatim port of `registry.py:build_v1_registry` (54 entries).
+/// Port of `registry.py:build_v1_registry` (54 entries) + M2 slice 2.2 additions (58 total).
 pub fn build_v1_registry() -> Registry {
     Registry::new(vec![
         // GM-tier
@@ -187,6 +187,11 @@ pub fn build_v1_registry() -> Registry {
         // Observation (M1-combat-loot)
         ToolEntry::new("obs.get_lootable_corpses", "obs.get_lootable_corpses", Some("bot_guid"), true),
         ToolEntry::new("obs.get_nearby_hostiles",  "obs.get_nearby_hostiles",  Some("bot_guid"), true),
+        // Bot-tier (M2 slice 2.2 — cast + economy verb batch)
+        ToolEntry::new("bot.cast_spell",  "bot.cast_spell",  Some("bot_guid"), true),
+        ToolEntry::new("bot.vendor_sell", "bot.vendor_sell", Some("bot_guid"), true),
+        ToolEntry::new("bot.repair",      "bot.repair",      Some("bot_guid"), true),
+        ToolEntry::new("bot.mail",        "bot.mail",        Some("bot_guid"), true),
         // LFG force-form primitives (Inc 1)
         ToolEntry::new("lfg.form_group",          "lfg.form_group",         None,                true),
         // LFG cancel drain (Inc 2)
@@ -204,9 +209,9 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn registry_has_54_tools() {
+    fn registry_has_58_tools() {
         let reg = build_v1_registry();
-        assert_eq!(reg.names().len(), 54);
+        assert_eq!(reg.names().len(), 58);
     }
 
     #[test]
@@ -319,6 +324,26 @@ mod tests {
         assert_eq!(e.required_scope, "bot.attack");
         assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
         assert!(e.forwards_to_ac, "bot.attack must forward to AC");
+    }
+
+    #[test]
+    fn bot_cast_spell_registered() {
+        let reg = build_v1_registry();
+        let e = reg.find("bot.cast_spell").unwrap();
+        assert_eq!(e.required_scope, "bot.cast_spell");
+        assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
+        assert!(e.forwards_to_ac);
+    }
+
+    #[test]
+    fn economy_verbs_registered() {
+        let reg = build_v1_registry();
+        for name in ["bot.vendor_sell", "bot.repair", "bot.mail"] {
+            let e = reg.find(name).unwrap_or_else(|_| panic!("{name} missing"));
+            assert_eq!(e.required_scope, name);
+            assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
+            assert!(e.forwards_to_ac, "{name} must forward to AC");
+        }
     }
 
     #[test]
