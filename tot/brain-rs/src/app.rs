@@ -41,7 +41,7 @@ use crate::mcp_client::McpClient;
 use crate::models::PersonalityCard;
 use crate::morph::morph_personality;
 use crate::personality::PersonalityCache;
-use crate::schema_builder::{compose_oneof, fetch_schemas, render_prompt_summary};
+use crate::schema_builder::{compose_oneof, fetch_schemas, filter_to_allowlist, render_prompt_summary};
 use crate::state::StateStore;
 use crate::subset_gate::{BotSnapshot, SubsetGate, SubsetGateConfig};
 use crate::triage::TriageGate;
@@ -458,12 +458,17 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
     }
 
     // ── Schema fetch — fail-loud on error ────────────────────────────────────
-    let per_tool = fetch_schemas(harness_mcp.as_ref(), memory_mcp.as_ref())
+    let per_tool_raw = fetch_schemas(harness_mcp.as_ref(), memory_mcp.as_ref())
         .await
         .map_err(|e| {
             tracing::error!("schema_builder_fetch_failed error={e:?}");
             e
         })?;
+    // Derive the grammar + prompt from the dispatch allow-list so the LLM can never
+    // be offered a tool the dispatcher would reject (grammar ⊆ KNOWN_TOOLS).
+    let allow: std::collections::HashSet<&str> =
+        crate::decide::KNOWN_TOOLS.iter().copied().collect();
+    let per_tool = filter_to_allowlist(per_tool_raw, &allow);
 
     let decision_schema = compose_oneof(&per_tool);
     let tools_summary = render_prompt_summary(&per_tool);
