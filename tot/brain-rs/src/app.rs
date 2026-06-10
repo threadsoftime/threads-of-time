@@ -532,6 +532,15 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
         .trim_end_matches("/mcp/mcp")
         .to_string();
 
+    // Shared between LoopSupervisor (emit side) and the exec status drain task
+    // (terminal side) — the goal re-emission fix (design 2026-06-10 §1).
+    let emission_ledger = Arc::new(crate::emission_ledger::EmissionLedger::new(
+        crate::emission_ledger::CooldownConfig {
+            blocked: std::time::Duration::from_secs(settings.reemit_cooldown_blocked_s),
+            needs_decision: std::time::Duration::from_secs(settings.reemit_cooldown_needs_decision_s),
+        },
+    ));
+
     // ── G3 / M2-F: exec supervisor embed (roster) ─────────────────────────────
     // For each enrolled bot, wire an in-process goal→exec channel and start a
     // per_bot_loop on the shared BotSupervisor. All per-bot sinks are collected
@@ -569,12 +578,16 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
             // It owns exec_sup for process lifetime; ownership alone prevents the
             // drop that would close the per-bot task channels. M1/F shutdown =
             // process exit (join_all is wired but not invoked here).
+            let drain_ledger = Arc::clone(&emission_ledger);
             tokio::spawn(async move {
                 let _exec_sup_lifetime = exec_sup;
                 loop {
                     for (guid, source) in &sources {
                         match source.poll_status(*guid).await {
-                            Ok(Some(status)) => log_exec_status(*guid, &status),
+                            Ok(Some(status)) => {
+                                log_exec_status(*guid, &status);
+                                drain_ledger.on_terminal(*guid as i64, &status);
+                            }
                             Ok(None) => {}
                             Err(e) => warn!("exec_status_poll_error bot_guid={} err={:?}", guid, e),
                         }
@@ -626,6 +639,7 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
         settings.memory_bearer.clone(),
         settings.brain_sse_coalesce_ms,
         goal_sink,
+        Arc::clone(&emission_ledger),
         profile_registry,
         profile_map,
     );

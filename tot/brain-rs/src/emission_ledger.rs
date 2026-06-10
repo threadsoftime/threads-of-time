@@ -141,7 +141,7 @@ mod tests {
         l.record_emit(1, "grind-1-6");
         l.on_terminal(1, &blocked());
         assert!(!l.may_emit(1, "grind-1-6"), "cooling down");
-        std::thread::sleep(Duration::from_millis(60));
+        std::thread::sleep(Duration::from_millis(110));
         assert!(l.may_emit(1, "grind-1-6"), "cooldown expired");
     }
 

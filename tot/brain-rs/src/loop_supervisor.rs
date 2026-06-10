@@ -122,9 +122,9 @@ pub struct LoopSupervisor {
     /// When `Some`, goal emission is active. When `None` (the default),
     /// the supervisor behaves exactly as before — byte-identical parity.
     goal_sink: Option<Arc<dyn GoalSink>>,
-    /// Dedup map: bot_guid → last emitted goal_id. Prevents re-emitting the
-    /// same goal every tick. StdMutex — never held across an `.await`.
-    emitted_goals: StdMutex<HashMap<i64, String>>,
+    /// Shared dedup + re-emission cooldowns. The exec status drain task in app.rs
+    /// stamps terminal statuses into this same ledger (the stall fix).
+    emission_ledger: Arc<crate::emission_ledger::EmissionLedger>,
 
     // ── M2 slice 2.1: declarative grind profiles ────────────────────────────
     profile_registry: Arc<crate::profile::ProfileRegistry>,
@@ -155,6 +155,7 @@ impl LoopSupervisor {
         memory_bearer: String,
         brain_sse_coalesce_ms: u64,
         goal_sink: Option<Arc<dyn GoalSink>>,
+        emission_ledger: Arc<crate::emission_ledger::EmissionLedger>,
         profile_registry: Arc<crate::profile::ProfileRegistry>,
         profile_map: std::collections::HashMap<i64, String>,
     ) -> Arc<Self> {
@@ -178,7 +179,7 @@ impl LoopSupervisor {
             sse_tasks: StdMutex::new(HashMap::new()),
             sse_cancel_flags: StdMutex::new(HashMap::new()),
             goal_sink,
-            emitted_goals: StdMutex::new(HashMap::new()),
+            emission_ledger,
             profile_registry,
             profile_map,
         })
@@ -816,8 +817,8 @@ impl LoopSupervisor {
         })
     }
 
-    /// Emit a goal to the sink if the bot is below cap and the goal has not
-    /// already been emitted for this (bot, level) combination.
+    /// Emit a goal to the sink if the bot is below cap and the goal emission
+    /// is permitted by the EmissionLedger (not in flight, not cooling down after a terminal status).
     ///
     /// Gated on `self.goal_sink`. With `None`, this is a complete no-op.
     /// Called at the end of `_one_tick_inner` — after dispatch + telemetry.
@@ -861,14 +862,13 @@ impl LoopSupervisor {
             None => return, // at cap → no goal
         };
 
-        // Dedup: emit once per (bot, level). goal_id encodes both.
-        {
-            let mut emitted = self.emitted_goals.lock().unwrap();
-            if emitted.get(&bot_guid).map(|id| id == &envelope.goal_id).unwrap_or(false) {
-                return; // already emitted this (bot, level) goal
-            }
-            emitted.insert(bot_guid, envelope.goal_id.clone());
+        // Dedup + cooldown via the shared EmissionLedger. Terminal statuses
+        // (fed by the exec drain task in app.rs) clear the in-flight entry and
+        // stamp a per-status cooldown — fixes the permanent (bot,level) stall.
+        if !self.emission_ledger.may_emit(bot_guid, &envelope.goal_id) {
+            return;
         }
+        self.emission_ledger.record_emit(bot_guid, &envelope.goal_id);
 
         // Emit — best-effort: log on error, do NOT propagate (must not perturb the tick).
         if let Err(e) = sink.set_goal(bot_guid as u64, envelope).await {
@@ -1202,10 +1202,13 @@ mod tests {
         (Arc::new(TestGoalSink { tx }), rx)
     }
 
-    /// Build a minimal LoopSupervisor for unit tests.
+    /// Build a minimal LoopSupervisor for unit tests, also returning the ledger.
     /// Uses the simplest possible Decider (new_test_with_max_level) and no-op
     /// collaborators for everything not under test.
-    fn minimal_supervisor(goal_sink: Option<Arc<dyn GoalSink>>, max_level: u32) -> Arc<LoopSupervisor> {
+    fn minimal_supervisor_with_ledger(
+        goal_sink: Option<Arc<dyn GoalSink>>,
+        max_level: u32,
+    ) -> (Arc<LoopSupervisor>, Arc<crate::emission_ledger::EmissionLedger>) {
         use crate::decide::Decider;
         use crate::dispatch::Dispatcher;
         use crate::models::PersonalityCard;
@@ -1247,17 +1250,25 @@ mod tests {
         let triage = Arc::new(TriageGate::new(Arc::clone(&mcp), Arc::clone(&mcp)));
         let dispatcher = Arc::new(Dispatcher::new(Arc::clone(&mcp), Arc::clone(&mcp), "whisper", None));
 
+        let ledger = Arc::new(crate::emission_ledger::EmissionLedger::new(Default::default()));
         let (reg, map) = test_registry_and_map(1003);
-        LoopSupervisor::new(
+        let sup = LoopSupervisor::new(
             triage, decider, dispatcher, store,
             5.0, 300.0,
             Arc::new(TestLogWriter),
             None, None, 3,
             false, String::new(), String::new(), 200,
             goal_sink,
+            Arc::clone(&ledger),
             reg,
             map,
-        )
+        );
+        (sup, ledger)
+    }
+
+    /// Thin wrapper so all existing G2 tests stay untouched.
+    fn minimal_supervisor(goal_sink: Option<Arc<dyn GoalSink>>, max_level: u32) -> Arc<LoopSupervisor> {
+        minimal_supervisor_with_ledger(goal_sink, max_level).0
     }
 
     fn test_registry_and_map(bot_guid: i64) -> (std::sync::Arc<crate::profile::ProfileRegistry>, std::collections::HashMap<i64, String>) {
@@ -1319,6 +1330,27 @@ rotation_id = "auto_attack"
         let _ = rx.try_recv().expect("expected first goal");
         // No second goal
         assert!(rx.try_recv().is_err(), "second tick at same level must not re-emit");
+    }
+
+    /// THE STALL FIX: after a terminal status, the same (bot,level) goal re-emits.
+    /// Old behavior (kb_87a7eade gap #1): dedup forever → 6 h overnight stall.
+    #[tokio::test]
+    async fn goal_sink_re_emits_after_terminal_status() {
+        use tot_goal_contract::GoalStatus;
+        let (sink, mut rx) = make_test_sink();
+        let (sup, ledger) = minimal_supervisor_with_ledger(Some(sink), 25);
+        let inputs = hot_inputs_with_level(6);
+
+        sup.maybe_emit_goal(1003, &inputs).await;
+        let _ = rx.try_recv().expect("first goal");
+
+        sup.maybe_emit_goal(1003, &inputs).await;
+        assert!(rx.try_recv().is_err(), "in flight: must not re-emit");
+
+        ledger.on_terminal(1003, &GoalStatus::Completed { summary: "done".into() });
+        sup.maybe_emit_goal(1003, &inputs).await;
+        let (_, env) = rx.try_recv().expect("re-emit after terminal status");
+        assert_eq!(env.goal_id, "grind-1003-6");
     }
 
     /// A tick at level 7 after one at level 6 MUST emit a new goal.
