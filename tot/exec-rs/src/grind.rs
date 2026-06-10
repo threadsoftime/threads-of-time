@@ -9,7 +9,7 @@ use thiserror::Error;
 use tot_goal_contract::GrindGoal;
 use tot_harness_client::{HarnessClient, HarnessError};
 
-use crate::combat::{CombatContext, RotationPlugin};
+use crate::combat::{CombatContext, FightMemo, RotationPlugin, TickOutcome};
 
 /// A selected hostile to engage (world-space position + distance from the bot).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -271,25 +271,35 @@ pub(crate) async fn fight(
     // M1: AutoAttackAction::can_execute ignores ctx, so bot/target hp are placeholders.
     // M2's per-spec abilities will refresh these from each poll (the values are already
     // read below via read_self / the hostiles poll) to gate ability preconditions.
+    // bot_power_pct / bot_mana_pct / combo_points added for CombatContext v2 (Task 3);
+    // full ctx-refresh integration is deferred to Task 5.
     let ctx = CombatContext {
         bot_hp_pct: 100.0,
+        bot_power_pct: 100.0,
+        bot_mana_pct: None,
+        combo_points: 0,
         target_hp_pct: 100.0,
         target_distance: target.distance,
     };
+    let mut memo = FightMemo::default();
 
     for _ in 0..FIGHT_MAX_POLLS {
         // Fire the rotation action (bot.attack — idempotent re-issue). The target can die
         // between the previous liveness poll and this attack; the adapter then returns
         // "target is not alive" — the grind's WIN condition, not a failure. Treat it as
         // TargetDead and proceed to loot.
-        if let Err(e) = rotation.tick(bot_guid, target.guid, client, &ctx).await {
-            if is_target_dead_attack_error(&e) {
-                return Ok(FightOutcome::TargetDead);
+        match rotation.tick(bot_guid, target.guid, client, &ctx, &mut memo).await {
+            Ok(TickOutcome::TargetGone) => return Ok(FightOutcome::TargetDead),
+            Ok(TickOutcome::Acted { .. }) => {}
+            Err(e) => {
+                if is_target_dead_attack_error(&e) {
+                    return Ok(FightOutcome::TargetDead);
+                }
+                return Err(match e {
+                    crate::combat::CombatError::Harness(he) => GrindError::Harness(he),
+                    crate::combat::CombatError::Shape(s) => GrindError::Shape(s),
+                });
             }
-            return Err(match e {
-                crate::combat::CombatError::Harness(he) => GrindError::Harness(he),
-                crate::combat::CombatError::Shape(s) => GrindError::Shape(s),
-            });
         }
 
         // Poll target liveness.
