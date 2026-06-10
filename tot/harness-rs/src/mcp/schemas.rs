@@ -949,8 +949,8 @@ pub struct BotCastSpellWrapper { pub args: BotCastSpellArgs }
 pub struct BotVendorSellArgs {
     /// Low-32 GUID of the externally-owned bot.
     pub bot_guid: i64,
-    /// Packed vendor creature uint64 (raw ObjectGuid). MUST be u64.
-    pub vendor_guid: u64,
+    /// DB creature spawn id (`creature.guid` column) of the vendor. Resolved server-side via the map's spawn-id store; NOT a packed runtime ObjectGuid (callers cannot obtain those for friendly NPCs).
+    pub vendor_spawn_id: u64,
     /// Sell items of quality <= this (0=grey only). Defaults to 0.
     #[serde(default)]
     pub max_quality: u8,
@@ -965,8 +965,8 @@ pub struct BotVendorSellWrapper { pub args: BotVendorSellArgs }
 pub struct BotRepairArgs {
     /// Low-32 GUID of the externally-owned bot.
     pub bot_guid: i64,
-    /// Packed repair-capable vendor creature uint64 (raw ObjectGuid). MUST be u64.
-    pub vendor_guid: u64,
+    /// DB creature spawn id (`creature.guid` column) of the vendor. Resolved server-side via the map's spawn-id store; NOT a packed runtime ObjectGuid (callers cannot obtain those for friendly NPCs).
+    pub vendor_spawn_id: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -1182,7 +1182,7 @@ mod tests {
     #[test]
     fn bot_vendor_sell_defaults_max_quality_to_grey_only() {
         let w: BotVendorSellWrapper =
-            serde_json::from_str(r#"{"args":{"bot_guid":1,"vendor_guid":2}}"#).unwrap();
+            serde_json::from_str(r#"{"args":{"bot_guid":1,"vendor_spawn_id":2}}"#).unwrap();
         assert_eq!(w.args.max_quality, 0, "max_quality must default to 0 (grey only)");
     }
 

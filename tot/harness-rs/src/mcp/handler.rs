@@ -305,12 +305,12 @@ impl HarnessMcp {
         self.forward("bot.cast_spell", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
     }
 
-    #[tool(name = "bot.vendor_sell", description = "Sell unequipped bag items of quality <= max_quality (0=grey) to a vendor in interact range. vendor_guid is the packed creature uint64.")]
+    #[tool(name = "bot.vendor_sell", description = "Sell unequipped bag items of quality <= max_quality (0=grey) to a vendor in interact range. vendor_spawn_id is the DB creature spawn id (creature.guid).")]
     async fn bot_vendor_sell(&self, Parameters(w): Parameters<schemas::BotVendorSellWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
         self.forward("bot.vendor_sell", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
     }
 
-    #[tool(name = "bot.repair", description = "Repair all items at a repair-capable vendor in interact range. vendor_guid is the packed creature uint64.")]
+    #[tool(name = "bot.repair", description = "Repair all items at a repair-capable vendor in interact range. vendor_spawn_id is the DB creature spawn id (creature.guid).")]
     async fn bot_repair(&self, Parameters(w): Parameters<schemas::BotRepairWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
         self.forward("bot.repair", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
     }
