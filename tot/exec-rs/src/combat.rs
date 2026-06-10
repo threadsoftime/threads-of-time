@@ -125,9 +125,14 @@ pub struct CastSpellAction {
 
 #[derive(Debug, serde::Deserialize)]
 struct CastResult {
-    #[serde(default)] casting: bool,
+    // `casting` is REQUIRED: an all-defaults parse would let a contract-violating
+    // response (older adapter, wrong tool shape) masquerade as Failed(CastFailed)
+    // and silently degrade the rotation to melee. Contract violations must be loud.
+    casting: bool,
     #[serde(default)] fail_code: Option<String>,
     #[serde(default)] cast_time_ms: Option<u64>,
+    /// Raw SpellCastResult diagnostic the adapter attaches to cast_failed (spec §1.1).
+    #[serde(default)] detail: Option<serde_json::Value>,
 }
 
 impl RotationAction for CastSpellAction {
@@ -160,8 +165,23 @@ impl RotationAction for CastSpellAction {
             if parsed.casting {
                 Ok(ActionOutcome::Casting { cast_time_ms: parsed.cast_time_ms.unwrap_or(0) })
             } else {
-                let code = parsed.fail_code.as_deref().map(FailCode::from_wire)
-                    .unwrap_or(FailCode::CastFailed);
+                // casting:false MUST carry a fail_code (spec §1.1) — its absence is a
+                // contract violation, not an expected combat failure.
+                let Some(wire) = parsed.fail_code.as_deref() else {
+                    return Err(CombatError::Shape(
+                        "bot.cast_spell: casting:false without fail_code".into(),
+                    ));
+                };
+                let code = FailCode::from_wire(wire);
+                if code == FailCode::CastFailed {
+                    // Catch-all: surface the unknown/raw code + adapter detail for
+                    // observability (wrong spell ids are this slice's named top risk).
+                    tracing::warn!(
+                        action = self.name, spell_id = self.spell_id,
+                        fail_code = wire, detail = ?parsed.detail,
+                        "bot.cast_spell: cast_failed catch-all"
+                    );
+                }
                 Ok(ActionOutcome::Failed(code))
             }
         })
@@ -214,7 +234,10 @@ impl RotationPlugin {
                 ActionOutcome::Failed(_) => {} // on_cooldown / no_power / out_of_range / no_los → next
             }
         }
-        Ok(TickOutcome::Acted { wait_ms: 0 }) // nothing fired this tick (melee fallback makes this rare)
+        // Nothing fired this tick (melee fallback makes this rare). Callers MUST sleep
+        // max(wait_ms, tick_interval) — sleeping bare wait_ms would hot-spin N failed
+        // casts per interval on an exhausted tick.
+        Ok(TickOutcome::Acted { wait_ms: 0 })
     }
 }
 
@@ -376,6 +399,39 @@ mod tests {
             .filter(|(n, _)| n == "bot.cast_spell")
             .map(|(_, a)| a["spell_id"].as_u64().unwrap()).collect();
         assert!(!seen.contains(&772), "not_known spell must be memo-dropped for the fight");
+    }
+
+    /// An unknown fail_code string (version skew) maps to the CastFailed catch-all.
+    #[tokio::test]
+    async fn cast_spell_unknown_fail_code_maps_to_cast_failed() {
+        let base = spawn_mock(move |_n, _a| {
+            json!({"casting": false, "fail_code": "spell_dampened", "detail": 42})
+        }).await;
+        let a = CastSpellAction { name: "smite", spell_id: 585, range: 30.0,
+                                  precondition: |_| true, self_cast: false };
+        let out = a.execute(1003, 1, &client(&base)).await.unwrap();
+        assert!(matches!(out, ActionOutcome::Failed(FailCode::CastFailed)));
+    }
+
+    /// A response missing `casting` is a contract violation → loud Shape error,
+    /// never a silent Failed(CastFailed) fallthrough.
+    #[tokio::test]
+    async fn cast_spell_malformed_response_is_shape_error() {
+        let base = spawn_mock(move |_n, _a| json!({"attacked": true})).await;
+        let a = CastSpellAction { name: "smite", spell_id: 585, range: 30.0,
+                                  precondition: |_| true, self_cast: false };
+        let err = a.execute(1003, 1, &client(&base)).await;
+        assert!(matches!(err, Err(CombatError::Shape(_))), "got: {err:?}");
+    }
+
+    /// casting:false without a fail_code violates the spec §1.1 contract → Shape error.
+    #[tokio::test]
+    async fn cast_spell_false_without_fail_code_is_shape_error() {
+        let base = spawn_mock(move |_n, _a| json!({"casting": false})).await;
+        let a = CastSpellAction { name: "smite", spell_id: 585, range: 30.0,
+                                  precondition: |_| true, self_cast: false };
+        let err = a.execute(1003, 1, &client(&base)).await;
+        assert!(matches!(err, Err(CombatError::Shape(_))), "got: {err:?}");
     }
 
     /// target_dead from the adapter ends the fight (TickOutcome::TargetGone).
