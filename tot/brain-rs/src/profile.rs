@@ -6,8 +6,9 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-/// Known rotation ids (2.1 ships only AutoAttack; 2.2 grows this).
-const KNOWN_ROTATIONS: &[&str] = &["auto_attack"];
+/// Known rotation ids (2.1 shipped auto_attack; 2.2 adds the per-spec Bracket-1 set).
+const KNOWN_ROTATIONS: &[&str] =
+    &["auto_attack", "warrior_b1", "rogue_b1", "mage_frost_b1", "priest_smite_b1"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProfileError {
@@ -155,6 +156,25 @@ rotation_id = "auto_attack"
         assert!(p.custom_behavior.is_none());
         assert!(reg.get("nope").is_none());
         assert!(reg.contains("dun_morogh_camp"));
+    }
+
+    #[test]
+    fn new_rotation_ids_validate() {
+        for rid in ["warrior_b1", "rogue_b1", "mage_frost_b1", "priest_smite_b1"] {
+            let toml = format!(
+                r#"
+[camp]
+anchor = {{ map_id = 0, x = 1.0, y = 2.0, z = 3.0 }}
+level_band = {{ below = 3, above = 2 }}
+creature_type = "humanoid"
+wander_radius = 90.0
+max_search_radius = 35.0
+rest_threshold = 0.35
+rotation_id = "{rid}"
+"#
+            );
+            assert!(ProfileRegistry::from_toml_str(&toml).is_ok(), "{rid} must be known");
+        }
     }
 
     #[test]

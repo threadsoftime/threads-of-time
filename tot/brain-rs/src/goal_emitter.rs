@@ -24,6 +24,7 @@ use crate::profile::GrindProfile;
 /// * `max_search_radius`: `profile.max_search_radius`
 /// * `rest_threshold`: `profile.rest_threshold`
 /// * `kill_count`: `None`
+/// * `rotation_id`: `Some(profile.rotation_id.clone())` — forwarded verbatim; exec-rs falls back to auto_attack on unknown ids
 /// * `goal_id`: `format!("grind-{bot_guid}-{level}")` — stable per (bot, level)
 pub fn synthesize_grind(
     bot_guid: i64,
@@ -64,7 +65,7 @@ pub fn synthesize_grind(
             to_level: level + 1,
             kill_count: None,
             rest_threshold: profile.rest_threshold,
-            rotation_id: None,
+            rotation_id: Some(profile.rotation_id.clone()),
         }),
     })
 }
@@ -246,5 +247,18 @@ mod tests {
     fn envelope_version_is_current_contract() {
         let env = synthesize_grind(1003, &state_summary(6), 25, &test_profile()).unwrap();
         assert_eq!(env.version, GOAL_CONTRACT_VERSION);
+    }
+
+    // ── rotation_id plumb-through ────────────────────────────────────────────
+
+    #[test]
+    fn synthesize_grind_plumbs_rotation_id() {
+        let profile = GrindProfile {
+            rotation_id: "mage_frost_b1".into(),
+            ..test_profile()
+        };
+        let env = synthesize_grind(1173, &state_summary(10), 25, &profile).unwrap();
+        let Goal::Grind(g) = &env.goal else { panic!("not grind") };
+        assert_eq!(g.rotation_id.as_deref(), Some("mage_frost_b1"));
     }
 }
