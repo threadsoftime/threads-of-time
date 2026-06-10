@@ -9,7 +9,7 @@ use thiserror::Error;
 use tot_goal_contract::GrindGoal;
 use tot_harness_client::{HarnessClient, HarnessError};
 
-use crate::combat::{CombatContext, FightMemo, RotationPlugin, TickOutcome};
+use crate::combat::{CombatContext, FightMemo, RotationAction, RotationPlugin, TickOutcome};
 
 /// A selected hostile to engage (world-space position + distance from the bot).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -103,15 +103,38 @@ pub async fn react(target: Target, seed: u64) -> GrindState {
     GrindState::Approaching { target }
 }
 
-/// `Approaching`: walk to the target's position via the navmesh. On a navigation
-/// failure (no path / stuck), fall back to `Scanning` to pick a fresh target.
+/// `Approaching`: walk to (or toward) the target's position via the navmesh.
+///
+/// For caster plugins (`engage_range` > 5 y), stops short at `engage_range * 0.8`
+/// from the target along the bot→target line. For melee plugins (`engage_range` ≈ 5 y)
+/// this is the same as walking to the target directly. On a navigation failure
+/// (no path / stuck), falls back to `Scanning` to pick a fresh target.
+///
+/// `bot_pos` is the bot's current world-space position, used to compute the
+/// stop-short point for ranged engage. Pass `(0,0,0)` if unavailable (pre-Tier0
+/// worldservers that omit `location.position` from the obs.get_state digest) — in
+/// that case the behaviour degrades to walking directly to the target.
 pub async fn approach(
     client: &HarnessClient,
     bot_guid: u64,
     target: Target,
+    engage_range: f64,
+    bot_pos: (f64, f64, f64),
 ) -> Result<GrindState, GrindError> {
-    // Walk to the target's reported world-space position (from obs.get_nearby_hostiles).
-    let dest = Dest { x: target.x, y: target.y, z: target.z };
+    // Casters stop short of the target: walk to a point engage_range*0.8 from the
+    // target along the bot→target line (melee plugins: engage ~5 y ≈ unchanged behaviour).
+    let dest = if target.distance > engage_range {
+        let (bx, by, _bz) = bot_pos;
+        let frac = ((target.distance - engage_range * 0.8) / target.distance).clamp(0.0, 1.0);
+        Dest {
+            x: bx + (target.x - bx) * frac,
+            y: by + (target.y - by) * frac,
+            z: target.z,
+        }
+    } else {
+        // Already within engage range — no walk needed; transition straight to Fighting.
+        return Ok(GrindState::Fighting { target });
+    };
     match nav::walk_to(client, bot_guid, dest).await {
         Ok(()) => Ok(GrindState::Fighting { target }),
         Err(NavError::NoPath) | Err(NavError::Stuck(_)) | Err(NavError::RepathBudgetExceeded(_)) => {
@@ -201,24 +224,66 @@ const REST_POLL_INTERVAL_MS: u64 = 2000;
 /// Bounded resting: stop polling after this many attempts (~60 s at 2 s/poll).
 const REST_MAX_POLLS: u32 = 30;
 
+#[derive(Debug, Deserialize, Default)]
+struct BotPosition {
+    #[serde(default)] x: f64,
+    #[serde(default)] y: f64,
+    #[serde(default)] z: f64,
+}
+
 #[derive(Debug, Deserialize)]
 struct SelfState {
     level: u32,
     /// Health as an integer percentage 0–100 (design §6.1, pre-flight note).
     #[serde(default)]
     hp_pct: u32,
+    /// Present after the 2.2 digest extension; None against older worldservers.
+    #[serde(default)]
+    mana_pct: Option<u32>,
+    #[serde(default)]
+    power_pct: Option<u32>,
+    #[serde(default)]
+    combo_points: Option<u8>,
 }
-#[derive(Debug, Deserialize)]
-struct StateDigest { #[serde(rename = "self")] self_: SelfState }
 
-/// Read the bot's own level/health from `obs.get_state`.
-async fn read_self(client: &HarnessClient, bot_guid: u64) -> Result<SelfState, GrindError> {
+/// Bot's world-space position from obs.get_state (Tier0 digest `location.position`).
+/// Defaults to 0,0,0 for mock back-compat (pre-Tier0-deploy worldservers omit it).
+#[derive(Debug, Deserialize)]
+struct LocationBlock {
+    #[serde(default)]
+    position: BotPosition,
+}
+
+#[derive(Debug, Deserialize)]
+struct StateDigest {
+    #[serde(rename = "self")]
+    self_: SelfState,
+    /// Present after the Tier0 digest extension; defaults to 0,0,0 for back-compat.
+    #[serde(default)]
+    location: Option<LocationBlock>,
+}
+
+impl StateDigest {
+    fn bot_pos(&self) -> (f64, f64, f64) {
+        match &self.location {
+            Some(l) => (l.position.x, l.position.y, l.position.z),
+            None => (0.0, 0.0, 0.0),
+        }
+    }
+}
+
+/// Read the bot's own state from `obs.get_state`. Returns the full digest so callers
+/// can extract both `self_` fields and (where available) the bot's world-space position.
+async fn read_self_digest(client: &HarnessClient, bot_guid: u64) -> Result<StateDigest, GrindError> {
     // obs.get_state takes `target_guid` (the older obs.* tools use target_guid, unlike the
     // newer bot_guid-keyed M1 tools). For a bot reading its OWN state, target = the bot.
     let raw = client.call("obs.get_state", serde_json::json!({ "target_guid": bot_guid as i64 })).await?;
-    let digest: StateDigest =
-        serde_json::from_value(raw).map_err(|e| GrindError::Shape(format!("obs.get_state: {e}")))?;
-    Ok(digest.self_)
+    serde_json::from_value(raw).map_err(|e| GrindError::Shape(format!("obs.get_state: {e}")))
+}
+
+/// Convenience wrapper: read the bot's own SelfState.
+async fn read_self(client: &HarnessClient, bot_guid: u64) -> Result<SelfState, GrindError> {
+    Ok(read_self_digest(client, bot_guid).await?.self_)
 }
 
 /// Combat poll constants (not goal fields — exec timing, see design §4.2).
@@ -234,14 +299,13 @@ pub(crate) enum FightOutcome {
     BotDied,
 }
 
-/// Poll `obs.get_nearby_hostiles` for the presence/hp of a specific target.
-/// Returns `true` if the target is still alive (present AND hp_pct > 0).
-async fn target_still_alive(
+/// Returns `Some(hp_pct)` while the target is alive in the scan radius; `None` when gone/dead.
+async fn target_hp(
     client: &HarnessClient,
     bot_guid: u64,
     target_guid: u64,
     goal: &GrindGoal,
-) -> Result<bool, GrindError> {
+) -> Result<Option<f32>, GrindError> {
     let raw = client
         .call("obs.get_nearby_hostiles", serde_json::json!({
             "bot_guid": bot_guid as i64,
@@ -251,11 +315,12 @@ async fn target_still_alive(
     let parsed: NearbyHostiles =
         serde_json::from_value(raw)
             .map_err(|e| GrindError::Shape(format!("nearby_hostiles: {e}")))?;
-    let alive = parsed.hostiles.iter().any(|h| h.guid == target_guid && h.is_alive && h.hp_pct > 0.0);
-    Ok(alive)
+    Ok(parsed.hostiles.iter()
+        .find(|h| h.guid == target_guid && h.is_alive && h.hp_pct > 0.0)
+        .map(|h| h.hp_pct))
 }
 
-/// `Fighting`: tick the melee rotation, poll target liveness and own death.
+/// `Fighting`: tick the rotation from the goal, refresh ctx each tick, handle cast-time wait.
 ///
 /// Returns:
 /// - `Ok(FightOutcome::TargetDead)` — target gone or hp==0.
@@ -266,14 +331,10 @@ pub(crate) async fn fight(
     bot_guid: u64,
     target: Target,
     goal: &GrindGoal,
+    rotation: &RotationPlugin,
 ) -> Result<FightOutcome, GrindError> {
-    let rotation = RotationPlugin::melee_m1();
-    // M1: AutoAttackAction::can_execute ignores ctx, so bot/target hp are placeholders.
-    // M2's per-spec abilities will refresh these from each poll (the values are already
-    // read below via read_self / the hostiles poll) to gate ability preconditions.
-    // bot_power_pct / bot_mana_pct / combo_points added for CombatContext v2 (Task 3);
-    // full ctx-refresh integration is deferred to Task 5.
-    let ctx = CombatContext {
+    let mut memo = FightMemo::default();
+    let mut ctx = CombatContext {
         bot_hp_pct: 100.0,
         bot_power_pct: 100.0,
         bot_mana_pct: None,
@@ -281,16 +342,18 @@ pub(crate) async fn fight(
         target_hp_pct: 100.0,
         target_distance: target.distance,
     };
-    let mut memo = FightMemo::default();
 
     for _ in 0..FIGHT_MAX_POLLS {
-        // Fire the rotation action (bot.attack — idempotent re-issue). The target can die
-        // between the previous liveness poll and this attack; the adapter then returns
-        // "target is not alive" — the grind's WIN condition, not a failure. Treat it as
-        // TargetDead and proceed to loot.
+        // Fire the rotation tick. The target can die between the previous liveness poll
+        // and this tick; the adapter returns "target is not alive" — the grind's WIN
+        // condition. Treat it as TargetDead and proceed to loot.
         match rotation.tick(bot_guid, target.guid, client, &ctx, &mut memo).await {
             Ok(TickOutcome::TargetGone) => return Ok(FightOutcome::TargetDead),
-            Ok(TickOutcome::Acted { .. }) => {}
+            Ok(TickOutcome::Acted { wait_ms }) => {
+                // max(): an exhausted tick (wait_ms==0) must not hot-spin (combat.rs note).
+                let wait = wait_ms.max(FIGHT_POLL_INTERVAL_MS);
+                tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+            }
             Err(e) => {
                 if is_target_dead_attack_error(&e) {
                     return Ok(FightOutcome::TargetDead);
@@ -302,18 +365,19 @@ pub(crate) async fn fight(
             }
         }
 
-        // Poll target liveness.
-        if !target_still_alive(client, bot_guid, target.guid, goal).await? {
-            return Ok(FightOutcome::TargetDead);
+        // Refresh: target hp (same hostiles poll as liveness) + own state.
+        match target_hp(client, bot_guid, target.guid, goal).await? {
+            None => return Ok(FightOutcome::TargetDead),
+            Some(hp) => ctx.target_hp_pct = hp,
         }
-
-        // Poll own health for death.
         let self_state = read_self(client, bot_guid).await?;
         if self_state.hp_pct == 0 {
             return Ok(FightOutcome::BotDied);
         }
-
-        tokio::time::sleep(std::time::Duration::from_millis(FIGHT_POLL_INTERVAL_MS)).await;
+        ctx.bot_hp_pct = self_state.hp_pct as f32;
+        ctx.bot_mana_pct = self_state.mana_pct.map(|m| m as f32);
+        ctx.bot_power_pct = self_state.power_pct.unwrap_or(100) as f32;
+        ctx.combo_points = self_state.combo_points.unwrap_or(0);
     }
 
     // Poll budget exhausted — treat as target dead (safety: avoid infinite loop).
@@ -331,6 +395,53 @@ fn is_target_dead_attack_error(e: &crate::combat::CombatError) -> bool {
     )
 }
 
+/// Rest when hp OR (for mana classes) mana is below the goal threshold.
+fn should_rest(hp_pct: u32, mana_pct: Option<u32>, threshold: f32) -> bool {
+    (hp_pct as f32 / 100.0) < threshold
+        || mana_pct.map(|m| (m as f32 / 100.0) < threshold).unwrap_or(false)
+}
+
+/// Resting is done when hp AND (for mana classes) mana have recovered to 75%.
+fn rest_done(hp_pct: u32, mana_pct: Option<u32>) -> bool {
+    hp_pct >= 75 && mana_pct.map(|m| m >= 75).unwrap_or(true)
+}
+
+// ── Buff pass ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, serde::Deserialize)]
+struct AuraEntry {
+    spell_id: u32,
+    /// Rank-1 head of the aura's spell chain (2.2 ObsGetAuras extension);
+    /// falls back to spell_id against older worldservers.
+    #[serde(default)]
+    first_spell_id: Option<u32>,
+}
+#[derive(Debug, serde::Deserialize)]
+struct AurasResult { auras: Vec<AuraEntry> }
+
+/// Cast any plugin self-buff whose rank-1 id is absent from the bot's auras.
+pub(crate) async fn ensure_buffs(
+    client: &HarnessClient,
+    bot_guid: u64,
+    plugin: &RotationPlugin,
+) -> Result<(), GrindError> {
+    if plugin.buffs().is_empty() { return Ok(()); }
+    // obs.get_auras keeps the older target_guid arg idiom (cf. obs.get_state).
+    let raw = client.call("obs.get_auras", serde_json::json!({ "target_guid": bot_guid as i64 })).await?;
+    let parsed: AurasResult = serde_json::from_value(raw)
+        .map_err(|e| GrindError::Shape(format!("obs.get_auras: {e}")))?;
+    let have: std::collections::HashSet<u32> = parsed.auras.iter()
+        .map(|a| a.first_spell_id.unwrap_or(a.spell_id))
+        .collect();
+    for b in plugin.buffs() {
+        if have.contains(&b.spell_id) { continue; }
+        // Self-cast; ignore typed failures (no_power → buff after rest).
+        let _ = b.execute(bot_guid, 0, client).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1600)).await; // one GCD
+    }
+    Ok(())
+}
+
 /// Drive a `Grind` goal to a terminal `GoalStatus`. Plan 1: combat/loot are no-ops.
 pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) -> GoalStatus {
     let mut state = GrindState::Scanning;
@@ -338,6 +449,17 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
     let level_at_start = read_self(client, bot_guid).await.map(|s| s.level).unwrap_or(0);
     let mut idle_seed: u64 = 0;
     let mut empty_scan_cycles: u32 = 0;
+
+    // Build the rotation once for the lifetime of this grind; pass by ref to fight().
+    let rotation_id = goal.rotation_id.as_deref().unwrap_or("auto_attack");
+    let rotation = crate::rotations::build(rotation_id)
+        .unwrap_or_else(|| {
+            tracing::warn!("unknown rotation_id {rotation_id}; using auto_attack");
+            RotationPlugin::melee_m1()
+        });
+
+    // Buff pass at grind entry.
+    let _ = ensure_buffs(client, bot_guid, &rotation).await;
 
     loop {
         state = match state {
@@ -361,16 +483,24 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
                                                  detail: Some(s) },
             },
             GrindState::Reacting { target } => react(target, kills as u64).await,
-            GrindState::Approaching { target } => match approach(client, bot_guid, target).await {
-                Ok(s) => s,
-                Err(GrindError::Harness(e)) =>
-                    return GoalStatus::Blocked { reason: tot_goal_contract::BlockedReason::Other,
-                                                 detail: Some(format!("approach harness: {e}")) },
-                Err(GrindError::Shape(s)) =>
-                    return GoalStatus::Blocked { reason: tot_goal_contract::BlockedReason::Other,
-                                                 detail: Some(format!("approach shape: {s}")) },
-            },
-            GrindState::Fighting { target } => match fight(client, bot_guid, target, goal).await {
+            GrindState::Approaching { target } => {
+                // Read the bot's current world-space position from obs.get_state so
+                // the caster engage calculation can compute the stop-short point.
+                // Defaults to (0,0,0) on older worldservers that omit location.position.
+                let bot_pos = read_self_digest(client, bot_guid).await
+                    .map(|d| d.bot_pos())
+                    .unwrap_or((0.0, 0.0, 0.0));
+                match approach(client, bot_guid, target, rotation.engage_range(), bot_pos).await {
+                    Ok(s) => s,
+                    Err(GrindError::Harness(e)) =>
+                        return GoalStatus::Blocked { reason: tot_goal_contract::BlockedReason::Other,
+                                                     detail: Some(format!("approach harness: {e}")) },
+                    Err(GrindError::Shape(s)) =>
+                        return GoalStatus::Blocked { reason: tot_goal_contract::BlockedReason::Other,
+                                                     detail: Some(format!("approach shape: {s}")) },
+                }
+            }
+            GrindState::Fighting { target } => match fight(client, bot_guid, target, goal, &rotation).await {
                 Ok(FightOutcome::TargetDead) => GrindState::PostKillPause { target },
                 Ok(FightOutcome::BotDied) => return GoalStatus::NeedsDecision {
                     event: tot_goal_contract::EscalationEvent::BotDied { position: None },
@@ -392,9 +522,10 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
             GrindState::HealthCheck => {
                 let self_state = read_self(client, bot_guid).await;
                 let hp_pct = self_state.as_ref().map(|s| s.hp_pct).unwrap_or(100);
+                let mana_pct = self_state.as_ref().ok().and_then(|s| s.mana_pct);
                 let lvl = self_state.map(|s| s.level).unwrap_or(level_at_start);
                 // Rest-threshold check BEFORE completion check (design §7).
-                if (hp_pct as f32 / 100.0) < goal.rest_threshold {
+                if should_rest(hp_pct, mana_pct, goal.rest_threshold) {
                     GrindState::Resting
                 } else if lvl >= goal.to_level
                     || goal.kill_count.map(|k| kills >= k).unwrap_or(false)
@@ -407,14 +538,19 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
                 }
             }
             GrindState::Resting => {
-                // Poll obs.get_state until hp_pct >= 75 or the poll budget is exhausted.
+                // Poll obs.get_state until both hp and mana (for mana classes) have
+                // recovered to 75%, or the poll budget is exhausted.
                 for _ in 0..REST_MAX_POLLS {
                     tokio::time::sleep(std::time::Duration::from_millis(REST_POLL_INTERVAL_MS)).await;
-                    let hp = read_self(client, bot_guid).await.map(|s| s.hp_pct).unwrap_or(100);
-                    if hp >= 75 {
+                    let state = read_self(client, bot_guid).await;
+                    let hp = state.as_ref().map(|s| s.hp_pct).unwrap_or(100);
+                    let mana = state.as_ref().ok().and_then(|s| s.mana_pct);
+                    if rest_done(hp, mana) {
                         break;
                     }
                 }
+                // Re-buff after resting (mana classes may have run dry pre-rest).
+                let _ = ensure_buffs(client, bot_guid, &rotation).await;
                 GrindState::Scanning
             }
             GrindState::Wandering => match wander(client, bot_guid, goal, idle_seed).await {
@@ -539,8 +675,20 @@ mod tests {
             "obs.get_position" => json!({"x":8.0,"y":0.0,"z":0.0,"map_id":0,"zone_id":1,"area_id":1,"orientation":0.0}),
             other => panic!("unexpected tool {other}"),
         }).await;
+        // Melee engage (5.0 y): target at distance 8.0 > 5.0 → walks to ~4y short.
+        // bot_pos (0,0,0) + frac toward (8,0,0): dest ≈ (4y,0,0); nav mock returns success.
         let target = Target { guid: 111, x: 8.0, y: 0.0, z: 0.0, distance: 8.0 };
-        let next = approach(&client(&base), 1003, target).await.unwrap();
+        let next = approach(&client(&base), 1003, target, 5.0, (0.0, 0.0, 0.0)).await.unwrap();
+        assert_eq!(next, GrindState::Fighting { target });
+    }
+
+    #[tokio::test]
+    async fn approaching_already_in_range_transitions_directly() {
+        // When distance <= engage_range, approach must return Fighting without any nav calls.
+        let base = spawn_mock(|name, _a| panic!("unexpected tool {name} — should not nav when in range")).await;
+        let target = Target { guid: 111, x: 3.0, y: 0.0, z: 0.0, distance: 3.0 };
+        // engage_range=5.0, distance=3.0 → already in range
+        let next = approach(&client(&base), 1003, target, 5.0, (0.0, 0.0, 0.0)).await.unwrap();
         assert_eq!(next, GrindState::Fighting { target });
     }
 
@@ -550,7 +698,7 @@ mod tests {
             "nav.find_path" => json!({"path_type": 8i64, "points": []}), // PATHFIND_NOPATH
             other => panic!("unexpected tool {other}"),
         }).await;
-        let next = approach(&client(&base), 1003, Target { guid: 111, x: 8.0, y: 0.0, z: 0.0, distance: 8.0 }).await.unwrap();
+        let next = approach(&client(&base), 1003, Target { guid: 111, x: 8.0, y: 0.0, z: 0.0, distance: 8.0 }, 5.0, (0.0, 0.0, 0.0)).await.unwrap();
         assert_eq!(next, GrindState::Scanning, "no path → pick a new target");
     }
 
@@ -668,7 +816,8 @@ mod tests {
 
         let goal = test_goal();
         let target = Target { guid: 111, x: 3.0, y: 0.0, z: 0.0, distance: 3.0 };
-        let outcome = fight(&client(&base), 1003, target, &goal).await.unwrap();
+        let rotation = RotationPlugin::melee_m1();
+        let outcome = fight(&client(&base), 1003, target, &goal, &rotation).await.unwrap();
         assert!(matches!(outcome, FightOutcome::TargetDead), "expected TargetDead");
     }
 
@@ -695,7 +844,8 @@ mod tests {
 
         let goal = test_goal();
         let target = Target { guid: 111, x: 3.0, y: 0.0, z: 0.0, distance: 3.0 };
-        let outcome = fight(&client(&base), 1003, target, &goal).await.unwrap();
+        let rotation = RotationPlugin::melee_m1();
+        let outcome = fight(&client(&base), 1003, target, &goal, &rotation).await.unwrap();
         assert!(matches!(outcome, FightOutcome::TargetDead), "hp_pct==0 → TargetDead");
     }
 
@@ -715,7 +865,8 @@ mod tests {
 
         let goal = test_goal();
         let target = Target { guid: 111, x: 3.0, y: 0.0, z: 0.0, distance: 3.0 };
-        let outcome = fight(&client(&base), 1003, target, &goal).await.unwrap();
+        let rotation = RotationPlugin::melee_m1();
+        let outcome = fight(&client(&base), 1003, target, &goal, &rotation).await.unwrap();
         assert!(matches!(outcome, FightOutcome::BotDied), "expected BotDied");
     }
 
@@ -936,19 +1087,19 @@ mod tests {
                 "obs.get_nearby_hostiles" => {
                     let n = hc2.fetch_add(1, SeqCst);
                     if n == 0 {
-                        // Initial scan: live target
+                        // Initial scan: live target at 10y (beyond melee engage_range=5y so nav fires)
                         json!({"hostiles": [{"guid": 111u64, "level": 5, "hp_pct": 100.0,
-                            "distance": 5.0, "is_alive": true, "x": 5.0, "y": 0.0, "z": 0.0}]})
+                            "distance": 10.0, "is_alive": true, "x": 10.0, "y": 0.0, "z": 0.0}]})
                     } else {
                         // Combat poll: target dead
                         json!({"hostiles": []})
                     }
                 }
                 "nav.find_path" => json!({"path_type": 1i64, "points": [
-                    {"x":0.0,"y":0.0,"z":0.0},{"x":5.0,"y":0.0,"z":0.0}]}),
+                    {"x":0.0,"y":0.0,"z":0.0},{"x":10.0,"y":0.0,"z":0.0}]}),
                 "bot.move_path" => json!({"launched": true, "duration_ms": 0,
-                    "final": {"x":5.0,"y":0.0,"z":0.0}}),
-                "obs.get_position" => json!({"x":5.0,"y":0.0,"z":0.0,
+                    "final": {"x":10.0,"y":0.0,"z":0.0}}),
+                "obs.get_position" => json!({"x":10.0,"y":0.0,"z":0.0,
                     "map_id":0,"zone_id":1,"area_id":1,"orientation":0.0}),
                 "bot.attack" => json!({"attacked": true, "target_guid": 111u64, "target_name": "Kobold"}),
                 // obs.get_state: hp_pct=90 → no rest; level=5
@@ -984,5 +1135,126 @@ mod tests {
                 "tool {tool} was never called; call log: {log:?}"
             );
         }
+    }
+
+    // ── Task-5 new tests ──────────────────────────────────────────────────────
+
+    /// fight() uses the goal rotation (mage_frost_b1 → bot.cast_spell) and returns
+    /// TargetDead when the hostile poll shows the target dead after the first tick.
+    /// The cast-time wait (cast_time_ms=10ms) is honoured; the mock counts cast_spell calls.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fight_uses_goal_rotation_and_waits_cast_time() {
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+        let cast_spell_calls = std::sync::Arc::new(AtomicU32::new(0));
+        let csc2 = cast_spell_calls.clone();
+
+        let base = spawn_mock(move |name, _a| match name.as_str() {
+            "bot.cast_spell" => {
+                csc2.fetch_add(1, SeqCst);
+                // Frostbolt: casting:true, short cast time
+                json!({"casting": true, "cast_time_ms": 10})
+            }
+            "obs.get_nearby_hostiles" => {
+                // Target immediately dead after the first tick
+                json!({"hostiles": [{"guid": 222u64, "level": 6, "hp_pct": 0.0,
+                    "distance": 20.0, "is_alive": false}]})
+            }
+            "obs.get_state" => json!({"self": {
+                "level": 6, "hp_pct": 90, "mana_pct": 70, "power_pct": 70, "combo_points": 0
+            }}),
+            other => panic!("unexpected tool in fight_uses_rotation test: {other}"),
+        }).await;
+
+        let goal = GrindGoal {
+            anchor_point: WorldPos { map_id: 0, x: 0.0, y: 0.0, z: 0.0 },
+            wander_radius: 90.0, max_search_radius: 35.0,
+            mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
+            to_level: 10, kill_count: None, rest_threshold: 0.35,
+            rotation_id: Some("mage_frost_b1".into()),
+        };
+        let target = Target { guid: 222, x: 20.0, y: 0.0, z: 0.0, distance: 20.0 };
+        let rotation = crate::rotations::build("mage_frost_b1").unwrap();
+        let outcome = fight(&client(&base), 1003, target, &goal, &rotation).await.unwrap();
+        assert!(matches!(outcome, FightOutcome::TargetDead), "expected TargetDead");
+        let cast_count = cast_spell_calls.load(SeqCst);
+        assert!(cast_count >= 1, "bot.cast_spell must have been called at least once, got {cast_count}");
+    }
+
+    /// Pure predicate: should_rest fires on low hp or (for mana classes) low mana.
+    #[test]
+    fn should_rest_gates_on_hp_or_mana() {
+        // hp=100, no mana class → no rest needed
+        assert!(!should_rest(100, None, 0.35));
+        // hp=20 (0.20 < 0.35) → rest
+        assert!(should_rest(20, None, 0.35));
+        // hp=100 but mana=10 (0.10 < 0.35) → rest
+        assert!(should_rest(100, Some(10), 0.35));
+        // hp=100, mana=80 (0.80 ≥ 0.35) → no rest
+        assert!(!should_rest(100, Some(80), 0.35));
+    }
+
+    /// Pure predicate: rest_done requires both hp AND mana (if present) ≥ 75.
+    #[test]
+    fn rest_done_requires_both_pools() {
+        // hp=80, no mana class → done (mana defaults to true)
+        assert!(rest_done(80, None));
+        // hp=80, mana=40 < 75 → not done
+        assert!(!rest_done(80, Some(40)));
+        // hp=80, mana=80 → done
+        assert!(rest_done(80, Some(80)));
+        // hp=60 < 75 → not done even if mana is fine
+        assert!(!rest_done(60, Some(90)));
+    }
+
+    /// ensure_buffs casts only missing buffs: has Arcane Intellect rank-2 (first_spell_id=1459),
+    /// does NOT cast it again; missing Frost Armor (spell_id=168) → casts it.
+    ///
+    /// This test sleeps 1600ms (one GCD) for the one missing buff. `tokio::time::pause()`
+    /// is not used here because the module's multi_thread tests don't benefit from it and
+    /// the 1600ms is acceptable in the test suite (single cast).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn buff_pass_casts_missing_buffs_only() {
+        use std::sync::{Arc, Mutex};
+
+        let cast_ids: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+        let ci2 = cast_ids.clone();
+
+        let base = spawn_mock(move |name, args| match name.as_str() {
+            "obs.get_auras" => {
+                // Bot has Arcane Intellect rank-2 (first_spell_id=1459 = rank-1 head)
+                json!({"auras": [{"spell_id": 1461u32, "first_spell_id": 1459u32}]})
+            }
+            "bot.cast_spell" => {
+                let spell_id = args["spell_id"].as_u64().unwrap() as u32;
+                ci2.lock().unwrap().push(spell_id);
+                json!({"casting": true, "cast_time_ms": 0})
+            }
+            other => panic!("unexpected tool in buff_pass test: {other}"),
+        }).await;
+
+        let plugin = crate::rotations::build("mage_frost_b1").unwrap();
+        ensure_buffs(&client(&base), 1003, &plugin).await.unwrap();
+
+        let cast_spell_ids = cast_ids.lock().unwrap().clone();
+        // Only Frost Armor (168) should have been cast; Arcane Intellect (1459) already present.
+        assert_eq!(cast_spell_ids, vec![crate::rotations::FROST_ARMOR],
+            "expected only Frost Armor cast; got: {cast_spell_ids:?}");
+    }
+
+    /// read_self correctly parses the new v2 SelfState fields (mana_pct / power_pct / combo_points).
+    #[tokio::test]
+    async fn read_self_parses_v2_fields() {
+        let base = spawn_mock(|name, _args| match name.as_str() {
+            "obs.get_state" => json!({"self": {
+                "level": 6, "hp_pct": 85, "mana_pct": 60, "power_pct": 70, "combo_points": 3
+            }}),
+            other => panic!("unexpected tool {other}"),
+        }).await;
+        let s = read_self(&client(&base), 1003).await.unwrap();
+        assert_eq!(s.level, 6);
+        assert_eq!(s.hp_pct, 85);
+        assert_eq!(s.mana_pct, Some(60));
+        assert_eq!(s.power_pct, Some(70));
+        assert_eq!(s.combo_points, Some(3));
     }
 }
