@@ -38,6 +38,12 @@ struct EmissionEntry {
 }
 
 /// StdMutex discipline matches LoopSupervisor: never held across an `.await`.
+///
+/// ## Concurrency contract
+/// `may_emit` + `record_emit` are not atomic. Callers must ensure at most one
+/// concurrent call per `bot_guid` — satisfied in production by `LoopSupervisor`'s
+/// per-bot `tick_lock`. The drain task only calls `on_terminal`, which is always
+/// safe to call concurrently with either method.
 pub struct EmissionLedger {
     cooldowns: CooldownConfig,
     entries: StdMutex<HashMap<i64, EmissionEntry>>,
