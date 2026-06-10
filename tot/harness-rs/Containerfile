@@ -55,6 +55,7 @@ COPY harness-rs/Cargo.toml            ./harness-rs/
 COPY lfg-matchmaker/Cargo.toml        ./lfg-matchmaker/
 COPY memory-rs/Cargo.toml             ./memory-rs/
 COPY slice-host/Cargo.toml            ./slice-host/
+COPY tot-goal-contract/Cargo.toml     ./tot-goal-contract/
 COPY tot-harness-client/Cargo.toml    ./tot-harness-client/
 COPY tot-mcp-bearer-auth/Cargo.toml   ./tot-mcp-bearer-auth/
 COPY tot-schema-transform/Cargo.toml  ./tot-schema-transform/
@@ -66,12 +67,16 @@ COPY tot-schema-transform/Cargo.toml  ./tot-schema-transform/
 # files must exist for workspace target discovery). brain-rs declares a lib +
 # one bin (brain-rs) + a build.rs.
 # exec-rs declares a lib (exec_rs) + a bin (exec-rs) — both stubbed.
-# tot-harness-client, tot-mcp-bearer-auth, tot-schema-transform are pure libraries
-# (auto-detected src/lib.rs) — stub each.
+# tot-goal-contract, tot-harness-client, tot-mcp-bearer-auth, tot-schema-transform
+# are pure libs (auto-detect src/lib.rs) — stub each.
+# M1 Plan 3 (2026-06-06): tot-goal-contract added to workspace; brain-rs now
+# depends on exec-rs which depends on tot-goal-contract. Without its Cargo.toml
+# and src/lib.rs stub, workspace resolution fails for ALL crates including harness-rs.
 # The stubs are replaced by the real harness-rs sources in the COPY step below.
 RUN mkdir -p brain-rs/src exec-rs/src game-event-scheduler/src harness-rs/src \
              lfg-matchmaker/src memory-rs/src memory-rs/src/bin slice-host/src \
-             tot-harness-client/src tot-mcp-bearer-auth/src tot-schema-transform/src \
+             tot-goal-contract/src tot-harness-client/src tot-mcp-bearer-auth/src \
+             tot-schema-transform/src \
     && echo 'pub fn _stub() {}' > brain-rs/src/lib.rs \
     && echo 'fn main() {}'      > brain-rs/src/main.rs \
     && echo 'fn main() {}'      > brain-rs/build.rs \
@@ -87,6 +92,7 @@ RUN mkdir -p brain-rs/src exec-rs/src game-event-scheduler/src harness-rs/src \
     && echo 'fn main() {}'      > memory-rs/src/bin/embed_stub.rs \
     && echo 'fn main() {}'      > memory-rs/build.rs \
     && echo 'fn main() {}'      > slice-host/src/main.rs \
+    && echo 'pub fn _stub() {}' > tot-goal-contract/src/lib.rs \
     && echo 'pub fn _stub() {}' > tot-harness-client/src/lib.rs \
     && echo 'pub fn _stub() {}' > tot-mcp-bearer-auth/src/lib.rs \
     && echo 'pub fn _stub() {}' > tot-schema-transform/src/lib.rs \
