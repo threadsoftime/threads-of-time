@@ -1177,6 +1177,28 @@ mod tests {
         );
     }
 
+    /// bot.vendor_sell: absent max_quality → 0 (grey-only). Load-bearing — selling
+    /// is destructive, so the default quality ceiling must stay pinned at poor/grey.
+    #[test]
+    fn bot_vendor_sell_defaults_max_quality_to_grey_only() {
+        let w: BotVendorSellWrapper =
+            serde_json::from_str(r#"{"args":{"bot_guid":1,"vendor_guid":2}}"#).unwrap();
+        assert_eq!(w.args.max_quality, 0, "max_quality must default to 0 (grey only)");
+    }
+
+    /// bot.cast_spell: absent target_guid → None (self-cast); bot.mail: absent
+    /// item_guids/copper → empty/zero.
+    #[test]
+    fn cast_spell_and_mail_optional_fields_default() {
+        let w: BotCastSpellWrapper =
+            serde_json::from_str(r#"{"args":{"bot_guid":1,"spell_id":116}}"#).unwrap();
+        assert_eq!(w.args.target_guid, None, "absent target_guid must mean self-cast");
+        let m: BotMailWrapper =
+            serde_json::from_str(r#"{"args":{"bot_guid":1,"recipient":"Mule"}}"#).unwrap();
+        assert!(m.args.item_guids.is_empty(), "item_guids must default to empty");
+        assert_eq!(m.args.copper, 0, "copper must default to 0");
+    }
+
     /// Regression: a packed creature GUID (HighGuid bits set) exceeds i64::MAX. target_guid
     /// MUST be u64 — an i64 field would fail to deserialize the value and the daemon would
     /// reject every bot.attack / bot.loot for a real creature before forwarding to AC.
