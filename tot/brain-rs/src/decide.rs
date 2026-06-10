@@ -16,7 +16,7 @@ use crate::personality::{McpCallable, PersonalityCache};
 use crate::state::StateStore;
 
 // ---------------------------------------------------------------------------
-// KNOWN_TOOLS — all 62 entries, verbatim from decide.py
+// KNOWN_TOOLS — curated dispatch allow-list (the LLM grammar + prompt tool list are derived from this set via filter_to_allowlist)
 // ---------------------------------------------------------------------------
 
 /// Initial allowlist for V3-MVP. Covers V1.4 bot.* family + memory MCP family.
@@ -36,6 +36,10 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "bot.set_role",
     "bot.queue_for_dungeon",
     "bot.enter_instance",
+    // V3 gameplay tools (promoted 2026-06-09 — live on the harness MCP but absent from the allow-list)
+    "bot.attack",
+    "bot.loot",
+    "bot.move_path",
     // harness / obs.*  (read-only; brain rarely calls these directly from a Decision,
     // but allow for fact-finding queries)
     "obs.get_state",
@@ -51,6 +55,9 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "obs.get_group",
     "obs.ping",
     "obs.query_db",
+    "obs.get_nearby_hostiles",
+    "obs.get_lootable_corpses",
+    "obs.list_players",
     // memory MCP (dot-notation as registered in memory-sidecar tool_schemas.py)
     "memory.write",
     "memory_write",
@@ -1419,7 +1426,17 @@ mod tests {
 
     #[test]
     fn test_known_tools_count() {
-        assert_eq!(KNOWN_TOOLS.len(), 62, "KNOWN_TOOLS must have 62 entries to match Python");
+        assert_eq!(KNOWN_TOOLS.len(), 68, "KNOWN_TOOLS must have 68 entries (62 base + 6 V3 gameplay tools promoted 2026-06-09)");
+    }
+
+    #[test]
+    fn test_promoted_gameplay_tools_in_known_tools() {
+        for t in [
+            "bot.move_path", "bot.loot", "bot.attack",
+            "obs.get_nearby_hostiles", "obs.get_lootable_corpses", "obs.list_players",
+        ] {
+            assert!(KNOWN_TOOLS.contains(&t), "{t} must be in KNOWN_TOOLS");
+        }
     }
 
     #[test]

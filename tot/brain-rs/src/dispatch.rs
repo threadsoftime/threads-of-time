@@ -104,6 +104,13 @@ pub static RISK_TABLE: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| 
     m.insert("goals_read", "low");
     m.insert("goals.update", "low");
     m.insert("goals_update", "low");
+    // V3 gameplay tools (promoted 2026-06-09 tool-vocab alignment) — all low-risk
+    m.insert("bot.move_path", "low");            // movement (peer of bot.follow)
+    m.insert("bot.loot", "low");
+    m.insert("bot.attack", "low");               // core combat loop — low so bots fight autonomously
+    m.insert("obs.get_nearby_hostiles", "low");  // read-only
+    m.insert("obs.get_lootable_corpses", "low"); // read-only
+    m.insert("obs.list_players", "low");         // read-only
     m
 });
 
@@ -648,5 +655,15 @@ mod tests {
         let s: String = "x".repeat(300);
         let truncated = truncate_to_200(&s);
         assert_eq!(truncated.len(), 200);
+    }
+
+    #[test]
+    fn test_promoted_gameplay_tools_low_risk() {
+        for t in [
+            "bot.move_path", "bot.loot", "bot.attack",
+            "obs.get_nearby_hostiles", "obs.get_lootable_corpses", "obs.list_players",
+        ] {
+            assert_eq!(RISK_TABLE.get(t).copied(), Some("low"), "{t} must be low-risk");
+        }
     }
 }

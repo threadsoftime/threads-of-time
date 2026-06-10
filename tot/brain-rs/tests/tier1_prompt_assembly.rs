@@ -254,8 +254,8 @@ fn test_known_tools_exposes_all_tools() {
     assert!(tools.contains("goals.list"), "must contain goals.list");
     assert!(tools.contains("goals_list"), "must contain goals_list alias");
     assert!(tools.contains("memory.goals.list"), "must contain memory.goals.list alias");
-    // 62 entries matching Python source
-    assert_eq!(KNOWN_TOOLS.len(), 62, "must have 62 KNOWN_TOOLS entries");
+    // 68 entries (62 base + 6 V3 gameplay tools promoted 2026-06-09; Python brain retired)
+    assert_eq!(KNOWN_TOOLS.len(), 68, "must have 68 KNOWN_TOOLS entries (62 base + 6 V3 gameplay tools promoted 2026-06-09)");
 }
 
 #[test]
