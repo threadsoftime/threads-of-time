@@ -30,6 +30,8 @@
 //! | `TOT_SUBSET_ENROLL_BACKOFF_S`   | `300.0`                                      | `subset_enroll_backoff_s`      |
 //! | `TOT_REDUCED_TICK_INTERVAL_S`   | `300.0`                                      | `reduced_tick_interval_s`      |
 //! | `BRAIN_DECIDE_MAX_CONCURRENT`   | `5`                                           | `decide_max_concurrent`        |
+//! | `BRAIN_REEMIT_COOLDOWN_BLOCKED_S` | `300`                                        | `reemit_cooldown_blocked_s`    |
+//! | `BRAIN_REEMIT_COOLDOWN_NEEDS_DECISION_S` | `600`                                | `reemit_cooldown_needs_decision_s` |
 
 // ---------------------------------------------------------------------------
 // Settings struct
@@ -294,6 +296,8 @@ mod tests {
         assert_eq!(s.subset_enroll_backoff_s, 300.0);
         assert_eq!(s.reduced_tick_interval_s, 300.0);
         assert_eq!(s.decide_max_concurrent, 5);
+        assert_eq!(s.reemit_cooldown_blocked_s, 300);
+        assert_eq!(s.reemit_cooldown_needs_decision_s, 600);
     }
 
     // ---------------------------------------------------------------------------
