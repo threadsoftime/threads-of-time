@@ -148,7 +148,7 @@ mod tests {
                 anchor_point: WorldPos { map_id: 0, x: 0.0, y: 0.0, z: 0.0 },
                 wander_radius: 90.0, max_search_radius: 35.0,
                 mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
-                to_level: 6, kill_count: None, rest_threshold: 0.35,
+                to_level: 6, kill_count: None, rest_threshold: 0.35, rotation_id: None,
             }),
         }
     }

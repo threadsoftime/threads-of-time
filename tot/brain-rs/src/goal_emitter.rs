@@ -64,6 +64,7 @@ pub fn synthesize_grind(
             to_level: level + 1,
             kill_count: None,
             rest_threshold: profile.rest_threshold,
+            rotation_id: None,
         }),
     })
 }

@@ -34,6 +34,9 @@ pub struct GrindGoal {
     pub kill_count: Option<u32>,
     /// Health fraction [0,1] at which the bot stops to regen.
     pub rest_threshold: f32,
+    /// Rotation plugin id (profile-driven, M2 slice 2.2). `None` → auto_attack (M1 back-compat).
+    #[serde(default)]
+    pub rotation_id: Option<String>,
 }
 
 /// The brain→exec intent. M1 ships exactly one variant. Internally tagged on `kind`.
@@ -92,6 +95,7 @@ mod tests {
                 to_level: 6,
                 kill_count: None,
                 rest_threshold: 0.35,
+                rotation_id: None,
             }),
         }
     }
@@ -135,5 +139,39 @@ mod tests {
         let json = r#"{"goal_id":"g","version":1,"goal":{"kind":"teleport_to_moon"}}"#;
         let res: Result<GoalEnvelope, _> = serde_json::from_str(json);
         assert!(res.is_err(), "unknown variant must not deserialize");
+    }
+}
+
+#[cfg(test)]
+mod rotation_id_tests {
+    use super::*;
+
+    /// An M1-era GrindGoal JSON (no rotation_id) must still deserialize → None.
+    #[test]
+    fn grind_goal_without_rotation_id_deserializes() {
+        let json = serde_json::json!({
+            "anchor_point": {"map_id": 0, "x": 1.0, "y": 2.0, "z": 3.0},
+            "wander_radius": 90.0,
+            "max_search_radius": 35.0,
+            "mob_filter": {"min_level": 1, "max_level": 5, "creature_type": "humanoid"},
+            "to_level": 6,
+            "kill_count": null,
+            "rest_threshold": 0.35
+        });
+        let g: GrindGoal = serde_json::from_value(json).unwrap();
+        assert_eq!(g.rotation_id, None);
+    }
+
+    #[test]
+    fn grind_goal_rotation_id_round_trips() {
+        let mut g: GrindGoal = serde_json::from_value(serde_json::json!({
+            "anchor_point": {"map_id": 0, "x": 1.0, "y": 2.0, "z": 3.0},
+            "wander_radius": 90.0, "max_search_radius": 35.0,
+            "mob_filter": {"min_level": 1, "max_level": 5, "creature_type": null},
+            "to_level": 6, "kill_count": null, "rest_threshold": 0.35
+        })).unwrap();
+        g.rotation_id = Some("mage_frost_b1".into());
+        let back: GrindGoal = serde_json::from_value(serde_json::to_value(&g).unwrap()).unwrap();
+        assert_eq!(back.rotation_id.as_deref(), Some("mage_frost_b1"));
     }
 }

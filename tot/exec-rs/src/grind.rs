@@ -492,7 +492,7 @@ mod tests {
             anchor_point: WorldPos { map_id: 0, x: 0.0, y: 0.0, z: 0.0 },
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
-            to_level: 6, kill_count: Some(1), rest_threshold: 0.35,
+            to_level: 6, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
         }
     }
 
@@ -830,6 +830,7 @@ mod tests {
             to_level: 5, // already L5 → completes at next HealthCheck after Resting
             kill_count: Some(1),
             rest_threshold: 0.35,
+            rotation_id: None,
         };
         let status = run_grind(&client(&base), 1003, &goal).await;
         // After resting exits hp≥75 → Scanning → no targets → Wandering → Scanning → no targets
@@ -886,7 +887,7 @@ mod tests {
             anchor_point: WorldPos { map_id: 0, x: 0.0, y: 0.0, z: 0.0 },
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
-            to_level: 99, kill_count: Some(1), rest_threshold: 0.35,
+            to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
         };
         let status = run_grind(&client(&base), 1003, &goal).await;
         match status {
@@ -953,7 +954,7 @@ mod tests {
             anchor_point: WorldPos { map_id: 0, x: 0.0, y: 0.0, z: 0.0 },
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
-            to_level: 99, kill_count: Some(1), rest_threshold: 0.35,
+            to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
         };
 
         let status = run_grind(&client(&base), 1003, &goal).await;

@@ -36,7 +36,7 @@ async fn main() {
             anchor_point: WorldPos { map_id: 0, x: -9450.0, y: 50.0, z: 60.0 },
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 2, max_level: 10, creature_type: Some("humanoid".into()) },
-            to_level: 7, kill_count: None, rest_threshold: 0.35,
+            to_level: 7, kill_count: None, rest_threshold: 0.35, rotation_id: None,
         }),
     };
     if let Err(e) = sink.set_goal(bot_guid, goal).await {
