@@ -132,6 +132,7 @@ pub(crate) async fn recover_from_death(
         tracing::warn!(bot_guid, error = %e, "recovery: release failed");
     }
     let mut alive = false;
+    let mut polls_used: u32 = 0;
     for poll in 0..RECOVERY_MAX_POLLS {
         tokio::time::sleep(Duration::from_millis(RECOVERY_POLL_MS)).await;
         if poll == RECOVERY_MAX_POLLS / 2 {
@@ -141,7 +142,7 @@ pub(crate) async fn recover_from_death(
             }
         }
         match read_self(client, bot_guid).await {
-            Ok(s) if s.hp_pct > 0 => { alive = true; break; }
+            Ok(s) if s.hp_pct > 0 => { alive = true; polls_used = poll + 1; break; }
             Ok(_) => {}
             Err(e) => tracing::warn!(bot_guid, error = %e, "recovery: state poll failed"),
         }
@@ -162,7 +163,14 @@ pub(crate) async fn recover_from_death(
     if let Err(e) = crate::own::set_ai_owned(client, bot_guid, true).await {
         tracing::warn!(bot_guid, error = %e, "recovery: re-claim failed");
     }
-    if alive { RecoveryOutcome::Recovered } else { RecoveryOutcome::StillDead }
+    if alive {
+        // Obs rider (2.4 spec §8): successful recovery was warn!-silent — make it
+        // provable from the journal (the audit log stays the secondary surface).
+        tracing::info!(bot_guid, polls_used, "recovery_succeeded: revived, teleported to anchor, re-claimed");
+        RecoveryOutcome::Recovered
+    } else {
+        RecoveryOutcome::StillDead
+    }
 }
 
 /// Deterministic pseudo-sample in [min,max] from a rolling seed (avoids a rng dep and
@@ -278,6 +286,8 @@ pub enum GrindState {
     RespawnWait,
     /// Bot died — release for native self-revive, teleport back, re-claim.
     Recovering,
+    /// Bags hit a trigger — run the vendor trip, then rescan (slice 2.4).
+    Vendoring { bags: crate::economy::BagSummary, vendor: tot_goal_contract::VendorInfo },
     Idle,
     Done,
 }
@@ -300,11 +310,11 @@ const REST_POLL_INTERVAL_MS: u64 = 2000;
 const REST_MAX_POLLS: u32 = 30;
 
 #[derive(Debug, Deserialize)]
-struct SelfState {
-    level: u32,
+pub(crate) struct SelfState {
+    pub(crate) level: u32,
     /// Health as an integer percentage 0–100 (design §6.1, pre-flight note).
     #[serde(default)]
-    hp_pct: u32,
+    pub(crate) hp_pct: u32,
     /// Present after the 2.2 digest extension; None against older worldservers.
     #[serde(default)]
     mana_pct: Option<u32>,
@@ -329,7 +339,7 @@ async fn read_self_digest(client: &HarnessClient, bot_guid: u64) -> Result<State
 }
 
 /// Convenience wrapper: read the bot's own SelfState.
-async fn read_self(client: &HarnessClient, bot_guid: u64) -> Result<SelfState, GrindError> {
+pub(crate) async fn read_self(client: &HarnessClient, bot_guid: u64) -> Result<SelfState, GrindError> {
     Ok(read_self_digest(client, bot_guid).await?.self_)
 }
 
@@ -546,6 +556,9 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
     let mut empty_scan_cycles: u32 = 0;
     let mut respawn_waits: u32 = 0;
     let mut deaths_this_goal: u32 = 0;
+    let mut kills_at_last_econ_check: u32 = 0;
+    let mut last_vendor_trip: Option<std::time::Instant> = None;
+    let econ_cooldown = std::time::Duration::from_secs(crate::economy::VENDOR_TRIP_COOLDOWN_S);
 
     // Build the rotation once for the lifetime of this grind; pass by ref to fight().
     let rotation_id = goal.rotation_id.as_deref().unwrap_or("auto_attack");
@@ -635,6 +648,19 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
                 // Rest-threshold check BEFORE completion check (design §7).
                 if should_rest(hp_pct, mana_pct, goal.rest_threshold) {
                     GrindState::Resting
+                } else if let (Some(bags), Some(vendor)) = (
+                    crate::economy::economy_due(
+                        client, bot_guid, goal, kills,
+                        &mut kills_at_last_econ_check, last_vendor_trip, econ_cooldown,
+                    ).await,
+                    goal.vendor,
+                ) {
+                    // Economy interrupt BEFORE the completion check (spec §4) — a
+                    // level-up on the trigger kill still vendors first; one extra
+                    // grind pass after the trip is accepted. economy_due only fires
+                    // when goal.vendor is Some; carrying it in the variant keeps the
+                    // Vendoring arm panic-free.
+                    GrindState::Vendoring { bags, vendor }
                 } else if lvl >= goal.to_level
                     || goal.kill_count.map(|k| kills >= k).unwrap_or(false)
                 {
@@ -713,6 +739,16 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
                     }
                 }
             }
+            GrindState::Vendoring { bags, vendor } => {
+                let outcome =
+                    crate::economy::run_vendor_trip(client, bot_guid, goal, &vendor, bags).await;
+                // Cooldown runs from trip END, success or not (spec §3).
+                last_vendor_trip = Some(std::time::Instant::now());
+                match outcome {
+                    crate::economy::VendorTripOutcome::BotDead => GrindState::Recovering,
+                    crate::economy::VendorTripOutcome::Done => GrindState::Scanning,
+                }
+            }
             GrindState::Idle => idle_tick().await,
             GrindState::Done => {
                 // TODO(Plan 2): fetch current level via read_self when Done becomes reachable
@@ -730,7 +766,7 @@ mod tests {
     use serde_json::{json, Value};
     use std::sync::Arc;
     use std::time::Duration;
-    use tot_goal_contract::{GrindGoal, MobFilter, WorldPos};
+    use tot_goal_contract::{GrindGoal, MobFilter, VendorInfo, WorldPos};
     use tot_harness_client::HarnessClient;
 
     async fn spawn_mock<F>(handler: F) -> String
@@ -791,6 +827,7 @@ mod tests {
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
             to_level: 6, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
         }
     }
 
@@ -937,6 +974,7 @@ mod tests {
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
             to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
         };
         let status = run_grind(&client(&base), 1003, &goal).await;
         assert!(matches!(status, GoalStatus::Completed { .. }), "got {status:?}");
@@ -1197,6 +1235,7 @@ mod tests {
             kill_count: Some(1),
             rest_threshold: 0.35,
             rotation_id: None,
+            vendor: None,
         };
         let status = run_grind(&client(&base), 1003, &goal).await;
         // After resting exits hp≥75 → Scanning → no targets → Wandering → Scanning → no targets
@@ -1254,6 +1293,7 @@ mod tests {
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
             to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
         };
         let status = run_grind(&client(&base), 1003, &goal).await;
         match status {
@@ -1321,6 +1361,7 @@ mod tests {
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
             to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
         };
 
         let status = run_grind(&client(&base), 1003, &goal).await;
@@ -1378,6 +1419,7 @@ mod tests {
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
             to_level: 10, kill_count: None, rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
         };
         let target = Target { guid: 222, x: 20.0, y: 0.0, z: 0.0, distance: 20.0 };
         let rotation = crate::rotations::build("mage_frost_b1").unwrap();
@@ -1489,6 +1531,7 @@ mod tests {
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
             to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
         };
         let out = recover_from_death(&client(&base), 1003, &goal).await;
         assert!(matches!(out, RecoveryOutcome::Recovered));
@@ -1525,6 +1568,7 @@ mod tests {
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
             to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
         };
         let out = recover_from_death(&client(&base), 1003, &goal).await;
         assert!(matches!(out, RecoveryOutcome::StillDead));
@@ -1573,6 +1617,7 @@ mod tests {
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
             to_level: 99, kill_count: Some(10), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
         };
         let status = run_grind(&client(&base), 1003, &goal).await;
         assert!(
@@ -1629,9 +1674,78 @@ mod tests {
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
             to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
         };
         let status = run_grind(&client(&base), 1003, &goal).await;
         assert!(matches!(status, GoalStatus::Completed { .. }), "got {status:?}");
         assert_eq!(teleports.load(SeqCst), 1, "exactly one DOA recovery");
+    }
+
+    /// Full-loop: kills 1-4 skip the inventory poll (stride 5); the 5th kill polls,
+    /// triggers, runs the trip; kill 6 completes the goal (kill_count=6) with the
+    /// stride/cooldown suppressing a second trip. Real react/post-kill sleeps make
+    /// this run ~10-20 s — accepted, it's the only full-loop economy test.
+    ///
+    /// Mock kill scheme: each `bot.attack` "kills" the current target by bumping the
+    /// served hostile guid (111+attacks). The fight's by-guid liveness poll then
+    /// misses the old guid → TargetDead; the next Scanning picks up the new guid.
+    #[tokio::test]
+    async fn run_grind_executes_vendor_trip_then_resumes_and_completes() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let attacks = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+        let move_target = std::sync::Arc::new(std::sync::Mutex::new((0.0f64, 0.0f64, 0.0f64)));
+        let (c2, a2, m2) = (calls.clone(), attacks.clone(), move_target.clone());
+        let base = spawn_mock(move |name, args| {
+            c2.lock().unwrap().push(name.clone());
+            match name.as_str() {
+                "obs.get_nearby_hostiles" => {
+                    let k = *a2.lock().unwrap() as u64;
+                    json!({"hostiles": [{"guid": 111 + k, "name": "Wolf", "level": 22,
+                        "hp_pct": 100, "distance": 3.0, "is_alive": true,
+                        "x": 3.0, "y": 0.0, "z": 0.0}]})
+                }
+                "bot.attack" => { *a2.lock().unwrap() += 1; json!({"attacking": true}) }
+                "obs.get_state" => json!({"self": {"level": 22, "hp_pct": 100}}),
+                "obs.get_auras" => json!({"auras": []}),
+                "obs.get_lootable_corpses" => json!({"corpses": []}),
+                "obs.get_inventory" => json!({"equipped": [], "bags":
+                    (0..16).map(|s| json!({"quality": 0, "slot": s, "item_entry": 750,
+                        "name": "x", "itemset": 0, "count": 1, "guid": s})).collect::<Vec<_>>(),
+                    "nested_bags": []}),
+                "nav.find_path" => json!({"path_type": 1i64, "points": [
+                    {"x": 0.0, "y": 0.0, "z": 0.0},
+                    {"x": args["dest_x"], "y": args["dest_y"], "z": args["dest_z"]}]}),
+                "bot.move_path" => {
+                    let p = args["points"].as_array().unwrap().last().unwrap().clone();
+                    *m2.lock().unwrap() = (p["x"].as_f64().unwrap(),
+                                           p["y"].as_f64().unwrap(), p["z"].as_f64().unwrap());
+                    json!({"launched": true, "duration_ms": 0,
+                           "final": {"x": p["x"], "y": p["y"], "z": p["z"]}})
+                }
+                "obs.get_position" => {
+                    let (x, y, z) = *m2.lock().unwrap();
+                    json!({"x": x, "y": y, "z": z, "map_id": 0, "zone_id": 1,
+                           "area_id": 1, "orientation": 0.0})
+                }
+                "bot.vendor_sell" => json!({"sold_count": 16u32, "copper_gained": 320u64}),
+                "bot.repair" => json!({"copper_spent": 0u64}),
+                other => panic!("unexpected tool {other}"),
+            }
+        }).await;
+        let mut goal = test_goal();
+        goal.mob_filter = MobFilter { min_level: 19, max_level: 25, creature_type: None };
+        goal.to_level = 99;          // complete via kill_count only
+        goal.kill_count = Some(6);   // 5th kill trips; 6th completes
+        goal.vendor = Some(VendorInfo {
+            spawn_id: 40001,
+            pos: WorldPos { map_id: 0, x: 50.0, y: 0.0, z: 0.0 },
+            can_repair: true,
+        });
+        let status = run_grind(&client(&base), 1114, &goal).await;
+        assert!(matches!(status, GoalStatus::Completed { .. }), "got {status:?}");
+        let seq = calls.lock().unwrap().clone();
+        let sells = seq.iter().filter(|c| *c == "bot.vendor_sell").count();
+        assert_eq!(sells, 1, "exactly one trip (stride/cooldown suppress #2): {seq:?}");
+        assert!(seq.contains(&"bot.repair".to_string()));
     }
 }

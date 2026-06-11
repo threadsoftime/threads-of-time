@@ -36,6 +36,16 @@ pub struct ProfileAnchor {
     pub z: f64,
 }
 
+/// Vendor spawn position in world-space (same map as the camp anchor by design).
+/// Used by the economy trip planner to navigate to the vendor.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VendorPos {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrindProfile {
@@ -48,6 +58,15 @@ pub struct GrindProfile {
     pub rotation_id: String,
     #[serde(default)]
     pub custom_behavior: Option<String>,
+    /// Economy vendor group (M2 slice 2.4) — all three present or all absent
+    /// (validated). Mined per camp from the world-DB dumps (spec §6); the vendor
+    /// is on the SAME map as the anchor.
+    #[serde(default)]
+    pub vendor_spawn_id: Option<u64>,
+    #[serde(default)]
+    pub vendor_pos: Option<VendorPos>,
+    #[serde(default)]
+    pub vendor_can_repair: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +117,14 @@ impl ProfileRegistry {
         }
         if !(p.rest_threshold > 0.0 && p.rest_threshold <= 1.0) {
             return Err(bad("rest_threshold must be in (0, 1]"));
+        }
+        let vendor_present = [p.vendor_spawn_id.is_some(), p.vendor_pos.is_some(),
+                              p.vendor_can_repair.is_some()];
+        let n = vendor_present.iter().filter(|b| **b).count();
+        if n != 0 && n != vendor_present.len() {
+            return Err(bad(
+                "vendor group is all-or-nothing: vendor_spawn_id, vendor_pos, vendor_can_repair",
+            ));
         }
         Ok(())
     }
@@ -253,5 +280,56 @@ rotation_id = "{rid}"
             .expect("shipped profiles.toml must load + validate");
         assert!(reg.len() >= 2, "expect 2-3 camp profiles");
         assert!(reg.contains("elwynn_fargodeep"));
+    }
+
+    const VENDOR_GROUP: &str = r#"
+vendor_spawn_id = 40001
+vendor_pos = { x = 2200.0, y = -300.0, z = 95.0 }
+vendor_can_repair = true
+"#;
+
+    #[test]
+    fn accepts_full_vendor_group() {
+        let s = VALID.replace(
+            "rotation_id = \"auto_attack\"\n\n[dun_morogh_camp]",
+            &format!("rotation_id = \"auto_attack\"\n{VENDOR_GROUP}\n[dun_morogh_camp]"),
+        );
+        let reg = ProfileRegistry::from_toml_str(&s).expect("full vendor group valid");
+        let p = reg.get("elwynn_fargodeep").unwrap();
+        assert_eq!(p.vendor_spawn_id, Some(40001));
+        assert_eq!(p.vendor_pos.as_ref().map(|v| v.x), Some(2200.0));
+        assert_eq!(p.vendor_pos.as_ref().map(|v| v.y), Some(-300.0));
+        assert_eq!(p.vendor_pos.as_ref().map(|v| v.z), Some(95.0));
+        assert_eq!(p.vendor_can_repair, Some(true));
+        // dun_morogh_camp has no group — must stay None and still validate.
+        assert!(reg.get("dun_morogh_camp").unwrap().vendor_spawn_id.is_none());
+    }
+
+    #[test]
+    fn rejects_partial_vendor_group() {
+        // Each single field alone must fail validation (all-or-nothing, spec §7).
+        for field in ["vendor_spawn_id = 40001",
+                      r#"vendor_pos = { x = 1.0, y = 2.0, z = 3.0 }"#,
+                      "vendor_can_repair = true"] {
+            let s = VALID.replace(
+                "rotation_id = \"auto_attack\"\n\n[dun_morogh_camp]",
+                &format!("rotation_id = \"auto_attack\"\n{field}\n\n[dun_morogh_camp]"),
+            );
+            let err = ProfileRegistry::from_toml_str(&s).unwrap_err();
+            assert!(matches!(err, ProfileError::Validation { .. }),
+                    "partial group '{field}' must be a Validation error, got {err:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_two_of_three_vendor_fields() {
+        // n=2 must also fail — pins all-or-nothing (not merely pairwise) semantics.
+        let two = "vendor_spawn_id = 40001\nvendor_pos = { x = 1.0, y = 2.0, z = 3.0 }";
+        let s = VALID.replace(
+            "rotation_id = \"auto_attack\"\n\n[dun_morogh_camp]",
+            &format!("rotation_id = \"auto_attack\"\n{two}\n\n[dun_morogh_camp]"),
+        );
+        let err = ProfileRegistry::from_toml_str(&s).unwrap_err();
+        assert!(matches!(err, ProfileError::Validation { .. }), "got {err:?}");
     }
 }

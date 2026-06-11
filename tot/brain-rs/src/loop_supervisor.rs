@@ -869,6 +869,7 @@ impl LoopSupervisor {
             return;
         }
         self.emission_ledger.record_emit(bot_guid, &envelope.goal_id);
+        info!("goal_emitted bot_guid={} goal_id={} kind=grind", bot_guid, envelope.goal_id);
 
         // Emit — best-effort: log on error, do NOT propagate (must not perturb the tick).
         if let Err(e) = sink.set_goal(bot_guid as u64, envelope).await {

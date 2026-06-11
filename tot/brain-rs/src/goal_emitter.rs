@@ -8,7 +8,7 @@
 
 use serde_json::Value;
 use tot_goal_contract::{
-    Goal, GoalEnvelope, GrindGoal, MobFilter, WorldPos, GOAL_CONTRACT_VERSION,
+    Goal, GoalEnvelope, GrindGoal, MobFilter, VendorInfo, WorldPos, GOAL_CONTRACT_VERSION,
 };
 
 use crate::profile::GrindProfile;
@@ -25,6 +25,7 @@ use crate::profile::GrindProfile;
 /// * `rest_threshold`: `profile.rest_threshold`
 /// * `kill_count`: `None`
 /// * `rotation_id`: `Some(profile.rotation_id.clone())` — forwarded verbatim; exec-rs falls back to auto_attack on unknown ids
+/// * `vendor`: `Some(VendorInfo { spawn_id, pos, can_repair })` when all three profile vendor fields are `Some`; `None` otherwise (same-map rule: `pos.map_id` comes from `profile.anchor.map_id`, spec §6)
 /// * `goal_id`: `format!("grind-{bot_guid}-{level}")` — stable per (bot, level)
 pub fn synthesize_grind(
     bot_guid: i64,
@@ -66,6 +67,17 @@ pub fn synthesize_grind(
             kill_count: None,
             rest_threshold: profile.rest_threshold,
             rotation_id: Some(profile.rotation_id.clone()),
+            vendor: match (profile.vendor_spawn_id, &profile.vendor_pos, profile.vendor_can_repair) {
+                (Some(spawn_id), Some(vp), Some(can_repair)) => Some(VendorInfo {
+                    spawn_id,
+                    pos: WorldPos {
+                        map_id: profile.anchor.map_id, // same-map rule (spec §6)
+                        x: vp.x, y: vp.y, z: vp.z,
+                    },
+                    can_repair,
+                }),
+                _ => None, // partial groups are rejected at profile load
+            },
         }),
     })
 }
@@ -97,6 +109,9 @@ mod tests {
             rest_threshold: 0.35,
             rotation_id: "auto_attack".into(),
             custom_behavior: None,
+            vendor_spawn_id: None,
+            vendor_pos: None,
+            vendor_can_repair: None,
         }
     }
 
@@ -260,5 +275,36 @@ mod tests {
         let env = synthesize_grind(1173, &state_summary(10), 25, &profile).unwrap();
         let Goal::Grind(g) = &env.goal else { panic!("not grind") };
         assert_eq!(g.rotation_id.as_deref(), Some("mage_frost_b1"));
+    }
+
+    // ── vendor group plumb-through ───────────────────────────────────────────
+
+    #[test]
+    fn synthesize_grind_plumbs_vendor_group() {
+        let profile = GrindProfile {
+            // Non-zero map pins the same-map rule against a zero-init bug.
+            anchor: ProfileAnchor { map_id: 1, x: 2100.0, y: -210.0, z: 92.0 },
+            vendor_spawn_id: Some(40001),
+            vendor_pos: Some(crate::profile::VendorPos { x: 2200.0, y: -300.0, z: 95.0 }),
+            vendor_can_repair: Some(true),
+            ..test_profile()
+        };
+        let env = synthesize_grind(1114, &state_summary(22), 25, &profile).unwrap();
+        let Goal::Grind(g) = &env.goal else { panic!("not grind") };
+        let v = g.vendor.expect("vendor group must reach the goal");
+        assert_eq!(v.spawn_id, 40001);
+        assert_eq!(v.pos.x, 2200.0);
+        assert_eq!(v.pos.y, -300.0);
+        assert_eq!(v.pos.z, 95.0);
+        // map comes from the ANCHOR (same-map rule, spec §6) — profile has no vendor map field.
+        assert_eq!(v.pos.map_id, 1, "must be the anchor's map, not a default");
+        assert!(v.can_repair);
+    }
+
+    #[test]
+    fn synthesize_grind_without_vendor_group_yields_none() {
+        let env = synthesize_grind(1114, &state_summary(22), 25, &test_profile()).unwrap();
+        let Goal::Grind(g) = &env.goal else { panic!("not grind") };
+        assert!(g.vendor.is_none());
     }
 }
