@@ -2,6 +2,28 @@
 use thiserror::Error;
 use tot_harness_client::{HarnessClient, HarnessError};
 
+/// Finding #12: consecutive identical CastFailed details before the fight aborts.
+/// ~10 ticks × ≥500ms ≈ 5–10s detection vs the 81-minute live wedge.
+pub const CAST_SPIN_THRESHOLD: u32 = 10;
+
+/// Consecutive identical CastFailed-detail counter (finding #12).
+#[derive(Debug, Default)]
+pub struct SpinTracker {
+    last: Option<Option<i64>>,
+    count: u32,
+}
+
+impl SpinTracker {
+    /// Record a CastFailed with this detail; returns the consecutive count.
+    pub fn note_cast_failed(&mut self, detail: Option<i64>) -> u32 {
+        if self.last == Some(detail) { self.count += 1; }
+        else { self.last = Some(detail); self.count = 1; }
+        self.count
+    }
+    /// A cast actually started — the fight is making progress.
+    pub fn reset(&mut self) { self.last = None; self.count = 0; }
+}
+
 #[derive(Debug, Error)]
 pub enum CombatError {
     #[error("harness: {0}")]
@@ -51,7 +73,9 @@ pub enum ActionOutcome {
     /// Melee auto-attack asserted (idempotent).
     Engaged,
     /// The verb ran but the cast did not start; engine falls through.
-    Failed(FailCode),
+    /// `detail` carries the adapter's raw SpellCastResult for CastFailed only
+    /// (typed fails are normal combat flow and never spin-counted).
+    Failed { code: FailCode, detail: Option<i64> },
 }
 
 pub trait RotationAction: Send + Sync {
@@ -73,6 +97,8 @@ pub trait RotationAction: Send + Sync {
 #[derive(Debug, Default)]
 pub struct FightMemo {
     pub dropped: std::collections::HashSet<u32>,
+    /// Finding #12: tracks consecutive identical CastFailed details.
+    pub spin: SpinTracker,
 }
 
 #[derive(Debug)]
@@ -81,6 +107,9 @@ pub enum TickOutcome {
     Acted { wait_ms: u64 },
     /// The server says the target is gone/dead — end the fight.
     TargetGone,
+    /// ≥ CAST_SPIN_THRESHOLD consecutive identical CastFailed details — the fight
+    /// cannot progress (finding #12: mounted wedge or equivalent). Caller aborts.
+    CastSpin { detail: Option<i64> },
 }
 
 /// M1 melee: assert the attack each tick (core auto-swings; re-asserting is idempotent and
@@ -173,6 +202,9 @@ impl RotationAction for CastSpellAction {
                     ));
                 };
                 let code = FailCode::from_wire(wire);
+                let detail = if code == FailCode::CastFailed {
+                    parsed.detail.as_ref().and_then(|v| v.as_i64())
+                } else { None };
                 if code == FailCode::CastFailed {
                     // Catch-all: surface the unknown/raw code + adapter detail for
                     // observability (wrong spell ids are this slice's named top risk).
@@ -182,7 +214,7 @@ impl RotationAction for CastSpellAction {
                         "bot.cast_spell: cast_failed catch-all"
                     );
                 }
-                Ok(ActionOutcome::Failed(code))
+                Ok(ActionOutcome::Failed { code, detail })
             }
         })
     }
@@ -223,15 +255,28 @@ impl RotationPlugin {
             }
             if !a.can_execute(ctx) { continue; }
             match a.execute(bot_guid, target_guid, h).await? {
-                ActionOutcome::Casting { cast_time_ms } => return Ok(TickOutcome::Acted { wait_ms: cast_time_ms }),
+                ActionOutcome::Casting { cast_time_ms } => {
+                    memo.spin.reset();
+                    return Ok(TickOutcome::Acted { wait_ms: cast_time_ms });
+                }
+                // No spin reset on Engaged: Unit::Attack silently no-ops while
+                // mounted, so melee "success" must not mask a cast wedge.
                 ActionOutcome::Engaged => return Ok(TickOutcome::Acted { wait_ms: 0 }),
-                ActionOutcome::Failed(FailCode::NotKnown) => {
+                ActionOutcome::Failed { code: FailCode::NotKnown, .. } => {
                     if let Some(id) = a.spell_id() { memo.dropped.insert(id); }
                 }
-                ActionOutcome::Failed(FailCode::TargetDead) | ActionOutcome::Failed(FailCode::InvalidTarget) => {
+                ActionOutcome::Failed { code: FailCode::TargetDead, .. }
+                | ActionOutcome::Failed { code: FailCode::InvalidTarget, .. } => {
                     return Ok(TickOutcome::TargetGone);
                 }
-                ActionOutcome::Failed(_) => {} // on_cooldown / no_power / out_of_range / no_los → next
+                ActionOutcome::Failed { code: FailCode::CastFailed, detail } => {
+                    if memo.spin.note_cast_failed(detail) >= CAST_SPIN_THRESHOLD {
+                        tracing::warn!(action = a.name(), ?detail,
+                            "cast_spin_abort: identical cast_failed threshold reached");
+                        return Ok(TickOutcome::CastSpin { detail });
+                    }
+                }
+                ActionOutcome::Failed { .. } => {} // on_cooldown / no_power / out_of_range / no_los → next
             }
         }
         // Nothing fired this tick (melee fallback makes this rare). Callers MUST sleep
@@ -357,7 +402,7 @@ mod tests {
         let a = CastSpellAction { name: "fire_blast", spell_id: 2136, range: 20.0,
                                   precondition: |_| true, self_cast: false };
         let out = a.execute(1003, 0xF130000000000001u64, &client(&base)).await.unwrap();
-        assert!(matches!(out, ActionOutcome::Failed(FailCode::OnCooldown)));
+        assert!(matches!(out, ActionOutcome::Failed { code: FailCode::OnCooldown, .. }));
     }
 
     /// tick: on_cooldown/no_power fall through to the next action; not_known memo-drops.
@@ -410,7 +455,7 @@ mod tests {
         let a = CastSpellAction { name: "smite", spell_id: 585, range: 30.0,
                                   precondition: |_| true, self_cast: false };
         let out = a.execute(1003, 1, &client(&base)).await.unwrap();
-        assert!(matches!(out, ActionOutcome::Failed(FailCode::CastFailed)));
+        assert!(matches!(out, ActionOutcome::Failed { code: FailCode::CastFailed, .. }));
     }
 
     /// A response missing `casting` is a contract violation → loud Shape error,
@@ -432,6 +477,98 @@ mod tests {
                                   precondition: |_| true, self_cast: false };
         let err = a.execute(1003, 1, &client(&base)).await;
         assert!(matches!(err, Err(CombatError::Shape(_))), "got: {err:?}");
+    }
+
+    /// Finding #12: N consecutive identical cast_failed details abort the tick with
+    /// CastSpin. AutoAttack's Engaged in the same rotation must NOT mask it (Unit::Attack
+    /// silently no-ops while mounted).
+    #[tokio::test]
+    async fn tick_aborts_on_consecutive_identical_cast_failed() {
+        let base = spawn_mock(move |name, _a| {
+            if name == "bot.cast_spell" {
+                json!({"casting": false, "fail_code": "cast_failed", "detail": 64})
+            } else {
+                json!({"attacked": true, "target_guid": 1u64, "target_name": "Kobold"})
+            }
+        }).await;
+        let plugin = RotationPlugin::new(vec![
+            Box::new(CastSpellAction { name: "sinister_strike", spell_id: 1752, range: 5.0,
+                                       precondition: |_| true, self_cast: false }),
+            Box::new(AutoAttackAction),
+        ], vec![], 5.0);
+        let mut memo = FightMemo::default();
+        let mut spin = None;
+        for _ in 0..CAST_SPIN_THRESHOLD {
+            if let TickOutcome::CastSpin { detail } =
+                plugin.tick(1003, 1, &client(&base), &ctx(), &mut memo).await.unwrap()
+            { spin = Some(detail); break; }
+        }
+        assert_eq!(spin, Some(Some(64)), "CastSpin{{detail:64}} must fire within threshold ticks");
+    }
+
+    /// A cast that actually starts resets the spin counter — interleaved successes
+    /// mean normal combat noise never aborts.
+    #[tokio::test]
+    async fn casting_success_resets_spin_counter() {
+        let n = Arc::new(Mutex::new(0u32));
+        let n2 = n.clone();
+        let base = spawn_mock(move |_name, _a| {
+            let mut c = n2.lock().unwrap();
+            *c += 1;
+            if (*c).is_multiple_of(CAST_SPIN_THRESHOLD - 1) {
+                json!({"casting": true, "cast_time_ms": 0})
+            } else {
+                json!({"casting": false, "fail_code": "cast_failed", "detail": 64})
+            }
+        }).await;
+        let plugin = RotationPlugin::new(vec![
+            Box::new(CastSpellAction { name: "fire_blast", spell_id: 2136, range: 20.0,
+                                       precondition: |_| true, self_cast: false }),
+        ], vec![], 25.0);
+        let mut memo = FightMemo::default();
+        for _ in 0..30 {
+            let out = plugin.tick(1003, 1, &client(&base), &ctx2(), &mut memo).await.unwrap();
+            assert!(!matches!(out, TickOutcome::CastSpin { .. }),
+                    "reset-on-success must prevent CastSpin");
+        }
+    }
+
+    /// A DIFFERENT detail restarts the count — only identical consecutive fails abort.
+    #[tokio::test]
+    async fn different_detail_restarts_spin_count() {
+        let n = Arc::new(Mutex::new(0u32));
+        let n2 = n.clone();
+        let base = spawn_mock(move |_name, _a| {
+            let mut c = n2.lock().unwrap();
+            *c += 1;
+            let d = if (*c).is_multiple_of(2) { 64 } else { 65 };
+            json!({"casting": false, "fail_code": "cast_failed", "detail": d})
+        }).await;
+        let plugin = RotationPlugin::new(vec![
+            Box::new(CastSpellAction { name: "fire_blast", spell_id: 2136, range: 20.0,
+                                       precondition: |_| true, self_cast: false }),
+        ], vec![], 25.0);
+        let mut memo = FightMemo::default();
+        for _ in 0..30 {
+            let out = plugin.tick(1003, 1, &client(&base), &ctx2(), &mut memo).await.unwrap();
+            assert!(!matches!(out, TickOutcome::CastSpin { .. }),
+                    "alternating details must never reach the threshold");
+        }
+    }
+
+    /// Typed combat-flow fails (on_cooldown etc.) neither count nor reset.
+    #[tokio::test]
+    async fn typed_fails_do_not_trigger_cast_spin() {
+        let base = spawn_mock(move |_n, _a| json!({"casting": false, "fail_code": "on_cooldown"})).await;
+        let plugin = RotationPlugin::new(vec![
+            Box::new(CastSpellAction { name: "fire_blast", spell_id: 2136, range: 20.0,
+                                       precondition: |_| true, self_cast: false }),
+        ], vec![], 25.0);
+        let mut memo = FightMemo::default();
+        for _ in 0..30 {
+            let out = plugin.tick(1003, 1, &client(&base), &ctx2(), &mut memo).await.unwrap();
+            assert!(!matches!(out, TickOutcome::CastSpin { .. }));
+        }
     }
 
     /// target_dead from the adapter ends the fight (TickOutcome::TargetGone).

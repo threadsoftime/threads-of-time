@@ -164,6 +164,19 @@ pub(crate) async fn recover_from_death(
         tracing::warn!(bot_guid, error = %e, "recovery: re-claim failed");
     }
     if alive {
+        // Finding #12: the recovery release window is THE re-mount vector
+        // (0.12s claim-to-wedge, live-proven). Probe after the re-claim.
+        match is_mounted(client, bot_guid).await {
+            Ok(true) => {
+                tracing::warn!(bot_guid, "mount_check: mounted after recovery re-claim — dismount cycle");
+                if matches!(dismount_via_native(client, bot_guid).await, DismountOutcome::StillMounted) {
+                    // No terminal here — the cast-spin backoff bounds the worst case.
+                    tracing::warn!(bot_guid, "mount_check: still mounted post-recovery; spin backoff will bound it");
+                }
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(bot_guid, error = %e, "mount_check: aura probe failed post-recovery"),
+        }
         // Obs rider (2.4 spec §8): successful recovery was warn!-silent — make it
         // provable from the journal (the audit log stays the secondary surface).
         tracing::info!(bot_guid, polls_used, "recovery_succeeded: revived, teleported to anchor, re-claimed");
@@ -365,11 +378,15 @@ const FIGHT_POLL_INTERVAL_MS: u64 = 500;
 const FIGHT_MAX_POLLS: u32 = 60;
 
 /// Internal result of the `fight` state — the `run_grind` loop maps this to the next state.
+#[derive(Debug)]
 pub(crate) enum FightOutcome {
     /// Target is dead (absent or hp==0 in the hostiles scan). Proceed to post-kill pause.
     TargetDead,
     /// Bot died during combat. Must escalate.
     BotDied,
+    /// ≥ CAST_SPIN_THRESHOLD identical CastFailed details — fight cannot progress
+    /// (finding #12). run_grind probes mount state and aborts or dismounts.
+    CastSpin { detail: Option<i64> },
 }
 
 /// Returns `Some((hp_pct, distance))` while the target is alive in the scan radius;
@@ -424,6 +441,7 @@ pub(crate) async fn fight(
         // condition. Treat it as TargetDead and proceed to loot.
         match rotation.tick(bot_guid, target.guid, client, &ctx, &mut memo).await {
             Ok(TickOutcome::TargetGone) => return Ok(FightOutcome::TargetDead),
+            Ok(TickOutcome::CastSpin { detail }) => return Ok(FightOutcome::CastSpin { detail }),
             Ok(TickOutcome::Acted { wait_ms }) => {
                 // max(): an exhausted tick (wait_ms==0) must not hot-spin (combat.rs note).
                 let wait = wait_ms.max(FIGHT_POLL_INTERVAL_MS);
@@ -493,6 +511,10 @@ struct AuraEntry {
     /// falls back to spell_id against older worldservers.
     #[serde(default)]
     first_spell_id: Option<u32>,
+    /// Finding #12: nested effect amounts carrying aura_type (wire-verified live 2026-06-11).
+    /// aura_type 78 = SPELL_AURA_MOUNTED; nested, NOT top-level.
+    #[serde(default)]
+    effect_amounts: Vec<EffectAmount>,
 }
 #[derive(Debug, serde::Deserialize)]
 struct AurasResult { auras: Vec<AuraEntry> }
@@ -521,7 +543,7 @@ pub(crate) async fn ensure_buffs(
                 let wait = cast_time_ms.max(GCD_MS);
                 tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
             }
-            Ok(ActionOutcome::Failed(code)) => {
+            Ok(ActionOutcome::Failed { code, .. }) => {
                 // Typed failure (no_power, on_cooldown, etc.) — log and move on, no sleep.
                 tracing::debug!(buff = b.name, ?code, "buff cast did not start");
             }
@@ -535,6 +557,63 @@ pub(crate) async fn ensure_buffs(
         }
     }
     Ok(())
+}
+
+/// SPELL_AURA_MOUNTED (SharedDefines.h AuraType). detail-64 wedge precondition.
+const SPELL_AURA_MOUNTED: u32 = 78;
+
+#[derive(Debug, serde::Deserialize)]
+struct EffectAmount {
+    #[serde(default)]
+    aura_type: Option<u32>,
+}
+
+/// Finding #12: a mounted bot cannot cast (SPELL_FAILED_NOT_MOUNTED) and
+/// Unit::Attack silently no-ops — probe before grinding/after re-claims.
+pub(crate) async fn is_mounted(client: &HarnessClient, bot_guid: u64) -> Result<bool, GrindError> {
+    let raw = client.call("obs.get_auras", serde_json::json!({ "target_guid": bot_guid as i64 })).await?;
+    let parsed: AurasResult = serde_json::from_value(raw)
+        .map_err(|e| GrindError::Shape(format!("obs.get_auras: {e}")))?;
+    Ok(parsed.auras.iter()
+        .any(|a| a.effect_amounts.iter().any(|e| e.aura_type == Some(SPELL_AURA_MOUNTED))))
+}
+
+/// Dismount-via-native budget (finding #12): native AI dismounts ~2 min after a
+/// release (CheckMountStateAction); same poll idiom as death recovery.
+const DISMOUNT_POLL_MS: u64 = if cfg!(test) { 20 } else { 5_000 };
+const DISMOUNT_MAX_POLLS: u32 = 36;
+
+#[derive(Debug)]
+pub(crate) enum DismountOutcome { Dismounted, StillMounted }
+
+/// Finding #12: no dismount verb exists (bot.dismount = reconciliation-#9 rider),
+/// so release to the native AI, poll the mount aura away, re-claim.
+///
+/// INVARIANT: re-claims ownership on EVERY exit path (same as recover_from_death).
+pub(crate) async fn dismount_via_native(client: &HarnessClient, bot_guid: u64) -> DismountOutcome {
+    if let Err(e) = crate::own::set_ai_owned(client, bot_guid, false).await {
+        tracing::warn!(bot_guid, error = %e, "dismount: release failed");
+    }
+    let mut dismounted = false;
+    let mut polls_used: u32 = 0;
+    for poll in 0..DISMOUNT_MAX_POLLS {
+        tokio::time::sleep(Duration::from_millis(DISMOUNT_POLL_MS)).await;
+        match is_mounted(client, bot_guid).await {
+            Ok(false) => { dismounted = true; polls_used = poll + 1; break; }
+            Ok(true) => {}
+            Err(e) => tracing::warn!(bot_guid, error = %e, "dismount: aura poll failed"),
+        }
+    }
+    if let Err(e) = crate::own::set_ai_owned(client, bot_guid, true).await {
+        tracing::warn!(bot_guid, error = %e, "dismount: re-claim failed");
+    }
+    if dismounted {
+        tracing::info!(bot_guid, polls_used, "dismount_succeeded: native AI dismounted, re-claimed");
+        DismountOutcome::Dismounted
+    } else {
+        tracing::warn!(bot_guid, "dismount_budget_exhausted: still mounted after release window");
+        DismountOutcome::StillMounted
+    }
 }
 
 /// Drive a `Grind` goal to a terminal `GoalStatus`. All states are real.
@@ -567,6 +646,21 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
             tracing::warn!("unknown rotation_id {rotation_id}; using auto_attack");
             RotationPlugin::melee_m1()
         });
+
+    // Finding #12 claim-time mount check: a bot claimed while mounted cannot cast
+    // and Unit::Attack silently no-ops. Probe failures default to not-mounted —
+    // never block a goal on a flaky aura read; the spin backoff is the backstop.
+    if !matches!(state, GrindState::Recovering)
+        && is_mounted(client, bot_guid).await.unwrap_or(false)
+    {
+        tracing::warn!(bot_guid, "mount_check: mounted at goal entry — dismount cycle");
+        if matches!(dismount_via_native(client, bot_guid).await, DismountOutcome::StillMounted) {
+            return GoalStatus::Blocked {
+                reason: tot_goal_contract::BlockedReason::Other,
+                detail: Some("mount_wedge: still mounted after dismount budget".into()),
+            };
+        }
+    }
 
     // Buff pass at grind entry — skipped when arriving dead (buffing a corpse
     // wastes an RPC and logs a spurious warn); the post-recovery path re-buffs.
@@ -637,6 +731,32 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
             GrindState::Fighting { target } => match fight(client, bot_guid, target, goal, &rotation).await {
                 Ok(FightOutcome::TargetDead) => GrindState::PostKillPause { target },
                 Ok(FightOutcome::BotDied) => GrindState::Recovering,
+                Ok(FightOutcome::CastSpin { detail }) => {
+                    // Finding #12: probe-don't-guess. Mounted → native dismount cycle;
+                    // anything else → bounded Blocked retry (300s ledger cooldown),
+                    // never an in-place spin.
+                    if is_mounted(client, bot_guid).await.unwrap_or(false) {
+                        match dismount_via_native(client, bot_guid).await {
+                            DismountOutcome::Dismounted => {
+                                if let Err(e) = ensure_buffs(client, bot_guid, &rotation).await {
+                                    tracing::warn!(error = %e, "post-dismount buff pass failed");
+                                }
+                                GrindState::Scanning
+                            }
+                            DismountOutcome::StillMounted => {
+                                return GoalStatus::Blocked {
+                                    reason: tot_goal_contract::BlockedReason::Other,
+                                    detail: Some("mount_wedge: still mounted after dismount budget".into()),
+                                };
+                            }
+                        }
+                    } else {
+                        return GoalStatus::Blocked {
+                            reason: tot_goal_contract::BlockedReason::Other,
+                            detail: Some(format!("cast_spin: detail={detail:?} after identical-fail threshold")),
+                        };
+                    }
+                }
                 Err(GrindError::Harness(e)) =>
                     return GoalStatus::Blocked { reason: tot_goal_contract::BlockedReason::Other,
                                                  detail: Some(format!("fight harness: {e}")) },
@@ -1511,6 +1631,194 @@ mod tests {
             "expected only Frost Armor cast; got: {cast_spell_ids:?}");
     }
 
+    // ── Finding #12: fight() CastSpin escalation ─────────────────────────────
+
+    /// fight() surfaces the tick's CastSpin (returns before any liveness refresh).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fight_maps_cast_spin_outcome() {
+        use crate::combat::{CastSpellAction, CAST_SPIN_THRESHOLD};
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+        let tick_count = Arc::new(AtomicU32::new(0));
+        let tc2 = tick_count.clone();
+        let base = spawn_mock(move |name, _a| {
+            match name.as_str() {
+                "bot.cast_spell" => {
+                    tc2.fetch_add(1, SeqCst);
+                    json!({"casting": false, "fail_code": "cast_failed", "detail": 64})
+                }
+                "bot.attack" =>
+                    json!({"attacked": true, "target_guid": 1u64, "target_name": "Kobold"}),
+                // fight() polls target_hp (obs.get_nearby_hostiles) + obs.get_state between ticks.
+                "obs.get_nearby_hostiles" =>
+                    json!({"hostiles": [{"guid": 1u64, "level": 5, "hp_pct": 80.0,
+                        "distance": 3.0, "is_alive": true}]}),
+                "obs.get_state" => json!({"self": {"level": 5, "hp_pct": 90}}),
+                other => panic!("unexpected tool {other} in fight_maps_cast_spin"),
+            }
+        }).await;
+
+        let goal = GrindGoal {
+            anchor_point: WorldPos { map_id: 0, x: 0.0, y: 0.0, z: 0.0 },
+            wander_radius: 90.0, max_search_radius: 35.0,
+            mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
+            to_level: 10, kill_count: None, rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
+        };
+        let target = Target { guid: 1, x: 3.0, y: 0.0, z: 0.0, distance: 3.0 };
+        // Build a rotation with one CastSpellAction + AutoAttack (same as plan).
+        let rotation = crate::combat::RotationPlugin::new(vec![
+            Box::new(CastSpellAction { name: "sinister_strike", spell_id: 1752, range: 5.0,
+                                       precondition: |_| true, self_cast: false }),
+            Box::new(crate::combat::AutoAttackAction),
+        ], vec![], 5.0);
+        let outcome = fight(&client(&base), 1003, target, &goal, &rotation).await.unwrap();
+        assert!(matches!(outcome, FightOutcome::CastSpin { detail: Some(64) }),
+                "expected CastSpin{{detail:Some(64)}}, got {:?}", outcome);
+        // Must have fired the threshold worth of ticks.
+        let ticks = tick_count.load(SeqCst);
+        assert!(ticks >= CAST_SPIN_THRESHOLD, "expected >= {CAST_SPIN_THRESHOLD} ticks, got {ticks}");
+    }
+
+    /// run_grind: CastSpin while NOT mounted → Blocked{Other, "cast_spin..."} terminal.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_grind_cast_spin_unmounted_blocks() {
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+        // We need a rotation_id that the run_grind can build — "mage_frost_b1" uses
+        // bot.cast_spell. But we want to exercise the CastSpin path. The key is that
+        // run_grind builds the rotation from rotation_id. We'll override via a goal with
+        // no rotation_id (defaults to auto_attack melee). The melee bot.attack never
+        // returns CastFailed so we can't hit CastSpin through the default path.
+        //
+        // Instead, we test fight() → CastSpin path through run_grind using a caster
+        // rotation by setting rotation_id = "mage_frost_b1" and mocking cast_spell to
+        // always return cast_failed. We need the scan to find a target, and get_auras
+        // to return not-mounted.
+        let hostile_calls = Arc::new(AtomicU32::new(0));
+        let hc2 = hostile_calls.clone();
+        let base = spawn_mock(move |name, _args| match name.as_str() {
+            "obs.get_state" => json!({"self": {"level": 6, "hp_pct": 90}}),
+            "obs.get_auras" => json!({"auras": []}),  // not mounted at entry
+            "obs.get_nearby_hostiles" => {
+                let n = hc2.fetch_add(1, SeqCst);
+                if n == 0 {
+                    json!({"hostiles": [{"guid": 222u64, "level": 6, "hp_pct": 100.0,
+                        "distance": 3.0, "is_alive": true, "x": 3.0, "y": 0.0, "z": 0.0}]})
+                } else {
+                    // During fight: keep returning target alive so fight() doesn't exit via TargetDead
+                    json!({"hostiles": [{"guid": 222u64, "level": 6, "hp_pct": 80.0,
+                        "distance": 3.0, "is_alive": true}]})
+                }
+            }
+            "bot.cast_spell" => json!({"casting": false, "fail_code": "cast_failed", "detail": 64}),
+            "bot.attack" => json!({"attacked": true, "target_guid": 222u64, "target_name": "Kobold"}),
+            "nav.find_path" => json!({"path_type": 1i64, "points": [
+                {"x":0.0,"y":0.0,"z":0.0},{"x":3.0,"y":0.0,"z":0.0}]}),
+            "bot.move_path" => json!({"launched": true, "duration_ms": 0, "final": {"x":3.0,"y":0.0,"z":0.0}}),
+            "obs.get_position" => json!({"x":3.0,"y":0.0,"z":0.0,"map_id":0,"zone_id":1,"area_id":1,"orientation":0.0}),
+            other => panic!("unexpected tool {other} in cast_spin_unmounted_blocks"),
+        }).await;
+
+        let goal = GrindGoal {
+            anchor_point: WorldPos { map_id: 0, x: 0.0, y: 0.0, z: 0.0 },
+            wander_radius: 90.0, max_search_radius: 35.0,
+            mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
+            to_level: 99, kill_count: None, rest_threshold: 0.35,
+            rotation_id: Some("mage_frost_b1".into()),
+            vendor: None,
+        };
+        let status = run_grind(&client(&base), 1003, &goal).await;
+        match status {
+            GoalStatus::Blocked { detail: Some(d), .. } =>
+                assert!(d.contains("cast_spin"), "expected cast_spin in detail, got: {d}"),
+            other => panic!("expected Blocked cast_spin, got {other:?}"),
+        }
+    }
+
+    // ── Finding #12: is_mounted probe tests ──────────────────────────────────
+
+    /// Finding #12: mount probe — aura_type 78 nested in effect_amounts (live wire shape).
+    #[tokio::test]
+    async fn is_mounted_parses_nested_aura_type() {
+        let base = spawn_mock(move |name, _a| {
+            assert_eq!(name, "obs.get_auras");
+            json!({"auras":[{"spell_id":17453,"first_spell_id":17453,
+                    "effect_amounts":[{"amount":0,"aura_type":78,"index":0}]}]})
+        }).await;
+        assert!(is_mounted(&client(&base), 1323).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn is_mounted_false_without_mount_aura() {
+        let base = spawn_mock(move |_n, _a| {
+            json!({"auras":[{"spell_id":9330,
+                    "effect_amounts":[{"amount":18,"aura_type":99,"index":0}]}]})
+        }).await;
+        assert!(!is_mounted(&client(&base), 1323).await.unwrap());
+    }
+
+    // ── Finding #12: dismount_via_native cycle tests ──────────────────────────
+
+    /// Finding #12: dismount cycle = release → poll auras → re-claim, in order.
+    #[tokio::test]
+    async fn dismount_cycle_releases_polls_reclaims_in_order() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
+        let c2 = calls.clone();
+        let aura_polls = Arc::new(std::sync::Mutex::new(0u32));
+        let a2 = aura_polls.clone();
+        let base = spawn_mock(move |name, args| {
+            c2.lock().unwrap().push((name.clone(), args.clone()));
+            match name.as_str() {
+                "bot.set_ai_enabled" => {
+                    let enabled = args["enabled"].as_bool().unwrap();
+                    json!({"owned": !enabled, "reset": true})
+                }
+                "obs.get_auras" => {
+                    let mut p = a2.lock().unwrap();
+                    *p += 1;
+                    if *p <= 2 {
+                        json!({"auras":[{"spell_id":17453,
+                                "effect_amounts":[{"amount":0,"aura_type":78,"index":0}]}]})
+                    } else {
+                        json!({"auras":[]})
+                    }
+                }
+                other => panic!("unexpected tool {other}"),
+            }
+        }).await;
+
+        let out = dismount_via_native(&client(&base), 1323).await;
+        assert!(matches!(out, DismountOutcome::Dismounted));
+
+        let ledger = calls.lock().unwrap().clone();
+        // First call releases (enabled:true), last call re-claims (enabled:false).
+        assert_eq!(ledger.first().unwrap().0, "bot.set_ai_enabled");
+        assert_eq!(ledger.first().unwrap().1["enabled"], true);
+        assert_eq!(ledger.last().unwrap().0, "bot.set_ai_enabled");
+        assert_eq!(ledger.last().unwrap().1["enabled"], false);
+        assert_eq!(*aura_polls.lock().unwrap(), 3, "polled until dismounted");
+    }
+
+    /// Budget exhaustion: still mounted → StillMounted, but ALWAYS re-claims.
+    #[tokio::test]
+    async fn dismount_cycle_budget_exhaustion_reclaims_and_reports_still_mounted() {
+        let reclaimed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let r2 = reclaimed.clone();
+        let base = spawn_mock(move |name, args| {
+            match name.as_str() {
+                "bot.set_ai_enabled" => {
+                    let enabled = args["enabled"].as_bool().unwrap();
+                    if !enabled { r2.store(true, std::sync::atomic::Ordering::SeqCst); }
+                    json!({"owned": !enabled, "reset": true})
+                }
+                _ => json!({"auras":[{"spell_id":17453,
+                        "effect_amounts":[{"amount":0,"aura_type":78,"index":0}]}]}),
+            }
+        }).await;
+        let out = dismount_via_native(&client(&base), 1323).await;
+        assert!(matches!(out, DismountOutcome::StillMounted));
+        assert!(reclaimed.load(std::sync::atomic::Ordering::SeqCst), "must re-claim on every exit path");
+    }
+
     /// read_self correctly parses the new v2 SelfState fields (mana_pct / power_pct / combo_points).
     #[tokio::test]
     async fn read_self_parses_v2_fields() {
@@ -1526,6 +1834,89 @@ mod tests {
         assert_eq!(s.mana_pct, Some(60));
         assert_eq!(s.power_pct, Some(70));
         assert_eq!(s.combo_points, Some(3));
+    }
+
+    // ── Finding #12: claim-site mount checks ─────────────────────────────────
+
+    /// run_grind goal entry: mounted bot that never dismounts → Blocked{mount_wedge}
+    /// BEFORE any scanning (only get_state/get_auras/set_ai_enabled are ever called).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_grind_mounted_at_entry_blocks_when_dismount_fails() {
+        let base = spawn_mock(move |name, args| match name.as_str() {
+            "obs.get_state" => json!({"self": {"level": 23, "hp_pct": 100}}),
+            "obs.get_auras" => json!({"auras":[{"spell_id":17453,
+                    "effect_amounts":[{"amount":0,"aura_type":78,"index":0}]}]}),
+            "bot.set_ai_enabled" => {
+                let enabled = args["enabled"].as_bool().unwrap();
+                json!({"owned": !enabled, "reset": true})
+            }
+            other => panic!("tool {other} must not be reached while mounted"),
+        }).await;
+        let goal = GrindGoal {
+            anchor_point: WorldPos { map_id: 0, x: 0.0, y: 0.0, z: 0.0 },
+            wander_radius: 90.0, max_search_radius: 35.0,
+            mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
+            to_level: 99, kill_count: Some(1), rest_threshold: 0.35,
+            rotation_id: None, vendor: None,
+        };
+        let status = run_grind(&client(&base), 1323, &goal).await;
+        match status {
+            GoalStatus::Blocked { detail: Some(d), .. } =>
+                assert!(d.contains("mount_wedge"), "expected mount_wedge in detail, got: {d}"),
+            other => panic!("expected Blocked mount_wedge, got {other:?}"),
+        }
+    }
+
+    /// recover_from_death: after the re-claim of an alive bot, a mount aura triggers
+    /// the dismount cycle (assert ≥2 release calls in the set_ai_enabled ledger:
+    /// recovery release + dismount release).
+    #[tokio::test]
+    async fn recovery_reclaim_runs_mount_check() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let c2 = calls.clone();
+        let aura_calls = Arc::new(std::sync::Mutex::new(0u32));
+        let a2 = aura_calls.clone();
+        let base = spawn_mock(move |name, args| {
+            c2.lock().unwrap().push(name.clone());
+            match name.as_str() {
+                "bot.set_ai_enabled" => {
+                    let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+                    json!({"owned": !enabled, "reset": enabled})
+                }
+                "obs.get_state" => json!({"self": {"level": 7, "hp_pct": 100}}), // alive 1st poll
+                "gm.teleport" => json!({"teleported": true}),
+                "obs.get_auras" => {
+                    let mut n = a2.lock().unwrap();
+                    *n += 1;
+                    if *n <= 2 {
+                        // First 2 mount probes: mounted
+                        json!({"auras":[{"spell_id":17453,
+                                "effect_amounts":[{"amount":0,"aura_type":78,"index":0}]}]})
+                    } else {
+                        // Third probe: dismounted
+                        json!({"auras":[]})
+                    }
+                }
+                other => panic!("unexpected tool {other} in recovery_reclaim_runs_mount_check"),
+            }
+        }).await;
+
+        let goal = GrindGoal {
+            anchor_point: WorldPos { map_id: 0, x: -5447.0, y: -378.0, z: 399.0 },
+            wander_radius: 90.0, max_search_radius: 35.0,
+            mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
+            to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
+        };
+        let out = recover_from_death(&client(&base), 1003, &goal).await;
+        assert!(matches!(out, RecoveryOutcome::Recovered));
+
+        let seq = calls.lock().unwrap().clone();
+        // There must be ≥4 set_ai_enabled calls: recovery release + re-claim + dismount release + dismount re-claim
+        let ai_calls: Vec<&String> = seq.iter().filter(|s| s.as_str() == "bot.set_ai_enabled").collect();
+        assert!(ai_calls.len() >= 4,
+            "expected ≥4 set_ai_enabled calls (recovery + dismount cycle), got {}: {seq:?}",
+            ai_calls.len());
     }
 
     // ── Task-6 new tests ──────────────────────────────────────────────────────
@@ -1544,6 +1935,8 @@ mod tests {
                 }
                 "obs.get_state" => json!({"self": {"level": 7, "hp_pct": 100}}), // alive 1st poll
                 "gm.teleport" => json!({"teleported": true}),
+                // Finding #12: recovery now probes for mount after re-claim. Empty = not mounted.
+                "obs.get_auras" => json!({"auras": []}),
                 other => panic!("unexpected tool {other}"),
             }
         }).await;
@@ -1560,10 +1953,12 @@ mod tests {
 
         let seq = calls.lock().unwrap().clone();
         assert_eq!(seq.first().map(String::as_str), Some("bot.set_ai_enabled"), "release first");
-        assert_eq!(seq.last().map(String::as_str), Some("bot.set_ai_enabled"), "re-claim last");
+        // Finding #12: recovery now probes mount after the re-claim. The re-claim is no longer
+        // the very last call (obs.get_auras follows). Verify it still happened.
+        let reclaim_pos = seq.iter().rposition(|s| s == "bot.set_ai_enabled").expect("re-claim present");
         let poll = seq.iter().position(|s| s == "obs.get_state").expect("state polled");
         let tp = seq.iter().position(|s| s == "gm.teleport").expect("teleport called");
-        assert!(poll < tp && tp < seq.len() - 1, "order: release → poll → teleport → re-claim, got {seq:?}");
+        assert!(poll < tp && tp < reclaim_pos, "order: release → poll → teleport → re-claim, got {seq:?}");
     }
 
     /// Recovery budget exhausted: 2 releases (initial + halfway kick), NO teleport
