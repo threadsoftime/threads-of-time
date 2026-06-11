@@ -121,7 +121,7 @@ impl ProfileRegistry {
         let vendor_present = [p.vendor_spawn_id.is_some(), p.vendor_pos.is_some(),
                               p.vendor_can_repair.is_some()];
         let n = vendor_present.iter().filter(|b| **b).count();
-        if n != 0 && n != 3 {
+        if n != 0 && n != vendor_present.len() {
             return Err(bad(
                 "vendor group is all-or-nothing: vendor_spawn_id, vendor_pos, vendor_can_repair",
             ));
@@ -298,6 +298,8 @@ vendor_can_repair = true
         let p = reg.get("elwynn_fargodeep").unwrap();
         assert_eq!(p.vendor_spawn_id, Some(40001));
         assert_eq!(p.vendor_pos.as_ref().map(|v| v.x), Some(2200.0));
+        assert_eq!(p.vendor_pos.as_ref().map(|v| v.y), Some(-300.0));
+        assert_eq!(p.vendor_pos.as_ref().map(|v| v.z), Some(95.0));
         assert_eq!(p.vendor_can_repair, Some(true));
         // dun_morogh_camp has no group — must stay None and still validate.
         assert!(reg.get("dun_morogh_camp").unwrap().vendor_spawn_id.is_none());
@@ -317,5 +319,17 @@ vendor_can_repair = true
             assert!(matches!(err, ProfileError::Validation { .. }),
                     "partial group '{field}' must be a Validation error, got {err:?}");
         }
+    }
+
+    #[test]
+    fn rejects_two_of_three_vendor_fields() {
+        // n=2 must also fail — pins all-or-nothing (not merely pairwise) semantics.
+        let two = "vendor_spawn_id = 40001\nvendor_pos = { x = 1.0, y = 2.0, z = 3.0 }";
+        let s = VALID.replace(
+            "rotation_id = \"auto_attack\"\n\n[dun_morogh_camp]",
+            &format!("rotation_id = \"auto_attack\"\n{two}\n\n[dun_morogh_camp]"),
+        );
+        let err = ProfileRegistry::from_toml_str(&s).unwrap_err();
+        assert!(matches!(err, ProfileError::Validation { .. }), "got {err:?}");
     }
 }
