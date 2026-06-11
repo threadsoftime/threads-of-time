@@ -741,7 +741,7 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
             }
             GrindState::Vendoring { bags, vendor } => {
                 let outcome =
-                    crate::economy::run_vendor_trip(client, bot_guid, goal, &vendor, bags).await;
+                    crate::economy::run_vendor_trip(client, bot_guid, goal, &vendor, bags, &rotation).await;
                 // Cooldown runs from trip END, success or not (spec §3).
                 last_vendor_trip = Some(std::time::Instant::now());
                 match outcome {
