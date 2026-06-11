@@ -228,6 +228,32 @@ pub async fn walk_to(client: &HarnessClient, bot_guid: u64, dest: Dest) -> Resul
     }
 }
 
+/// The point exactly `hop_yd` of 2-D arc length along `points`, interpolating
+/// within the containing segment. Both segment endpoints are navmesh waypoints,
+/// so the interpolated z tracks the walkable surface — safe as a walk_to dest
+/// (finding #11: bot→dest straight-line z lands up to ~11 yd off-mesh on slope
+/// transitions and NOPATHs the dest-poly lookup). Polylines shorter than
+/// `hop_yd` return the final point; <2 points returns None (degenerate probe —
+/// caller falls back to straight-line interpolation).
+pub(crate) fn hop_target_along(points: &[PathPoint], hop_yd: f64) -> Option<Dest> {
+    if points.len() < 2 {
+        return None;
+    }
+    let mut walked = 0.0;
+    for w in points.windows(2) {
+        let (a, b) = (&w[0], &w[1]);
+        let (sx, sy, sz) = (b.x - a.x, b.y - a.y, b.z - a.z);
+        let seg = (sx * sx + sy * sy).sqrt();
+        if seg > 0.0 && walked + seg >= hop_yd {
+            let f = (hop_yd - walked) / seg;
+            return Some(Dest { x: a.x + sx * f, y: a.y + sy * f, z: a.z + sz * f });
+        }
+        walked += seg;
+    }
+    let last = points.last().unwrap();
+    Some(Dest { x: last.x, y: last.y, z: last.z })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,5 +532,49 @@ mod tests {
         }).await;
         let err = walk_to(&client(&base), 42, Dest { x: 100.0, y: 0.0, z: 0.0 }).await.unwrap_err();
         match err { NavError::Stuck(_) => {}, other => panic!("expected Stuck, got: {other:?}") }
+    }
+
+    // ── hop_target_along ──────────────────────────────────────────────────────
+
+    fn pp(x: f64, y: f64, z: f64) -> PathPoint { PathPoint { x, y, z } }
+
+    #[test]
+    fn hop_target_lands_on_waypoint_boundary() {
+        // Flat polyline, points every 10 yd from 0..100. 60 yd of arc → exactly (60,0,0).
+        let pts: Vec<PathPoint> = (0..=10).map(|i| pp(i as f64 * 10.0, 0.0, 0.0)).collect();
+        let t = hop_target_along(&pts, 60.0).unwrap();
+        assert!((t.x - 60.0).abs() < 1e-9 && t.y.abs() < 1e-9 && t.z.abs() < 1e-9);
+    }
+
+    #[test]
+    fn hop_target_interpolates_z_within_segment() {
+        // Segment 2 climbs: (50,0,0) → (100,0,25). 60 yd → f=0.2 into segment 2 →
+        // (60, 0, 5.0). The z comes from the MESH segment, not bot→dest interpolation.
+        let pts = vec![pp(0.0, 0.0, 0.0), pp(50.0, 0.0, 0.0), pp(100.0, 0.0, 25.0)];
+        let t = hop_target_along(&pts, 60.0).unwrap();
+        assert!((t.x - 60.0).abs() < 1e-9, "x: {}", t.x);
+        assert!((t.z - 5.0).abs() < 1e-9, "z must follow the mesh segment: {}", t.z);
+    }
+
+    #[test]
+    fn hop_target_short_polyline_returns_final_point() {
+        let pts = vec![pp(0.0, 0.0, 0.0), pp(30.0, 0.0, 2.0)];
+        let t = hop_target_along(&pts, 60.0).unwrap();
+        assert!((t.x - 30.0).abs() < 1e-9 && (t.z - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hop_target_degenerate_polyline_is_none() {
+        assert!(hop_target_along(&[], 60.0).is_none());
+        assert!(hop_target_along(&[pp(1.0, 2.0, 3.0)], 60.0).is_none());
+    }
+
+    #[test]
+    fn hop_target_skips_zero_2d_length_segments() {
+        // Vertical-only segment (2-D length 0) must not divide by zero; arc length
+        // accumulates 2-D only, matching walk_far's 2-D hop sizing.
+        let pts = vec![pp(0.0, 0.0, 0.0), pp(0.0, 0.0, 10.0), pp(80.0, 0.0, 10.0)];
+        let t = hop_target_along(&pts, 60.0).unwrap();
+        assert!((t.x - 60.0).abs() < 1e-9 && (t.z - 10.0).abs() < 1e-9);
     }
 }
