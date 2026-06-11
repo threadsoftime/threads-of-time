@@ -150,8 +150,10 @@ pub(crate) async fn run_vendor_trip(
     vendor: &tot_goal_contract::VendorInfo,
     bags: BagSummary,
 ) -> VendorTripOutcome {
+    let trigger = if bags.free_slots <= FREE_SLOT_TRIGGER { "free_slots" } else { "grey_count" };
     tracing::info!(bot_guid, vendor_spawn_id = vendor.spawn_id,
-        free_slots = bags.free_slots, grey_count = bags.grey_count, "vendor_trip_start");
+        free_slots = bags.free_slots, grey_count = bags.grey_count,
+        trigger, "vendor_trip_start");
 
     let walked = match crate::nav::walk_to(client, bot_guid,
         crate::nav::Dest { x: vendor.pos.x, y: vendor.pos.y, z: vendor.pos.z }).await
@@ -204,23 +206,31 @@ pub(crate) async fn run_vendor_trip(
             }
         }
     }
-    if bot_is_dead(client, bot_guid).await { return VendorTripOutcome::BotDead; }
+    // Checkpoint 2: dead after verbs — emit result with what we learned, then abort.
+    let mut outcome = VendorTripOutcome::Done;
+    let mut free_after: Option<u32> = None;
+    if bot_is_dead(client, bot_guid).await {
+        outcome = VendorTripOutcome::BotDead;
+    } else {
+        // free_slots_after: best-effort observability (spec §4 step 6).
+        free_after = read_bags(client, bot_guid).await.map(|s| s.free_slots).ok();
 
-    // free_slots_after: best-effort observability (spec §4 step 6).
-    let free_after = read_bags(client, bot_guid).await.map(|s| s.free_slots).ok();
-
-    // Return leg — best-effort; Scanning recenters via Wandering on failure (spec §5).
-    let a = &goal.anchor_point;
-    if let Err(e) = crate::nav::walk_to(client, bot_guid,
-        crate::nav::Dest { x: a.x, y: a.y, z: a.z }).await
-    {
-        tracing::warn!(bot_guid, error = %e, "vendor_trip: return nav failed");
+        // Return leg — best-effort; Scanning recenters via Wandering on failure (spec §5).
+        let a = &goal.anchor_point;
+        if let Err(e) = crate::nav::walk_to(client, bot_guid,
+            crate::nav::Dest { x: a.x, y: a.y, z: a.z }).await
+        {
+            tracing::warn!(bot_guid, error = %e, "vendor_trip: return nav failed");
+        }
+        // Checkpoint 3: dead after return leg.
+        if bot_is_dead(client, bot_guid).await {
+            outcome = VendorTripOutcome::BotDead;
+        }
     }
-    if bot_is_dead(client, bot_guid).await { return VendorTripOutcome::BotDead; }
 
     tracing::info!(bot_guid, sold_count, copper_gained, repair_copper_spent = repair_copper,
-        free_slots_after = ?free_after, "vendor_trip_result");
-    VendorTripOutcome::Done
+        free_slots_after = ?free_after, outcome = ?outcome, "vendor_trip_result");
+    outcome
 }
 
 #[cfg(test)]
@@ -403,9 +413,12 @@ mod tests {
             calls.lock().unwrap().push(name.clone());
             match name.as_str() {
                 "nav.find_path" => json!({"path_type": 1i64, "points": [
+                    {"x": 0.0, "y": 0.0, "z": 0.0},
                     {"x": args["dest_x"], "y": args["dest_y"], "z": args["dest_z"]}]}),
                 "bot.move_path" => {
-                    let p = args["points"][0].clone();
+                    // Track the final (last) waypoint so arrival polls succeed.
+                    let pts = args["points"].as_array().unwrap();
+                    let p = pts.last().unwrap().clone();
                     *pos.lock().unwrap() = (p["x"].as_f64().unwrap(),
                                             p["y"].as_f64().unwrap(),
                                             p["z"].as_f64().unwrap());
@@ -499,5 +512,64 @@ mod tests {
         assert_eq!(out, VendorTripOutcome::BotDead);
         assert!(!calls.lock().unwrap().contains(&"bot.vendor_sell".to_string()),
                 "dead bot must not sell");
+    }
+
+    /// Bot sells successfully, then dies on the walk home.
+    /// Fix 1: the function must still emit `vendor_trip_result` (outcome=BotDead) and
+    /// return `BotDead` — not silently drop the copper-movement log.
+    #[tokio::test]
+    async fn vendor_trip_dead_after_selling_still_reports_bot_dead() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let (calls, pos) = trip_mock_state();
+        let sold = std::sync::Arc::new(AtomicBool::new(false));
+        let sold2 = sold.clone();
+
+        let base = spawn_mock({
+            let calls2 = calls.clone();
+            move |name: String, args: serde_json::Value| {
+                calls2.lock().unwrap().push(name.clone());
+                match name.as_str() {
+                    "nav.find_path" => json!({"path_type": 1i64, "points": [
+                        {"x": 0.0, "y": 0.0, "z": 0.0},
+                        {"x": args["dest_x"], "y": args["dest_y"], "z": args["dest_z"]}]}),
+                    "bot.move_path" => {
+                        let pts = args["points"].as_array().unwrap();
+                        let p = pts.last().unwrap().clone();
+                        *pos.lock().unwrap() = (p["x"].as_f64().unwrap(),
+                                                p["y"].as_f64().unwrap(),
+                                                p["z"].as_f64().unwrap());
+                        json!({"launched": true, "duration_ms": 0,
+                               "final": {"x": p["x"], "y": p["y"], "z": p["z"]}})
+                    }
+                    "obs.get_position" => {
+                        let (x, y, z) = *pos.lock().unwrap();
+                        json!({"x": x, "y": y, "z": z, "map_id": 1, "zone_id": 1,
+                               "area_id": 1, "orientation": 0.0})
+                    }
+                    // hp: alive (100) before sell, dead (0) once sold flag is set.
+                    "obs.get_state" => {
+                        let hp = if sold2.load(Ordering::SeqCst) { 0 } else { 100 };
+                        json!({"self": {"level": 22, "hp_pct": hp}})
+                    }
+                    "bot.vendor_sell" => {
+                        sold2.store(true, Ordering::SeqCst);
+                        json!({"sold_count": 5u32, "copper_gained": 500u64})
+                    }
+                    "bot.repair" => json!({"copper_spent": 50u64}),
+                    "obs.get_inventory" => json!({"equipped": [], "bags": [], "nested_bags": []}),
+                    other => panic!("unexpected tool {other}"),
+                }
+            }
+        }).await;
+
+        let out = run_vendor_trip(&client(&base), 1114, &goal_with_vendor(), &vendor(),
+                                  BagSummary { free_slots: 0, grey_count: 10 }).await;
+
+        // Must return BotDead (checkpoint 2 — dead right after verbs).
+        assert_eq!(out, VendorTripOutcome::BotDead, "sold then died → BotDead");
+        // Sell verb MUST have been called (items were sold before death).
+        assert!(calls.lock().unwrap().contains(&"bot.vendor_sell".to_string()),
+                "vendor_sell must be called before death");
     }
 }
