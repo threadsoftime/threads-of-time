@@ -99,6 +99,13 @@ const GCD_MS: u64 = 1500;
 /// A real time-based idle guard can replace this in a future iteration.
 const MAX_EMPTY_SCAN_CYCLES: u32 = 24;
 
+/// Respawn-wait (design 2026-06-10 §2.1): a farmed-out camp WAITS instead of going
+/// terminal. 45 s between empty-scan rounds; MAX_RESPAWN_WAITS rounds (~15+ min
+/// camp-dry) before the Blocked{NoTargetsFound} backstop. Test builds shrink the
+/// sleep so the backstop path runs in real time.
+const RESPAWN_WAIT_MS: u64 = if cfg!(test) { 20 } else { 45_000 };
+const MAX_RESPAWN_WAITS: u32 = 20;
+
 /// Deterministic pseudo-sample in [min,max] from a rolling seed (avoids a rng dep and
 /// keeps tests reproducible). `seed` should vary per call (e.g. a kill counter).
 fn sample_ms(min: u64, max: u64, seed: u64) -> u64 {
@@ -208,6 +215,8 @@ pub enum GrindState {
     HealthCheck,
     Resting,
     Wandering,
+    /// Camp empty after a full empty-scan round — wait for respawns, then rescan.
+    RespawnWait,
     Idle,
     Done,
 }
@@ -464,6 +473,7 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
     let level_at_start = read_self(client, bot_guid).await.map(|s| s.level).unwrap_or(0);
     let mut idle_seed: u64 = 0;
     let mut empty_scan_cycles: u32 = 0;
+    let mut respawn_waits: u32 = 0;
 
     // Build the rotation once for the lifetime of this grind; pass by ref to fight().
     let rotation_id = goal.rotation_id.as_deref().unwrap_or("auto_attack");
@@ -481,16 +491,18 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
     loop {
         state = match state {
             GrindState::Scanning => match scan_for_target(client, bot_guid, goal).await {
-                Ok(Some(t)) => { empty_scan_cycles = 0; GrindState::Reacting { target: t } }
+                Ok(Some(t)) => {
+                    empty_scan_cycles = 0;
+                    respawn_waits = 0; // a live camp resets the dry-camp budget
+                    GrindState::Reacting { target: t }
+                }
                 Ok(None) => {
                     empty_scan_cycles += 1;
                     if empty_scan_cycles >= MAX_EMPTY_SCAN_CYCLES {
-                        return GoalStatus::Blocked {
-                            reason: tot_goal_contract::BlockedReason::NoTargetsFound,
-                            detail: Some("no in-band targets after sustained search".into()),
-                        };
+                        GrindState::RespawnWait
+                    } else {
+                        GrindState::Wandering
                     }
-                    GrindState::Wandering
                 }
                 Err(GrindError::Harness(e)) =>
                     return GoalStatus::Blocked { reason: tot_goal_contract::BlockedReason::Other,
@@ -587,6 +599,22 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
                     return GoalStatus::Blocked { reason: tot_goal_contract::BlockedReason::Other,
                                                  detail: Some(format!("wander shape: {s}")) },
             },
+            GrindState::RespawnWait => {
+                respawn_waits += 1;
+                if respawn_waits >= MAX_RESPAWN_WAITS {
+                    // True backstop — the brain re-emits after its Blocked cooldown.
+                    return GoalStatus::Blocked {
+                        reason: tot_goal_contract::BlockedReason::NoTargetsFound,
+                        detail: Some(format!(
+                            "no in-band targets after {MAX_RESPAWN_WAITS} respawn waits"
+                        )),
+                    };
+                }
+                tracing::info!(bot_guid, respawn_waits, "camp empty — waiting for respawns");
+                tokio::time::sleep(Duration::from_millis(RESPAWN_WAIT_MS)).await;
+                empty_scan_cycles = 0;
+                GrindState::Scanning
+            }
             GrindState::Idle => idle_tick().await,
             GrindState::Done => {
                 // TODO(Plan 2): fetch current level via read_self when Done becomes reachable
@@ -751,9 +779,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn run_grind_blocks_when_no_targets_ever_found() {
-        // No in-band hostiles ever — the loop must exhaust MAX_EMPTY_SCAN_CYCLES scans
-        // (each separated by a wander that completes instantly via duration_ms:0 mocks)
-        // and return GoalStatus::Blocked { reason: NoTargetsFound, .. }.
+        // No in-band hostiles ever — the loop exhausts MAX_EMPTY_SCAN_CYCLES scans,
+        // enters RespawnWait, repeats for MAX_RESPAWN_WAITS rounds (20 ms test sleeps),
+        // and only THEN returns the Blocked{NoTargetsFound} backstop.
         let base = spawn_mock(|name, _a| match name.as_str() {
             "obs.get_nearby_hostiles" => json!({"hostiles": []}),
             "nav.find_path" => json!({"path_type": 1i64, "points": [
@@ -769,6 +797,52 @@ mod tests {
             tot_goal_contract::GoalStatus::Blocked { reason: tot_goal_contract::BlockedReason::NoTargetsFound, .. } => {}
             other => panic!("expected Blocked{{NoTargetsFound}}, got {other:?}"),
         }
+    }
+
+    /// A camp that respawns DURING the wait: the grind must NOT go terminal at the
+    /// empty-scan budget; it waits, rescans, kills, and completes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_grind_waits_for_respawns_then_completes() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+        let scan_calls = Arc::new(AtomicU32::new(0));
+        let sc = scan_calls.clone();
+        let base = spawn_mock(move |name, _args| match name.as_str() {
+            "obs.get_nearby_hostiles" => {
+                let n = sc.fetch_add(1, SeqCst);
+                if n < MAX_EMPTY_SCAN_CYCLES {
+                    json!({"hostiles": []}) // dry camp → forces one RespawnWait
+                } else if n == MAX_EMPTY_SCAN_CYCLES {
+                    json!({"hostiles": [{"guid": 7u64, "name": "Boar", "level": 5,
+                        "hp_pct": 100.0, "distance": 6.0, "is_alive": true,
+                        "x": 6.0, "y": 0.0, "z": 0.0}]}) // respawn appears
+                } else {
+                    json!({"hostiles": []}) // combat poll: target dead
+                }
+            }
+            "nav.find_path" => json!({"path_type": 1i64, "points": [
+                {"x":0.0,"y":0.0,"z":0.0},{"x":6.0,"y":0.0,"z":0.0}]}),
+            "bot.move_path" => json!({"launched": true, "duration_ms": 0,
+                "final": {"x":6.0,"y":0.0,"z":0.0}}),
+            // Return the nav final waypoint so the arrival check passes instantly (dist ≤ 2.0y).
+            "obs.get_position" => json!({"x":6.0,"y":0.0,"z":0.0,"map_id":0,
+                "zone_id":1,"area_id":1,"orientation":0.0}),
+            "obs.get_state" => json!({"self": {"level": 5, "hp_pct": 90}}),
+            "bot.attack" => json!({"attacked": true, "target_guid": 7u64, "target_name": "Boar"}),
+            "obs.get_lootable_corpses" => json!({"corpses": []}),
+            other => panic!("unexpected tool {other}"),
+        }).await;
+
+        let goal = GrindGoal {
+            anchor_point: WorldPos { map_id: 0, x: 0.0, y: 0.0, z: 0.0 },
+            wander_radius: 90.0, max_search_radius: 35.0,
+            mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
+            to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+        };
+        let status = run_grind(&client(&base), 1003, &goal).await;
+        assert!(matches!(status, GoalStatus::Completed { .. }), "got {status:?}");
+        assert!(scan_calls.load(SeqCst) > MAX_EMPTY_SCAN_CYCLES,
+            "must have scanned past the empty budget (i.e. waited instead of blocking)");
     }
 
     #[tokio::test(flavor = "multi_thread")]
