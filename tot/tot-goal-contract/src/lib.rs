@@ -9,7 +9,7 @@ pub mod goal;
 pub mod status;
 pub mod wire;
 
-pub use goal::{EnvelopeError, Goal, GoalEnvelope, GrindGoal, MobFilter, WorldPos};
+pub use goal::{EnvelopeError, Goal, GoalEnvelope, GrindGoal, MobFilter, VendorInfo, WorldPos};
 pub use status::{BlockedReason, EscalationEvent, GoalProgress, GoalStatus};
 pub use wire::{
     wire, ChannelGoalSink, ChannelStatusSource, GoalReceiver, GoalSink, GoalSinkRegistry,
