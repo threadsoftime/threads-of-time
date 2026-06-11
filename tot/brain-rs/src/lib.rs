@@ -7,6 +7,7 @@ pub mod config;
 pub mod decide;
 pub mod dedup;
 pub mod dispatch;
+pub mod emission_ledger;
 pub mod llm_client;
 pub mod logging;
 pub mod loop_supervisor;

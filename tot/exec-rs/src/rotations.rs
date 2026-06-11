@@ -25,6 +25,8 @@ pub const SMITE: u32 = 585;
 pub const SHADOW_WORD_PAIN: u32 = 589;
 pub const PW_FORTITUDE: u32 = 1243;
 pub const INNER_FIRE: u32 = 588;
+pub const PW_SHIELD: u32 = 17;  // rank-1 head, spell_ranks.sql (17,17,1)
+pub const RENEW: u32 = 139;     // rank-1 head, spell_ranks.sql (139,139,1)
 
 // Named preconditions (also unit-tested directly).
 pub const EVISCERATE_PRECOND: fn(&CombatContext) -> bool = |c| c.combo_points >= 3;
@@ -35,6 +37,13 @@ pub const SWP_PRECOND: fn(&CombatContext) -> bool = |c| c.target_hp_pct > 90.0;
 pub const REND_PRECOND: fn(&CombatContext) -> bool = |c| c.target_hp_pct > 90.0;
 /// Charge is 8–25y; fires only at pull distance.
 pub const CHARGE_PRECOND: fn(&CombatContext) -> bool = |c| c.target_distance > 8.0 && c.target_distance < 25.0;
+/// Defensives (design 2026-06-10 §2.3): shield when hurt, renew as emergency heal.
+/// Weakened Soul re-cast rejection returns a typed `Failed` code and falls through.
+/// Renew has no server-side re-cast gate (unlike shield's Weakened Soul): while
+/// hp stays <35% it re-casts each tick, refreshing the HoT instead of nuking —
+/// an accepted survival-first trade-off for bracket-1 camps.
+pub const PW_SHIELD_PRECOND: fn(&CombatContext) -> bool = |c| c.bot_hp_pct < 50.0;
+pub const RENEW_PRECOND: fn(&CombatContext) -> bool = |c| c.bot_hp_pct < 35.0;
 
 const ALWAYS: fn(&CombatContext) -> bool = |_| true;
 
@@ -44,6 +53,11 @@ fn cast(name: &'static str, spell_id: u32, range: f64, precondition: fn(&CombatC
 
 fn buff(name: &'static str, spell_id: u32) -> CastSpellAction {
     CastSpellAction { name, spell_id, range: 0.0, precondition: ALWAYS, self_cast: true }
+}
+
+/// An in-rotation self-cast (defensives): like `buff` but with a real precondition.
+fn defensive(name: &'static str, spell_id: u32, precondition: fn(&CombatContext) -> bool) -> CastSpellAction {
+    CastSpellAction { name, spell_id, range: 0.0, precondition, self_cast: true }
 }
 
 /// Build a rotation plugin by id (the profile/Goal `rotation_id` seam).
@@ -81,6 +95,9 @@ pub fn build(rotation_id: &str) -> Option<RotationPlugin> {
         )),
         "priest_smite_b1" => Some(RotationPlugin::new(
             vec![
+                // Defensives FIRST — survival outranks damage (design §2.3).
+                Box::new(defensive("pw_shield", PW_SHIELD, PW_SHIELD_PRECOND)),
+                Box::new(defensive("renew", RENEW, RENEW_PRECOND)),
                 Box::new(cast("shadow_word_pain", SHADOW_WORD_PAIN, 30.0, SWP_PRECOND)),
                 Box::new(cast("smite", SMITE, 30.0, ALWAYS)),
                 Box::new(AutoAttackAction),
@@ -136,5 +153,20 @@ mod tests {
         assert_eq!(build("priest_smite_b1").unwrap().buffs().len(), 2);
         assert_eq!(build("warrior_b1").unwrap().buffs().len(), 1);
         assert!(build("rogue_b1").unwrap().buffs().is_empty());
+    }
+
+    #[test]
+    fn priest_defensives_gate_on_own_hp() {
+        let healthy = ctx(0, 50.0); // helper builds bot_hp_pct: 100.0
+        assert!(!(PW_SHIELD_PRECOND)(&healthy));
+        assert!(!(RENEW_PRECOND)(&healthy));
+
+        let mut hurt = ctx(0, 50.0);
+        hurt.bot_hp_pct = 45.0;
+        assert!((PW_SHIELD_PRECOND)(&hurt), "shield under 50%");
+        assert!(!(RENEW_PRECOND)(&hurt), "renew only under 35%");
+
+        hurt.bot_hp_pct = 30.0;
+        assert!((RENEW_PRECOND)(&hurt), "renew under 35%");
     }
 }

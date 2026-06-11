@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use axum::{routing::post, Json, Router};
 use brain_rs::decide::Decider;
 use brain_rs::dispatch::Dispatcher;
+use brain_rs::emission_ledger::{CooldownConfig, EmissionLedger};
 use brain_rs::loop_supervisor::{DecisionLogWriter, LoopSupervisor};
 use brain_rs::models::PersonalityCard;
 use brain_rs::personality::McpCallable;
@@ -161,6 +162,7 @@ fn make_supervisor(
     let empty_reg = std::sync::Arc::new(
         brain_rs::profile::ProfileRegistry::from_toml_str("").unwrap(),
     );
+    let ledger = Arc::new(EmissionLedger::new(CooldownConfig::default()));
     LoopSupervisor::new(
         triage,
         Arc::new(Decider::new_test_with_max_level(1001, test_card(), "{}", 25)),
@@ -177,6 +179,7 @@ fn make_supervisor(
         String::new(),
         200,
         None, // goal_sink: None → pure parity mode
+        ledger,
         empty_reg,
         std::collections::HashMap::new(),
     )
@@ -282,6 +285,7 @@ fn make_supervisor_with_llm(
     let empty_reg = std::sync::Arc::new(
         brain_rs::profile::ProfileRegistry::from_toml_str("").unwrap(),
     );
+    let ledger = Arc::new(EmissionLedger::new(CooldownConfig::default()));
     LoopSupervisor::new(
         triage,
         decider,
@@ -298,6 +302,7 @@ fn make_supervisor_with_llm(
         String::new(),
         200,
         None, // goal_sink: None → pure parity mode
+        ledger,
         empty_reg,
         std::collections::HashMap::new(),
     )
