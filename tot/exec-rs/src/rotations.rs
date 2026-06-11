@@ -39,6 +39,9 @@ pub const REND_PRECOND: fn(&CombatContext) -> bool = |c| c.target_hp_pct > 90.0;
 pub const CHARGE_PRECOND: fn(&CombatContext) -> bool = |c| c.target_distance > 8.0 && c.target_distance < 25.0;
 /// Defensives (design 2026-06-10 §2.3): shield when hurt, renew as emergency heal.
 /// Weakened Soul re-cast rejection returns a typed `Failed` code and falls through.
+/// Renew has no server-side re-cast gate (unlike shield's Weakened Soul): while
+/// hp stays <35% it re-casts each tick, refreshing the HoT instead of nuking —
+/// an accepted survival-first trade-off for bracket-1 camps.
 pub const PW_SHIELD_PRECOND: fn(&CombatContext) -> bool = |c| c.bot_hp_pct < 50.0;
 pub const RENEW_PRECOND: fn(&CombatContext) -> bool = |c| c.bot_hp_pct < 35.0;
 
