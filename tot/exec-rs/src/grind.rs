@@ -110,9 +110,12 @@ const MAX_RESPAWN_WAITS: u32 = 20;
 /// to 180 s, with the ops-proven "second release kick" at the halfway mark.
 const RECOVERY_POLL_MS: u64 = if cfg!(test) { 20 } else { 5_000 };
 const RECOVERY_MAX_POLLS: u32 = 36;
-/// Deaths per goal before going terminal (the bot is still recovered first).
+/// Deaths 1..=MAX resume grinding after recovery; death MAX+1 still runs the full
+/// recovery (bot ends alive, at anchor, owned) but then returns terminal
+/// `NeedsDecision{BotDied}` so the brain paces re-emission with its cooldown.
 const MAX_DEATHS_PER_GOAL: u32 = 3;
 
+#[derive(Debug)]
 pub(crate) enum RecoveryOutcome { Recovered, StillDead }
 
 /// BotDied recovery: release ownership so the native playerbots AI self-revives,
@@ -132,7 +135,7 @@ pub(crate) async fn recover_from_death(
     for poll in 0..RECOVERY_MAX_POLLS {
         tokio::time::sleep(Duration::from_millis(RECOVERY_POLL_MS)).await;
         if poll == RECOVERY_MAX_POLLS / 2 {
-            // Some deaths need a repeat release before the native AI revives.
+            // Second kick at ~the halfway mark (poll 18 of 36 ≈ 95 s in): some deaths need a repeat release before the native AI revives.
             if let Err(e) = crate::own::set_ai_owned(client, bot_guid, false).await {
                 tracing::warn!(bot_guid, error = %e, "recovery: second release failed");
             }
@@ -552,9 +555,12 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
             RotationPlugin::melee_m1()
         });
 
-    // Buff pass at grind entry.
-    if let Err(e) = ensure_buffs(client, bot_guid, &rotation).await {
-        tracing::warn!(error = %e, "buff pass failed");
+    // Buff pass at grind entry — skipped when arriving dead (buffing a corpse
+    // wastes an RPC and logs a spurious warn); the post-recovery path re-buffs.
+    if !matches!(state, GrindState::Recovering) {
+        if let Err(e) = ensure_buffs(client, bot_guid, &rotation).await {
+            tracing::warn!(error = %e, "buff pass failed");
+        }
     }
 
     loop {
@@ -1531,6 +1537,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn run_grind_death_cap_goes_terminal_after_recoveries() {
         use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::SeqCst};
+        // NOTE: this world model assumes exec awaits each HTTP call sequentially and
+        // that recovery polls get_state only AFTER the release call — if recovery ever
+        // polled before releasing, the flag would read stale and this test would break.
         let released = Arc::new(AtomicBool::new(false)); // start owned (per_bot_loop claimed)
         let teleports = Arc::new(AtomicU32::new(0));
         let (rel2, tp2) = (released.clone(), teleports.clone());
