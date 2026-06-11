@@ -66,6 +66,7 @@ pub fn synthesize_grind(
             kill_count: None,
             rest_threshold: profile.rest_threshold,
             rotation_id: Some(profile.rotation_id.clone()),
+            vendor: None,
         }),
     })
 }
@@ -97,6 +98,9 @@ mod tests {
             rest_threshold: 0.35,
             rotation_id: "auto_attack".into(),
             custom_behavior: None,
+            vendor_spawn_id: None,
+            vendor_pos: None,
+            vendor_can_repair: None,
         }
     }
 
