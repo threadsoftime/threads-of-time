@@ -1,7 +1,7 @@
 //! The `Grind` goal disposer — a flat state machine (NOT a behavior tree).
 //!
 //! All states are real: Scanning/Reacting/Approaching/Fighting/PostKillPause/Looting/
-//! HealthCheck/Resting/Wandering/Idle are fully implemented.
+//! HealthCheck/Resting/Wandering/RespawnWait/Recovering/Idle are fully implemented.
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -105,6 +105,62 @@ const MAX_EMPTY_SCAN_CYCLES: u32 = 24;
 /// sleep so the backstop path runs in real time.
 const RESPAWN_WAIT_MS: u64 = if cfg!(test) { 20 } else { 45_000 };
 const MAX_RESPAWN_WAITS: u32 = 20;
+
+/// Death-recovery (design 2026-06-10 §2.2). Poll the self-revive every 5 s for up
+/// to 180 s, with the ops-proven "second release kick" at the halfway mark.
+const RECOVERY_POLL_MS: u64 = if cfg!(test) { 20 } else { 5_000 };
+const RECOVERY_MAX_POLLS: u32 = 36;
+/// Deaths per goal before going terminal (the bot is still recovered first).
+const MAX_DEATHS_PER_GOAL: u32 = 3;
+
+pub(crate) enum RecoveryOutcome { Recovered, StillDead }
+
+/// BotDied recovery: release ownership so the native playerbots AI self-revives,
+/// poll until alive, gm.teleport back to the camp anchor, re-claim.
+///
+/// INVARIANT: attempts to re-claim ownership on EVERY exit path — `per_bot_loop`
+/// releases on shutdown and assumes the claim is held throughout the goal.
+pub(crate) async fn recover_from_death(
+    client: &HarnessClient,
+    bot_guid: u64,
+    goal: &GrindGoal,
+) -> RecoveryOutcome {
+    if let Err(e) = crate::own::set_ai_owned(client, bot_guid, false).await {
+        tracing::warn!(bot_guid, error = %e, "recovery: release failed");
+    }
+    let mut alive = false;
+    for poll in 0..RECOVERY_MAX_POLLS {
+        tokio::time::sleep(Duration::from_millis(RECOVERY_POLL_MS)).await;
+        if poll == RECOVERY_MAX_POLLS / 2 {
+            // Some deaths need a repeat release before the native AI revives.
+            if let Err(e) = crate::own::set_ai_owned(client, bot_guid, false).await {
+                tracing::warn!(bot_guid, error = %e, "recovery: second release failed");
+            }
+        }
+        match read_self(client, bot_guid).await {
+            Ok(s) if s.hp_pct > 0 => { alive = true; break; }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(bot_guid, error = %e, "recovery: state poll failed"),
+        }
+    }
+    if alive {
+        let a = &goal.anchor_point;
+        if let Err(e) = client.call("gm.teleport", serde_json::json!({
+            "target_guid": bot_guid as i64,
+            "map": a.map_id as i64,
+            "x": a.x, "y": a.y, "z": a.z,
+            "orientation": 0.0,
+        })).await {
+            tracing::warn!(bot_guid, error = %e, "recovery: teleport to anchor failed");
+        }
+    }
+    // Re-claim on every path (see invariant). For a still-dead bot this leaves it
+    // dead-but-owned; the next goal's dead-on-arrival check retries recovery.
+    if let Err(e) = crate::own::set_ai_owned(client, bot_guid, true).await {
+        tracing::warn!(bot_guid, error = %e, "recovery: re-claim failed");
+    }
+    if alive { RecoveryOutcome::Recovered } else { RecoveryOutcome::StillDead }
+}
 
 /// Deterministic pseudo-sample in [min,max] from a rolling seed (avoids a rng dep and
 /// keeps tests reproducible). `seed` should vary per call (e.g. a kill counter).
@@ -217,6 +273,8 @@ pub enum GrindState {
     Wandering,
     /// Camp empty after a full empty-scan round — wait for respawns, then rescan.
     RespawnWait,
+    /// Bot died — release for native self-revive, teleport back, re-claim.
+    Recovering,
     Idle,
     Done,
 }
@@ -468,12 +526,23 @@ pub(crate) async fn ensure_buffs(
 
 /// Drive a `Grind` goal to a terminal `GoalStatus`. All states are real.
 pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) -> GoalStatus {
-    let mut state = GrindState::Scanning;
     let mut kills: u32 = 0;
-    let level_at_start = read_self(client, bot_guid).await.map(|s| s.level).unwrap_or(0);
+    // Dead-on-arrival check (design §2.2): a goal can start on a corpse — e.g. a
+    // re-emitted goal after a budget-exhausted recovery left the bot dead+owned.
+    // NOTE: relies on hp_pct in the obs.get_state digest (present since the 2.2
+    // Tier0 digest); a worldserver omitting it would serde-default to 0 and
+    // misfire — the brain image is always paired with a digest-bearing worldserver.
+    let self0 = read_self(client, bot_guid).await;
+    let level_at_start = self0.as_ref().map(|s| s.level).unwrap_or(0);
+    let mut state = if self0.map(|s| s.hp_pct == 0).unwrap_or(false) {
+        GrindState::Recovering
+    } else {
+        GrindState::Scanning
+    };
     let mut idle_seed: u64 = 0;
     let mut empty_scan_cycles: u32 = 0;
     let mut respawn_waits: u32 = 0;
+    let mut deaths_this_goal: u32 = 0;
 
     // Build the rotation once for the lifetime of this grind; pass by ref to fight().
     let rotation_id = goal.rotation_id.as_deref().unwrap_or("auto_attack");
@@ -537,9 +606,7 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
             }
             GrindState::Fighting { target } => match fight(client, bot_guid, target, goal, &rotation).await {
                 Ok(FightOutcome::TargetDead) => GrindState::PostKillPause { target },
-                Ok(FightOutcome::BotDied) => return GoalStatus::NeedsDecision {
-                    event: tot_goal_contract::EscalationEvent::BotDied { position: None },
-                },
+                Ok(FightOutcome::BotDied) => GrindState::Recovering,
                 Err(GrindError::Harness(e)) =>
                     return GoalStatus::Blocked { reason: tot_goal_contract::BlockedReason::Other,
                                                  detail: Some(format!("fight harness: {e}")) },
@@ -615,6 +682,31 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
                 empty_scan_cycles = 0;
                 GrindState::Scanning
             }
+            GrindState::Recovering => {
+                deaths_this_goal += 1;
+                match recover_from_death(client, bot_guid, goal).await {
+                    RecoveryOutcome::StillDead => {
+                        // Recovery budget exhausted — bot is dead-but-owned; the
+                        // dead-on-arrival check of the next (re-emitted) goal retries.
+                        return GoalStatus::NeedsDecision {
+                            event: tot_goal_contract::EscalationEvent::BotDied { position: None },
+                        };
+                    }
+                    RecoveryOutcome::Recovered => {
+                        if deaths_this_goal > MAX_DEATHS_PER_GOAL {
+                            // Alive, at anchor, owned — but dying too often for this
+                            // goal. Hand back; the brain paces with its cooldown.
+                            return GoalStatus::NeedsDecision {
+                                event: tot_goal_contract::EscalationEvent::BotDied { position: None },
+                            };
+                        }
+                        if let Err(e) = ensure_buffs(client, bot_guid, &rotation).await {
+                            tracing::warn!(error = %e, "post-recovery buff pass failed");
+                        }
+                        GrindState::Scanning
+                    }
+                }
+            }
             GrindState::Idle => idle_tick().await,
             GrindState::Done => {
                 // TODO(Plan 2): fetch current level via read_self when Done becomes reachable
@@ -629,7 +721,8 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
 mod tests {
     use super::*;
     use axum::{extract::Path as AxumPath, http::StatusCode, routing::post, Json, Router};
-    use serde_json::json;
+    use serde_json::{json, Value};
+    use std::sync::Arc;
     use std::time::Duration;
     use tot_goal_contract::{GrindGoal, MobFilter, WorldPos};
     use tot_harness_client::HarnessClient;
@@ -969,14 +1062,17 @@ mod tests {
         assert!(matches!(outcome, FightOutcome::BotDied), "expected BotDied");
     }
 
-    /// run_grind escalates NeedsDecision{BotDied} when the bot dies during fighting.
+    /// run_grind escalates NeedsDecision{BotDied} when the bot is dead and recovery
+    /// exhausts its poll budget (36 polls × 20 ms in test mode). The DOA check fires
+    /// immediately (hp_pct=0 on the initial read_self), so escalation happens AFTER
+    /// a failed recovery attempt.
     #[tokio::test(flavor = "multi_thread")]
     async fn run_grind_escalates_bot_died() {
         use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
         let hostile_calls = std::sync::Arc::new(AtomicU32::new(0));
         let hc2 = hostile_calls.clone();
 
-        let base = spawn_mock(move |name, _a| match name.as_str() {
+        let base = spawn_mock(move |name, args| match name.as_str() {
             "obs.get_nearby_hostiles" => {
                 let n = hc2.fetch_add(1, SeqCst);
                 if n == 0 {
@@ -996,8 +1092,12 @@ mod tests {
             "obs.get_position" => json!({"x":3.0,"y":0.0,"z":0.0,
                 "map_id":0,"zone_id":1,"area_id":1,"orientation":0.0}),
             "bot.attack" => json!({"attacked": true, "target_guid": 111u64, "target_name": "Kobold"}),
-            // Bot is dead
+            // Bot is dead — the DOA check fires immediately; recovery exhausts budget.
             "obs.get_state" => json!({"self": {"level": 5, "hp_pct": 0}}),
+            "bot.set_ai_enabled" => {
+                let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+                json!({"owned": !enabled, "reset": enabled})
+            }
             other => panic!("unexpected tool in escalate_bot_died test: {other}"),
         }).await;
 
@@ -1356,5 +1456,173 @@ mod tests {
         assert_eq!(s.mana_pct, Some(60));
         assert_eq!(s.power_pct, Some(70));
         assert_eq!(s.combo_points, Some(3));
+    }
+
+    // ── Task-6 new tests ──────────────────────────────────────────────────────
+
+    /// recover_from_death: release → poll → teleport → re-claim, in that order.
+    #[tokio::test]
+    async fn recovery_releases_polls_teleports_reclaims_in_order() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let c2 = calls.clone();
+        let base = spawn_mock(move |name, args| {
+            c2.lock().unwrap().push(name.clone());
+            match name.as_str() {
+                "bot.set_ai_enabled" => {
+                    let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+                    json!({"owned": !enabled, "reset": enabled})
+                }
+                "obs.get_state" => json!({"self": {"level": 7, "hp_pct": 100}}), // alive 1st poll
+                "gm.teleport" => json!({"teleported": true}),
+                other => panic!("unexpected tool {other}"),
+            }
+        }).await;
+
+        let goal = GrindGoal {
+            anchor_point: WorldPos { map_id: 0, x: -5447.0, y: -378.0, z: 399.0 },
+            wander_radius: 90.0, max_search_radius: 35.0,
+            mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
+            to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+        };
+        let out = recover_from_death(&client(&base), 1003, &goal).await;
+        assert!(matches!(out, RecoveryOutcome::Recovered));
+
+        let seq = calls.lock().unwrap().clone();
+        assert_eq!(seq.first().map(String::as_str), Some("bot.set_ai_enabled"), "release first");
+        assert_eq!(seq.last().map(String::as_str), Some("bot.set_ai_enabled"), "re-claim last");
+        let poll = seq.iter().position(|s| s == "obs.get_state").expect("state polled");
+        let tp = seq.iter().position(|s| s == "gm.teleport").expect("teleport called");
+        assert!(poll < tp && tp < seq.len() - 1, "order: release → poll → teleport → re-claim, got {seq:?}");
+    }
+
+    /// Recovery budget exhausted: 2 releases (initial + halfway kick), NO teleport
+    /// of a corpse, re-claim still attempted, StillDead reported.
+    #[tokio::test]
+    async fn recovery_exhausts_budget_reclaims_and_reports_still_dead() {
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+        let releases = Arc::new(AtomicU32::new(0));
+        let claims = Arc::new(AtomicU32::new(0));
+        let (r2, cl2) = (releases.clone(), claims.clone());
+        let base = spawn_mock(move |name, args| match name.as_str() {
+            "bot.set_ai_enabled" => {
+                let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+                if enabled { r2.fetch_add(1, SeqCst); } else { cl2.fetch_add(1, SeqCst); }
+                json!({"owned": !enabled, "reset": enabled})
+            }
+            "obs.get_state" => json!({"self": {"level": 7, "hp_pct": 0}}), // never revives
+            "gm.teleport" => panic!("must not teleport a corpse"),
+            other => panic!("unexpected tool {other}"),
+        }).await;
+
+        let goal = GrindGoal {
+            anchor_point: WorldPos { map_id: 0, x: 0.0, y: 0.0, z: 0.0 },
+            wander_radius: 90.0, max_search_radius: 35.0,
+            mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
+            to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+        };
+        let out = recover_from_death(&client(&base), 1003, &goal).await;
+        assert!(matches!(out, RecoveryOutcome::StillDead));
+        assert_eq!(releases.load(SeqCst), 2, "initial release + halfway second kick");
+        assert_eq!(claims.load(SeqCst), 1, "re-claim attempted on exit");
+    }
+
+    /// 4 deaths in one goal: every recovery succeeds, but the 4th exceeds
+    /// MAX_DEATHS_PER_GOAL → terminal NeedsDecision{BotDied}, bot left alive+owned.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_grind_death_cap_goes_terminal_after_recoveries() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::SeqCst};
+        let released = Arc::new(AtomicBool::new(false)); // start owned (per_bot_loop claimed)
+        let teleports = Arc::new(AtomicU32::new(0));
+        let (rel2, tp2) = (released.clone(), teleports.clone());
+        let base = spawn_mock(move |name, args| match name.as_str() {
+            "bot.set_ai_enabled" => {
+                let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+                rel2.store(enabled, SeqCst); // enabled:true == released
+                json!({"owned": !enabled, "reset": enabled})
+            }
+            "obs.get_state" => {
+                let hp = if rel2.load(SeqCst) { 100 } else { 0 };
+                json!({"self": {"level": 7, "hp_pct": hp}})
+            }
+            "gm.teleport" => { tp2.fetch_add(1, SeqCst); json!({"teleported": true}) }
+            "obs.get_nearby_hostiles" => json!({"hostiles": [
+                {"guid": 9u64, "name": "Trogg", "level": 7, "hp_pct": 100.0,
+                 "distance": 4.0, "is_alive": true, "x": 4.0, "y": 0.0, "z": 0.0}]}),
+            "nav.find_path" => json!({"path_type": 1i64, "points": [
+                {"x":0.0,"y":0.0,"z":0.0},{"x":4.0,"y":0.0,"z":0.0}]}),
+            "bot.move_path" => json!({"launched": true, "duration_ms": 0,
+                "final": {"x":4.0,"y":0.0,"z":0.0}}),
+            "obs.get_position" => json!({"x":4.0,"y":0.0,"z":0.0,"map_id":0,
+                "zone_id":1,"area_id":1,"orientation":0.0}),
+            "bot.attack" => json!({"attacked": true, "target_guid": 9u64, "target_name": "Trogg"}),
+            "obs.get_lootable_corpses" => json!({"corpses": []}),
+            other => panic!("unexpected tool {other}"),
+        }).await;
+
+        let goal = GrindGoal {
+            anchor_point: WorldPos { map_id: 0, x: 0.0, y: 0.0, z: 0.0 },
+            wander_radius: 90.0, max_search_radius: 35.0,
+            mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
+            to_level: 99, kill_count: Some(10), rest_threshold: 0.35, rotation_id: None,
+        };
+        let status = run_grind(&client(&base), 1003, &goal).await;
+        assert!(
+            matches!(status, GoalStatus::NeedsDecision {
+                event: tot_goal_contract::EscalationEvent::BotDied { .. } }),
+            "expected NeedsDecision{{BotDied}} at the death cap, got {status:?}"
+        );
+        assert_eq!(teleports.load(SeqCst), 4, "all 4 deaths ran a full (successful) recovery");
+    }
+
+    /// A goal starting on a corpse recovers FIRST, then grinds to completion.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_grind_dead_on_arrival_recovers_then_completes() {
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+        let state_calls = Arc::new(AtomicU32::new(0));
+        let teleports = Arc::new(AtomicU32::new(0));
+        let (st2, tp2) = (state_calls.clone(), teleports.clone());
+        let scan_calls = Arc::new(AtomicU32::new(0));
+        let sc2 = scan_calls.clone();
+        let base = spawn_mock(move |name, args| match name.as_str() {
+            "obs.get_state" => {
+                // First read (the DOA check) sees a corpse; everything after is alive.
+                let n = st2.fetch_add(1, SeqCst);
+                json!({"self": {"level": 5, "hp_pct": if n == 0 { 0 } else { 90 }}})
+            }
+            "bot.set_ai_enabled" => {
+                let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+                json!({"owned": !enabled, "reset": enabled})
+            }
+            "gm.teleport" => { tp2.fetch_add(1, SeqCst); json!({"teleported": true}) }
+            "obs.get_nearby_hostiles" => {
+                let n = sc2.fetch_add(1, SeqCst);
+                if n == 0 {
+                    json!({"hostiles": [{"guid": 7u64, "name": "Boar", "level": 5,
+                        "hp_pct": 100.0, "distance": 6.0, "is_alive": true,
+                        "x": 6.0, "y": 0.0, "z": 0.0}]})
+                } else {
+                    json!({"hostiles": []}) // combat poll: target dead
+                }
+            }
+            "nav.find_path" => json!({"path_type": 1i64, "points": [
+                {"x":0.0,"y":0.0,"z":0.0},{"x":6.0,"y":0.0,"z":0.0}]}),
+            "bot.move_path" => json!({"launched": true, "duration_ms": 0,
+                "final": {"x":6.0,"y":0.0,"z":0.0}}),
+            "obs.get_position" => json!({"x":6.0,"y":0.0,"z":0.0,"map_id":0,
+                "zone_id":1,"area_id":1,"orientation":0.0}),
+            "bot.attack" => json!({"attacked": true, "target_guid": 7u64, "target_name": "Boar"}),
+            "obs.get_lootable_corpses" => json!({"corpses": []}),
+            other => panic!("unexpected tool {other}"),
+        }).await;
+
+        let goal = GrindGoal {
+            anchor_point: WorldPos { map_id: 0, x: 0.0, y: 0.0, z: 0.0 },
+            wander_radius: 90.0, max_search_radius: 35.0,
+            mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
+            to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+        };
+        let status = run_grind(&client(&base), 1003, &goal).await;
+        assert!(matches!(status, GoalStatus::Completed { .. }), "got {status:?}");
+        assert_eq!(teleports.load(SeqCst), 1, "exactly one DOA recovery");
     }
 }
