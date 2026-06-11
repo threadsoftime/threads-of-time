@@ -282,6 +282,8 @@ mod tests {
     #[test]
     fn synthesize_grind_plumbs_vendor_group() {
         let profile = GrindProfile {
+            // Non-zero map pins the same-map rule against a zero-init bug.
+            anchor: ProfileAnchor { map_id: 1, x: 2100.0, y: -210.0, z: 92.0 },
             vendor_spawn_id: Some(40001),
             vendor_pos: Some(crate::profile::VendorPos { x: 2200.0, y: -300.0, z: 95.0 }),
             vendor_can_repair: Some(true),
@@ -295,7 +297,7 @@ mod tests {
         assert_eq!(v.pos.y, -300.0);
         assert_eq!(v.pos.z, 95.0);
         // map comes from the ANCHOR (same-map rule, spec §6) — profile has no vendor map field.
-        assert_eq!(v.pos.map_id, profile.anchor.map_id);
+        assert_eq!(v.pos.map_id, 1, "must be the anchor's map, not a default");
         assert!(v.can_repair);
     }
 
