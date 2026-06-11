@@ -83,7 +83,7 @@ pub(crate) async fn economy_due(
     goal: &tot_goal_contract::GrindGoal,
     kills: u32,
     kills_at_last_check: &mut u32,
-    last_trip: &Option<std::time::Instant>,
+    last_trip: Option<std::time::Instant>,
     cooldown: std::time::Duration,
 ) -> Option<BagSummary> {
     goal.vendor.as_ref()?;
@@ -152,7 +152,7 @@ mod tests {
         let mut goal = goal_with_vendor();
         goal.vendor = None;
         let mut last_check = 0u32;
-        let due = economy_due(&client(&base), 1114, &goal, 10, &mut last_check, &None,
+        let due = economy_due(&client(&base), 1114, &goal, 10, &mut last_check, None,
                               Duration::from_secs(VENDOR_TRIP_COOLDOWN_S)).await;
         assert!(due.is_none());
     }
@@ -162,7 +162,7 @@ mod tests {
         let base = spawn_mock(|name, _| panic!("unexpected tool {name} — stride must gate the poll")).await;
         let mut last_check = 0u32;
         // kills 4 < stride 5 → no poll, no trigger.
-        let due = economy_due(&client(&base), 1114, &goal_with_vendor(), 4, &mut last_check, &None,
+        let due = economy_due(&client(&base), 1114, &goal_with_vendor(), 4, &mut last_check, None,
                               Duration::from_secs(VENDOR_TRIP_COOLDOWN_S)).await;
         assert!(due.is_none());
         assert_eq!(last_check, 0, "stride miss must not stamp the check counter");
@@ -182,7 +182,7 @@ mod tests {
             json!({"equipped": [], "bags": bags, "nested_bags": []})
         }).await;
         let mut last_check = 0u32;
-        let due = economy_due(&client(&base), 1114, &goal_with_vendor(), 5, &mut last_check, &None,
+        let due = economy_due(&client(&base), 1114, &goal_with_vendor(), 5, &mut last_check, None,
                               Duration::from_secs(VENDOR_TRIP_COOLDOWN_S)).await;
         assert_eq!(due, Some(BagSummary { free_slots: 0, grey_count: 10 }));
         assert_eq!(last_check, 5, "poll must stamp the check counter");
@@ -198,11 +198,11 @@ mod tests {
         let last_trip = Some(std::time::Instant::now());
         let cooldown = Duration::from_millis(50);
         let due = economy_due(&client(&base), 1114, &goal_with_vendor(), 5, &mut last_check,
-                              &last_trip, cooldown).await;
+                              last_trip, cooldown).await;
         assert!(due.is_none(), "inside cooldown → suppressed");
         tokio::time::sleep(Duration::from_millis(60)).await;
         let due = economy_due(&client(&base), 1114, &goal_with_vendor(), 5, &mut last_check,
-                              &last_trip, cooldown).await;
+                              last_trip, cooldown).await;
         assert!(due.is_some(), "cooldown elapsed → fires");
     }
 
@@ -211,7 +211,7 @@ mod tests {
         // Malformed response → Shape error inside read_bags → None (never terminal, spec §5).
         let base = spawn_mock(|_, _| json!({"bags": "not-an-array"})).await;
         let mut last_check = 0u32;
-        let due = economy_due(&client(&base), 1114, &goal_with_vendor(), 5, &mut last_check, &None,
+        let due = economy_due(&client(&base), 1114, &goal_with_vendor(), 5, &mut last_check, None,
                               Duration::from_secs(VENDOR_TRIP_COOLDOWN_S)).await;
         assert!(due.is_none());
     }
