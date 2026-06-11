@@ -136,11 +136,13 @@ async fn bot_is_dead(client: &HarnessClient, bot_guid: u64) -> bool {
     matches!(crate::grind::read_self(client, bot_guid).await, Ok(s) if s.hp_pct == 0)
 }
 
-/// Hop length for long vendor legs (yd). A single nav.find_path NOPATHs beyond
-/// ~200 yd (live-verified 2026-06-10); ≤150 yd hops path reliably.
-const WALK_FAR_HOP_YD: f64 = 150.0;
-/// Hop budget: 10 hops ≈ 1500 yd ceiling — far beyond any mined vendor leg (≤712 yd).
-const WALK_FAR_MAX_HOPS: u32 = 10;
+/// Hop length for long vendor legs (yd). Two live-verified bounds (2026-06-10):
+/// a single nav.find_path NOPATHs beyond ~200 yd, and walk_to's arrival budget
+/// (duration_ms clamped to 30 s + 5×500 ms polls) times out hops the bot can't
+/// cover in ~32 s — at bot WALK speed (~2.5 yd/s) that caps a hop at ~70 yd.
+const WALK_FAR_HOP_YD: f64 = 60.0;
+/// Hop budget: 16 hops ≈ 960 yd ceiling — beyond the longest mined vendor leg (712 yd).
+const WALK_FAR_MAX_HOPS: u32 = 16;
 
 /// Walk a long leg in ≤WALK_FAR_HOP_YD segments: re-read the bot position each
 /// hop (obs.get_position), aim at the straight-line interpolation toward `dest`,
@@ -564,7 +566,7 @@ mod tests {
 
     // ── walk_far unit tests ────────────────────────────────────────────────────────────────
 
-    /// walk_far with dest ≤150 yd away must issue exactly ONE nav.find_path aimed at
+    /// walk_far with dest within one hop must issue exactly ONE nav.find_path aimed at
     /// the exact dest (no intermediate hop).
     #[tokio::test]
     async fn walk_far_single_hop_when_close() {
@@ -607,18 +609,18 @@ mod tests {
                 other => panic!("unexpected tool {other}"),
             }
         }).await;
-        // Dest 100 yd away — below the 150 yd hop threshold.
-        let dest = crate::nav::Dest { x: 100.0, y: 0.0, z: 0.0 };
+        // Dest 50 yd away — below the 60 yd hop threshold.
+        let dest = crate::nav::Dest { x: 50.0, y: 0.0, z: 0.0 };
         let result = walk_far(&client(&base), 1, dest).await;
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
         let dests = fp_dests.lock().unwrap().clone();
         assert_eq!(dests.len(), 1, "exactly one nav.find_path call, got {} calls: {dests:?}", dests.len());
-        assert!((dests[0] - 100.0).abs() < 0.001,
-            "dest_x of the single call must equal the exact dest (100), got {}", dests[0]);
+        assert!((dests[0] - 50.0).abs() < 0.001,
+            "dest_x of the single call must equal the exact dest (50), got {}", dests[0]);
     }
 
-    /// walk_far with a 400 yd leg must segment into 3 nav.find_path calls:
-    /// hop at 150 yd, hop at 300 yd, then final exact dest at 400 yd.
+    /// walk_far with a 400 yd leg must segment into 7 nav.find_path calls:
+    /// hops at 60..360 yd (6 hops), then the final exact dest at 400 yd.
     #[tokio::test]
     async fn walk_far_segments_long_leg() {
         use std::sync::Arc;
@@ -661,18 +663,18 @@ mod tests {
         }).await;
 
         // Dest 400 yd along +x.
-        // Hop arithmetic: dist=400>150 → hop to 150; dist=250>150 → hop to 300;
-        // dist=100≤150 → final walk_to exact dest. Total: 3 find_path calls.
+        // Hop arithmetic at 60 yd hops: 60, 120, 180, 240, 300, 360 (6 hops), then
+        // dist=40 ≤ 60 → final walk_to exact dest. Total: 7 find_path calls.
         let dest = crate::nav::Dest { x: 400.0, y: 0.0, z: 0.0 };
         let result = walk_far(&client(&base), 2, dest).await;
         assert!(result.is_ok(), "expected Ok for 400yd leg, got: {result:?}");
 
         let dests = fp_dests.lock().unwrap().clone();
-        assert_eq!(dests.len(), 3,
-            "expected 3 nav.find_path calls (150, 300, 400), got {}: {dests:?}", dests.len());
+        assert_eq!(dests.len(), 7,
+            "expected 7 nav.find_path calls (60..360 + exact 400), got {}: {dests:?}", dests.len());
         // Last call must be exact dest.
-        assert!((dests[2] - 400.0).abs() < 0.1,
-            "final hop must aim at exact dest (400), got {}", dests[2]);
+        assert!((dests[6] - 400.0).abs() < 0.1,
+            "final hop must aim at exact dest (400), got {}", dests[6]);
     }
 
     /// A hop that returns NOPATH mid-leg must propagate the error; walk_far must issue
@@ -722,7 +724,7 @@ mod tests {
             }
         }).await;
 
-        // 400 yd leg: hop 1 OK (150 yd), hop 2 NOPATH (150→300) → error.
+        // 400 yd leg: hop 1 OK (60 yd), hop 2 NOPATH (60→120) → error.
         let dest = crate::nav::Dest { x: 400.0, y: 0.0, z: 0.0 };
         let result = walk_far(&client(&base), 3, dest).await;
         assert!(result.is_err(), "expected Err on NOPATH mid-leg");
