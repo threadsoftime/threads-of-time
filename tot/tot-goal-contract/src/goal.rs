@@ -20,6 +20,18 @@ pub struct MobFilter {
     pub creature_type: Option<String>,
 }
 
+/// Camp vendor for in-grind economy trips (M2 slice 2.4). Mined per camp from the
+/// world-DB dumps (spec §6); absent = no economy checks for this goal.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct VendorInfo {
+    /// DB creature spawn id (`creature.guid`) — what bot.vendor_sell/bot.repair take.
+    pub spawn_id: u64,
+    /// Vendor spawn position (nav destination). Same map as the goal anchor.
+    pub pos: WorldPos,
+    /// Mined npcflag & 0x1000 — when true the trip also calls bot.repair.
+    pub can_repair: bool,
+}
+
 /// Grind a level band of mobs around an anchor until a level or kill-count target.
 ///
 /// `to_level` and `kill_count` are OR stop-conditions (whichever is met first).
@@ -37,6 +49,9 @@ pub struct GrindGoal {
     /// Rotation plugin id (profile-driven, M2 slice 2.2). `None` → auto_attack (M1 back-compat).
     #[serde(default)]
     pub rotation_id: Option<String>,
+    /// Camp vendor for economy trips (M2 slice 2.4). `None` → no economy checks.
+    #[serde(default)]
+    pub vendor: Option<VendorInfo>,
 }
 
 /// The brain→exec intent. M1 ships exactly one variant. Internally tagged on `kind`.
@@ -96,6 +111,7 @@ mod tests {
                 kill_count: None,
                 rest_threshold: 0.35,
                 rotation_id: None,
+                vendor: None,
             }),
         }
     }
@@ -139,6 +155,44 @@ mod tests {
         let json = r#"{"goal_id":"g","version":1,"goal":{"kind":"teleport_to_moon"}}"#;
         let res: Result<GoalEnvelope, _> = serde_json::from_str(json);
         assert!(res.is_err(), "unknown variant must not deserialize");
+    }
+}
+
+#[cfg(test)]
+mod vendor_tests {
+    use super::*;
+
+    /// A pre-2.4 GrindGoal JSON (no vendor) must still deserialize → None.
+    #[test]
+    fn grind_goal_without_vendor_deserializes() {
+        let json = serde_json::json!({
+            "anchor_point": {"map_id": 0, "x": 1.0, "y": 2.0, "z": 3.0},
+            "wander_radius": 90.0, "max_search_radius": 35.0,
+            "mob_filter": {"min_level": 1, "max_level": 5, "creature_type": null},
+            "to_level": 6, "kill_count": null, "rest_threshold": 0.35
+        });
+        let g: GrindGoal = serde_json::from_value(json).unwrap();
+        assert!(g.vendor.is_none());
+    }
+
+    #[test]
+    fn grind_goal_vendor_round_trips() {
+        let mut g: GrindGoal = serde_json::from_value(serde_json::json!({
+            "anchor_point": {"map_id": 1, "x": 1.0, "y": 2.0, "z": 3.0},
+            "wander_radius": 90.0, "max_search_radius": 35.0,
+            "mob_filter": {"min_level": 1, "max_level": 5, "creature_type": null},
+            "to_level": 6, "kill_count": null, "rest_threshold": 0.35
+        })).unwrap();
+        g.vendor = Some(VendorInfo {
+            spawn_id: 40_001,
+            pos: WorldPos { map_id: 1, x: 2200.0, y: -300.0, z: 95.0 },
+            can_repair: true,
+        });
+        let back: GrindGoal = serde_json::from_value(serde_json::to_value(&g).unwrap()).unwrap();
+        let v = back.vendor.expect("vendor survives round-trip");
+        assert_eq!(v.spawn_id, 40_001);
+        assert_eq!(v.pos.map_id, 1);
+        assert!(v.can_repair);
     }
 }
 
