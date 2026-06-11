@@ -12,7 +12,6 @@ use tot_harness_client::HarnessClient;
 pub(crate) const FREE_SLOT_TRIGGER: u32 = 3;
 pub(crate) const GREY_COUNT_TRIGGER: u32 = 8;
 pub(crate) const ECONOMY_CHECK_KILL_STRIDE: u32 = 5;
-#[allow(dead_code)] // used by Task 8 as the default cooldown argument
 pub(crate) const VENDOR_TRIP_COOLDOWN_S: u64 = 600;
 
 /// Backpack proper (INVENTORY_SLOT_ITEM_START..END) is 16 slots.
@@ -39,7 +38,7 @@ struct Inventory {
 
 /// What the trigger check needs from `obs.get_inventory` (spec §3).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct BagSummary {
+pub struct BagSummary {
     pub free_slots: u32,
     pub grey_count: u32,
 }
@@ -76,7 +75,6 @@ pub(crate) async fn read_bags(client: &HarnessClient, bot_guid: u64) -> Result<B
 /// `ECONOMY_CHECK_KILL_STRIDE` kills → outside the trip cooldown → poll bags →
 /// `Some(summary)` when a trigger condition holds. A failed poll logs and skips
 /// (never terminal). `cooldown` is injected so tests don't wait 600 s.
-#[allow(dead_code)] // wired in Task 8
 pub(crate) async fn economy_due(
     client: &HarnessClient,
     bot_guid: u64,
@@ -107,7 +105,6 @@ pub(crate) async fn economy_due(
 }
 
 /// How a vendor trip ended. Both are non-terminal for the grind goal (spec §5).
-#[allow(dead_code)] // wired in Task 8
 #[derive(Debug, PartialEq)]
 pub(crate) enum VendorTripOutcome {
     /// Trip ran (possibly with soft fails) — resume Scanning under the cooldown.
@@ -142,7 +139,6 @@ async fn bot_is_dead(client: &HarnessClient, bot_guid: u64) -> bool {
 /// The trip (spec §4): walk to the vendor → sell greys → repair (if able) →
 /// walk back to the anchor. Every failure is soft (spec §5); death at any
 /// checkpoint aborts into the caller's Recovering path.
-#[allow(dead_code)] // wired in Task 8
 pub(crate) async fn run_vendor_trip(
     client: &HarnessClient,
     bot_guid: u64,
