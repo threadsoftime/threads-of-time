@@ -71,6 +71,33 @@ pub(crate) async fn read_bags(client: &HarnessClient, bot_guid: u64) -> Result<B
     summarize_inventory(raw)
 }
 
+/// Entry/recovery-time economy check (spec rounds 4/4b): poll bags and return the
+/// trip inputs when a trigger condition holds, the goal has a vendor, and the trip
+/// cooldown is clear. Unlike `economy_due` there is no kill stride — bag state
+/// carries across goal lives and recoveries. A failed poll warns and returns None.
+pub(crate) async fn entry_check(
+    client: &HarnessClient,
+    bot_guid: u64,
+    goal: &tot_goal_contract::GrindGoal,
+    last_trip: Option<std::time::Instant>,
+    cooldown: std::time::Duration,
+) -> Option<(BagSummary, tot_goal_contract::VendorInfo)> {
+    let vendor = goal.vendor?;
+    if let Some(t) = last_trip {
+        if t.elapsed() < cooldown {
+            return None;
+        }
+    }
+    match read_bags(client, bot_guid).await {
+        Ok(bags) if bags.triggered() => Some((bags, vendor)),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!(bot_guid, error = %e, "entry economy check failed — skipping");
+            None
+        }
+    }
+}
+
 /// Gate the economy check (spec §3): vendor present → at most every
 /// `ECONOMY_CHECK_KILL_STRIDE` kills → outside the trip cooldown → poll bags →
 /// `Some(summary)` when a trigger condition holds. A failed poll logs and skips

@@ -576,18 +576,14 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
         }
     }
 
-    // Goal-entry economy check (spec round 4): death-loop bots re-emit goals before
+    // Goal-entry economy check (spec rounds 4/4b): death-loop bots re-emit goals before
     // the kill stride can fire — but bag state carries across goal lives. One poll
     // at entry catches accumulated greys; the stride handles mid-goal accumulation.
     if !matches!(state, GrindState::Recovering) {
-        if let Some(vendor) = goal.vendor {
-            match crate::economy::read_bags(client, bot_guid).await {
-                Ok(bags) if bags.triggered() => {
-                    state = GrindState::Vendoring { bags, vendor };
-                }
-                Ok(_) => {}
-                Err(e) => tracing::warn!(bot_guid, error = %e, "entry economy check failed — skipping"),
-            }
+        if let Some((bags, vendor)) =
+            crate::economy::entry_check(client, bot_guid, goal, last_vendor_trip, econ_cooldown).await
+        {
+            state = GrindState::Vendoring { bags, vendor };
         }
     }
 
@@ -750,7 +746,18 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
                         if let Err(e) = ensure_buffs(client, bot_guid, &rotation).await {
                             tracing::warn!(error = %e, "post-recovery buff pass failed");
                         }
-                        GrindState::Scanning
+                        // Post-recovery economy check (spec round 4b): DOA goals skip
+                        // the entry check, and death-loop bots ALWAYS arrive via
+                        // recovery. Fresh revive at the anchor is the ideal vendor
+                        // moment (repair the death damage). Cooldown-guarded so a
+                        // death spiral can't chain trips.
+                        if let Some((bags, vendor)) = crate::economy::entry_check(
+                            client, bot_guid, goal, last_vendor_trip, econ_cooldown,
+                        ).await {
+                            GrindState::Vendoring { bags, vendor }
+                        } else {
+                            GrindState::Scanning
+                        }
                     }
                 }
             }
@@ -1762,6 +1769,133 @@ mod tests {
         let sells = seq.iter().filter(|c| *c == "bot.vendor_sell").count();
         assert_eq!(sells, 1, "exactly one trip (stride/cooldown suppress #2): {seq:?}");
         assert!(seq.contains(&"bot.repair".to_string()));
+    }
+
+    /// Post-recovery economy check (spec round 4b): DOA death-loop bots vendor after revival.
+    ///
+    /// A bot that arrives dead (DOA) skips the goal-entry economy check (Recovering state
+    /// at entry). After recovery completes (release → poll → teleport → re-claim), the
+    /// post-recovery path runs `entry_check`. If bags are triggered (accumulated greys from
+    /// prior goal lives), the bot vendors BEFORE resuming combat.
+    ///
+    /// Sequence: DOA → Recovering → Recovered → post-recovery buff pass →
+    /// post-recovery entry_check (triggered) → Vendoring (trip) → Scanning → kill →
+    /// Looting → HealthCheck (kill_count=1 met) → Completed.
+    ///
+    /// Asserts: GoalStatus::Completed; `bot.vendor_sell` called exactly once;
+    /// first `bot.vendor_sell` appears AFTER first `gm.teleport` (i.e., post-recovery,
+    /// not at goal entry — entry check was correctly skipped because DOA).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_grind_vendors_after_doa_recovery() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::SeqCst};
+
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        // Tracks whether the bot has been released (set_ai_enabled false).
+        // Recovery polls obs.get_state AFTER releasing; once released, return hp 100.
+        let released = Arc::new(AtomicBool::new(false));
+        let attacks = Arc::new(AtomicU32::new(0));
+        let move_target = Arc::new(std::sync::Mutex::new((0.0f64, 0.0f64, 0.0f64)));
+        let (c2, rel2, a2, m2) = (calls.clone(), released.clone(), attacks.clone(), move_target.clone());
+
+        let base = spawn_mock(move |name, args| {
+            c2.lock().unwrap().push(name.clone());
+            match name.as_str() {
+                "obs.get_state" => {
+                    // DOA check at goal start: dead. Recovery polls: alive once released.
+                    let hp = if rel2.load(SeqCst) { 100 } else { 0 };
+                    json!({"self": {"level": 5, "hp_pct": hp}})
+                }
+                "bot.set_ai_enabled" => {
+                    let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+                    // set_ai_owned semantics (own.rs lines 3-4):
+                    //   owned=false (release) → sends enabled:true + reset_on_release:true
+                    //   owned=true (claim)    → sends enabled:false
+                    // So enabled:true means "release" — mark released on first such call
+                    // so subsequent obs.get_state polls return hp 100 (bot revived).
+                    if enabled {
+                        rel2.store(true, SeqCst);
+                    }
+                    json!({"owned": !enabled, "reset": enabled})
+                }
+                "gm.teleport" => json!({"teleported": true}),
+                // 16 grey backpack items → triggered() == true at all times (greys accumulated).
+                "obs.get_inventory" => json!({
+                    "equipped": [],
+                    "bags": (0u32..16).map(|s| json!({
+                        "quality": 0, "slot": s, "item_entry": 750,
+                        "name": "Grey Item", "itemset": 0, "count": 1, "guid": s
+                    })).collect::<Vec<_>>(),
+                    "nested_bags": []
+                }),
+                "obs.get_auras" => json!({"auras": []}),
+                "obs.get_nearby_hostiles" => {
+                    // Guid bumps on each attack so fight()'s liveness poll misses old guid.
+                    let k = a2.load(SeqCst) as u64;
+                    json!({"hostiles": [{"guid": 300 + k, "name": "Boar", "level": 5,
+                        "hp_pct": 100.0, "distance": 3.0, "is_alive": true,
+                        "x": 3.0, "y": 0.0, "z": 0.0}]})
+                }
+                "bot.attack" => { a2.fetch_add(1, SeqCst); json!({"attacking": true}) }
+                "obs.get_lootable_corpses" => json!({"corpses": []}),
+                "nav.find_path" => json!({"path_type": 1i64, "points": [
+                    {"x": 0.0, "y": 0.0, "z": 0.0},
+                    {"x": args["dest_x"], "y": args["dest_y"], "z": args["dest_z"]}
+                ]}),
+                "bot.move_path" => {
+                    let p = args["points"].as_array().unwrap().last().unwrap().clone();
+                    *m2.lock().unwrap() = (p["x"].as_f64().unwrap(),
+                                          p["y"].as_f64().unwrap(), p["z"].as_f64().unwrap());
+                    json!({"launched": true, "duration_ms": 0,
+                           "final": {"x": p["x"], "y": p["y"], "z": p["z"]}})
+                }
+                "obs.get_position" => {
+                    let (x, y, z) = *m2.lock().unwrap();
+                    json!({"x": x, "y": y, "z": z, "map_id": 0, "zone_id": 1,
+                           "area_id": 1, "orientation": 0.0})
+                }
+                "bot.vendor_sell" => json!({"sold_count": 16u32, "copper_gained": 320u64}),
+                "bot.repair" => json!({"copper_spent": 0u64}),
+                other => panic!("unexpected tool {other}"),
+            }
+        }).await;
+
+        let goal = GrindGoal {
+            anchor_point: WorldPos { map_id: 0, x: 0.0, y: 0.0, z: 0.0 },
+            wander_radius: 90.0, max_search_radius: 35.0,
+            mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
+            to_level: 99,
+            kill_count: Some(1),
+            rest_threshold: 0.35,
+            rotation_id: None,
+            vendor: Some(VendorInfo {
+                spawn_id: 40003,
+                pos: WorldPos { map_id: 0, x: 50.0, y: 0.0, z: 0.0 },
+                can_repair: true,
+            }),
+        };
+
+        let status = run_grind(&client(&base), 1173, &goal).await;
+        assert!(matches!(status, GoalStatus::Completed { .. }), "expected Completed, got {status:?}");
+
+        let seq = calls.lock().unwrap().clone();
+
+        // Exactly one vendor_sell — post-recovery trip fires; stride (kills=1 < 5) +
+        // cooldown together prevent a second trip at HealthCheck.
+        let sells = seq.iter().filter(|c| *c == "bot.vendor_sell").count();
+        assert_eq!(sells, 1, "exactly one vendor_sell (post-recovery): {seq:?}");
+
+        // The FIRST vendor_sell must appear AFTER the first gm.teleport in the call log:
+        // the entry economy check was skipped (DOA at goal start), and the sell fires
+        // only after the recovery teleport back to anchor.
+        let first_sell = seq.iter().position(|c| c == "bot.vendor_sell")
+            .expect("vendor_sell must be in call log");
+        let first_teleport = seq.iter().position(|c| c == "gm.teleport")
+            .expect("gm.teleport must be in call log (recovery)");
+        assert!(
+            first_teleport < first_sell,
+            "post-recovery sell must come AFTER recovery teleport; \
+             first_teleport={first_teleport}, first_sell={first_sell}, seq={seq:?}"
+        );
     }
 
     /// Goal-entry economy check (spec round 4): bags are triggered BEFORE any kill fires.
