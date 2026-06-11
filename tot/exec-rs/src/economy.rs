@@ -177,11 +177,17 @@ const WALK_FAR_MAX_FIGHTS: u32 = 6;
 /// Aggro scan radius for the fight-through path: only the attacker that stopped the
 /// spline should be within ~15 yd; scanning wider risks pulling new packs.
 const WALK_FAR_AGGRO_YD: f64 = 15.0;
+/// Arrival-poll budget for vendor-leg hops (overrides walk_to's 5-poll default).
+/// Live 2026-06-11: 1114's flat 74 yd leg timed out twice at ~32 s/hop — the
+/// duration_ms sleep plus 2.5 s of polls is marginal once spline overhead lands.
+/// 20 checks ≈ 10 s of post-sleep polling; vendor legs are latency-tolerant.
+const WALK_FAR_ARRIVAL_CHECKS: u32 = 20;
 
-/// Walk a long leg in ≤WALK_FAR_HOP_YD segments: re-read the bot position each
-/// hop (obs.get_position), aim at the straight-line interpolation toward `dest`,
-/// and walk_to it. Hop targets snap to the navmesh server-side (FARFROMPOLY is
-/// tolerated).
+/// Walk a long leg in ≤WALK_FAR_HOP_YD segments. Each non-final hop probes
+/// nav.find_path to the FINAL dest and aims at the mesh-snapped point
+/// WALK_FAR_HOP_YD along the returned polyline (finding #11: straight-line
+/// interpolated z lands off-mesh on slope transitions). Probe NOPATH falls
+/// back to straight-line interpolation; probe transport/shape errors propagate.
 ///
 /// Fight-through (live-verify round 3): a Timeout or Stuck result on a hop is the
 /// signature of combat interrupting the movement spline. An externally-owned bot
@@ -218,17 +224,33 @@ pub(crate) async fn walk_far(
         let hop_result = if dist <= WALK_FAR_HOP_YD {
             // Final approach — use the exact dest. A Timeout here may also be
             // combat; fall through to the combat-interruption handler below.
-            match nav::walk_to(client, bot_guid, dest).await {
+            match nav::walk_to_with_arrival_checks(
+                client, bot_guid, dest, WALK_FAR_ARRIVAL_CHECKS).await
+            {
                 Ok(()) => return Ok(()),
                 Err(e) => Err(e),
             }
         } else {
+            // Mesh-snapped hop (finding #11): probe the real path to the FINAL
+            // dest and aim at the point WALK_FAR_HOP_YD along it — its z is on
+            // the walkable surface by construction. The old bot→dest straight-
+            // line z landed up to ~11 yd off-mesh on slope transitions and
+            // NOPATHed the hop's dest-poly lookup. Probe NOPATH (Detour node
+            // budget, legs ≳200 yd) falls back to the interpolated target.
+            let probe = nav::find_path(client, bot_guid, dest).await?;
+            let snapped = if probe.is_no_path() {
+                None
+            } else {
+                crate::nav::hop_target_along(&probe.points, WALK_FAR_HOP_YD)
+            };
             let frac = WALK_FAR_HOP_YD / dist;
-            nav::walk_to(client, bot_guid, crate::nav::Dest {
+            let target = snapped.unwrap_or(crate::nav::Dest {
                 x: bx + dx * frac,
                 y: by + dy * frac,
                 z: bz + dz * frac,
-            }).await
+            });
+            nav::walk_to_with_arrival_checks(
+                client, bot_guid, target, WALK_FAR_ARRIVAL_CHECKS).await
         };
         match hop_result {
             Ok(()) => { hops += 1; }
@@ -705,18 +727,29 @@ mod tests {
             "dest_x of the single call must equal the exact dest (50), got {}", dests[0]);
     }
 
-    /// walk_far with a 400 yd leg must segment into 7 nav.find_path calls:
-    /// hops at 60..360 yd (6 hops), then the final exact dest at 400 yd.
+    /// Finding #11 regression: hop targets must take their z from the navmesh path,
+    /// not from bot→dest straight-line interpolation.
+    ///
+    /// World: 400 yd leg along +x with a plateau — mesh z = 0 for x ≤ 200, z = 25
+    /// beyond. Dest = (400, 0, 25). Straight-line interpolation from the start
+    /// would give z = 25·x/400 (e.g. 3.75 at x=60) — up to ~12 yd off-mesh, the
+    /// live NOPATH class (1194, 2026-06-11 14:22:42Z).
+    ///
+    /// New walk_far per non-final hop: probe find_path(FINAL dest), aim at the
+    /// point 60 yd along the polyline. Call pattern: 6 hops × (1 probe + 1
+    /// walk_to find_path) + 1 final-approach find_path = 13 nav.find_path calls.
+    /// Hop walk_to targets: x = 60,120,...,360 with mesh z (0,0,0,25,25,25).
     #[tokio::test]
-    async fn walk_far_segments_long_leg() {
+    async fn walk_far_segments_long_leg_with_mesh_snapped_z() {
         use std::sync::Arc;
         use std::sync::Mutex;
 
-        // Tracked position — starts at (0,0,0); updated on each bot.move_path.
+        fn mesh_z(x: f64) -> f64 { if x > 200.0 { 25.0 } else { 0.0 } }
+
         let pos: Arc<Mutex<(f64, f64, f64)>> = Arc::new(Mutex::new((0.0, 0.0, 0.0)));
         let pos2 = pos.clone();
-        // Record every dest_x sent to nav.find_path.
-        let fp_dests: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
+        // Every nav.find_path dest as (x, z) — probes aim at 400, hop walk_tos at 60..360.
+        let fp_dests: Arc<Mutex<Vec<(f64, f64)>>> = Arc::new(Mutex::new(Vec::new()));
         let fp2 = fp_dests.clone();
 
         let base = spawn_mock(move |name, args| {
@@ -727,19 +760,27 @@ mod tests {
                            "map_id": 0, "zone_id": 1, "area_id": 1, "orientation": 0.0})
                 }
                 "nav.find_path" => {
-                    fp2.lock().unwrap().push(args["dest_x"].as_f64().unwrap());
-                    json!({"path_type": 1i64, "points": [
-                        {"x": args["dest_x"].as_f64().unwrap() - 1.0, "y": 0.0, "z": 0.0},
-                        {"x": args["dest_x"], "y": args["dest_y"], "z": args["dest_z"]}
-                    ]})
+                    let dx = args["dest_x"].as_f64().unwrap();
+                    let dz = args["dest_z"].as_f64().unwrap();
+                    fp2.lock().unwrap().push((dx, dz));
+                    // Mesh-snapped polyline from the bot's tracked x to dest_x in
+                    // 20 yd steps (plus the exact dest), z from the plateau profile.
+                    let from = pos2.lock().unwrap().0;
+                    let mut points: Vec<serde_json::Value> = Vec::new();
+                    let mut x = from;
+                    while x < dx {
+                        points.push(json!({"x": x, "y": 0.0, "z": mesh_z(x)}));
+                        x += 20.0;
+                    }
+                    points.push(json!({"x": dx, "y": 0.0, "z": dz}));
+                    json!({"path_type": 1i64, "points": points})
                 }
                 "bot.move_path" => {
-                    // Advance tracked position to the last waypoint (final destination of this hop).
                     let pts = args["points"].as_array().unwrap();
                     let p = pts.last().unwrap();
-                    let nx = p["x"].as_f64().unwrap();
-                    let ny = p["y"].as_f64().unwrap();
-                    let nz = p["z"].as_f64().unwrap();
+                    let (nx, ny, nz) = (p["x"].as_f64().unwrap(),
+                                        p["y"].as_f64().unwrap(),
+                                        p["z"].as_f64().unwrap());
                     *pos2.lock().unwrap() = (nx, ny, nz);
                     json!({"launched": true, "duration_ms": 0,
                            "final": {"x": nx, "y": ny, "z": nz}})
@@ -748,25 +789,103 @@ mod tests {
             }
         }).await;
 
-        // Dest 400 yd along +x.
-        // Hop arithmetic at 60 yd hops: 60, 120, 180, 240, 300, 360 (6 hops), then
-        // dist=40 ≤ 60 → final walk_to exact dest. Total: 7 find_path calls.
-        let dest = crate::nav::Dest { x: 400.0, y: 0.0, z: 0.0 };
+        let dest = crate::nav::Dest { x: 400.0, y: 0.0, z: 25.0 };
         let result = walk_far(&client(&base), 2, dest, &goal_with_vendor(), &rotation()).await;
-        assert!(result.is_ok(), "expected Ok for 400yd leg, got: {result:?}");
+        assert!(result.is_ok(), "expected Ok for 400yd plateau leg, got: {result:?}");
 
         let dests = fp_dests.lock().unwrap().clone();
-        assert_eq!(dests.len(), 7,
-            "expected 7 nav.find_path calls (60..360 + exact 400), got {}: {dests:?}", dests.len());
-        // Last call must be exact dest.
-        assert!((dests[6] - 400.0).abs() < 0.1,
-            "final hop must aim at exact dest (400), got {}", dests[6]);
+        assert_eq!(dests.len(), 13,
+            "6 hops × (probe + walk_to) + final approach = 13 find_path calls, got {}: {dests:?}",
+            dests.len());
+        // Hop walk_to targets are every find_path NOT aimed at the final dest (x=400).
+        let hops: Vec<(f64, f64)> = dests.iter().copied()
+            .filter(|(x, _)| (*x - 400.0).abs() > 0.1).collect();
+        let expected: Vec<(f64, f64)> = [60.0, 120.0, 180.0, 240.0, 300.0, 360.0]
+            .iter().map(|&x| (x, mesh_z(x))).collect();
+        assert_eq!(hops.len(), expected.len(), "6 hop walk_tos: {hops:?}");
+        for ((hx, hz), (ex, ez)) in hops.iter().zip(expected.iter()) {
+            assert!((hx - ex).abs() < 0.1, "hop x {hx} != {ex}");
+            assert!((hz - ez).abs() < 0.1,
+                "hop z must be MESH z ({ez}), not straight-line interp — got {hz} at x={hx}");
+        }
+        // Final approach aims at the exact dest.
+        let (lx, _) = dests.last().unwrap();
+        assert!((lx - 400.0).abs() < 0.1, "final find_path must aim at exact dest, got {lx}");
     }
 
-    /// A hop that returns NOPATH mid-leg must propagate the error; walk_far must issue
-    /// ≤2 nav.find_path calls (first OK, second NOPATH).
+    /// Probe NOPATH (Detour node budget on legs ≳200 yd) must FALL BACK to the
+    /// straight-line interpolated hop, not fail the leg.
     #[tokio::test]
-    async fn walk_far_propagates_nopath_mid_leg() {
+    async fn walk_far_probe_nopath_falls_back_to_interpolation() {
+        use std::sync::Arc;
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+
+        let fp_count = Arc::new(AtomicU32::new(0));
+        let fp2 = fp_count.clone();
+        let pos: Arc<Mutex<(f64, f64, f64)>> = Arc::new(Mutex::new((0.0, 0.0, 0.0)));
+        let pos2 = pos.clone();
+        let fp_dests: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
+        let fd2 = fp_dests.clone();
+
+        let base = spawn_mock(move |name, args| {
+            match name.as_str() {
+                "obs.get_position" => {
+                    let (x, y, z) = *pos2.lock().unwrap();
+                    json!({"x": x, "y": y, "z": z,
+                           "map_id": 0, "zone_id": 1, "area_id": 1, "orientation": 0.0})
+                }
+                "nav.find_path" => {
+                    let n = fp2.fetch_add(1, SeqCst);
+                    let dx = args["dest_x"].as_f64().unwrap();
+                    fd2.lock().unwrap().push(dx);
+                    if n == 0 {
+                        // First probe (aimed at the final dest): NOPATH — node budget.
+                        json!({"path_type": 8i64, "points": []})
+                    } else {
+                        // Everything else: flat NORMAL polyline from tracked pos to dest.
+                        let from = pos2.lock().unwrap().0;
+                        let mut points: Vec<serde_json::Value> = Vec::new();
+                        let mut x = from;
+                        while x < dx {
+                            points.push(json!({"x": x, "y": 0.0, "z": 0.0}));
+                            x += 20.0;
+                        }
+                        points.push(json!({"x": dx, "y": 0.0, "z": 0.0}));
+                        json!({"path_type": 1i64, "points": points})
+                    }
+                }
+                "bot.move_path" => {
+                    let pts = args["points"].as_array().unwrap();
+                    let p = pts.last().unwrap();
+                    let (nx, ny, nz) = (p["x"].as_f64().unwrap(),
+                                        p["y"].as_f64().unwrap(),
+                                        p["z"].as_f64().unwrap());
+                    *pos2.lock().unwrap() = (nx, ny, nz);
+                    json!({"launched": true, "duration_ms": 0,
+                           "final": {"x": nx, "y": ny, "z": nz}})
+                }
+                other => panic!("unexpected tool {other}"),
+            }
+        }).await;
+
+        // Flat 400 yd leg, dest z = 0 → the interpolated fallback target is also valid.
+        let dest = crate::nav::Dest { x: 400.0, y: 0.0, z: 0.0 };
+        let result = walk_far(&client(&base), 3, dest, &goal_with_vendor(), &rotation()).await;
+        assert!(result.is_ok(), "probe NOPATH must fall back, not fail: {result:?}");
+
+        let dests = fp_dests.lock().unwrap().clone();
+        // Call 0 = NOPATHed probe (dest 400); call 1 = the fallback hop walk_to at the
+        // INTERPOLATED 60 yd point.
+        assert!((dests[0] - 400.0).abs() < 0.1, "first call is the probe: {dests:?}");
+        assert!((dests[1] - 60.0).abs() < 0.1,
+            "fallback walk_to must aim at the interpolated 60 yd point: {dests:?}");
+    }
+
+    /// A NOPATH from walk_to itself (the hop execution, not the probe) must
+    /// propagate — that's a genuine nav failure at the hop target.
+    #[tokio::test]
+    async fn walk_far_propagates_walk_to_nopath() {
         use std::sync::Arc;
         use std::sync::Mutex;
         use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
@@ -786,40 +905,32 @@ mod tests {
                 "nav.find_path" => {
                     let n = fp2.fetch_add(1, SeqCst);
                     if n == 0 {
-                        // First hop: NORMAL → walk succeeds.
-                        json!({"path_type": 1i64, "points": [
-                            {"x": 0.0, "y": 0.0, "z": 0.0},
-                            {"x": args["dest_x"], "y": args["dest_y"], "z": args["dest_z"]}
-                        ]})
+                        // The probe: NORMAL flat polyline 0→400 in 20 yd steps.
+                        let dx = args["dest_x"].as_f64().unwrap();
+                        let mut points: Vec<serde_json::Value> = Vec::new();
+                        let mut x = 0.0;
+                        while x < dx {
+                            points.push(json!({"x": x, "y": 0.0, "z": 0.0}));
+                            x += 20.0;
+                        }
+                        points.push(json!({"x": dx, "y": 0.0, "z": 0.0}));
+                        json!({"path_type": 1i64, "points": points})
                     } else {
-                        // Second hop: NOPATH → walk_far propagates the error.
+                        // walk_to's own find_path at the hop target: NOPATH.
                         json!({"path_type": 8i64, "points": []})
                     }
-                }
-                "bot.move_path" => {
-                    let pts = args["points"].as_array().unwrap();
-                    let p = pts.last().unwrap();
-                    let nx = p["x"].as_f64().unwrap();
-                    let ny = p["y"].as_f64().unwrap();
-                    let nz = p["z"].as_f64().unwrap();
-                    *pos2.lock().unwrap() = (nx, ny, nz);
-                    json!({"launched": true, "duration_ms": 0,
-                           "final": {"x": nx, "y": ny, "z": nz}})
                 }
                 other => panic!("unexpected tool {other}"),
             }
         }).await;
 
-        // 400 yd leg: hop 1 OK (60 yd), hop 2 NOPATH (60→120) → error.
         let dest = crate::nav::Dest { x: 400.0, y: 0.0, z: 0.0 };
         let result = walk_far(&client(&base), 3, dest, &goal_with_vendor(), &rotation()).await;
-        assert!(result.is_err(), "expected Err on NOPATH mid-leg");
         match result.unwrap_err() {
             crate::nav::NavError::NoPath => {}
             other => panic!("expected NoPath, got: {other:?}"),
         }
-        assert!(fp_count.load(SeqCst) <= 2,
-            "must have issued ≤2 nav.find_path calls, got {}", fp_count.load(SeqCst));
+        assert_eq!(fp_count.load(SeqCst), 2, "probe + one walk_to find_path, then stop");
     }
 
     /// Bot sells successfully, then dies on the walk home.
