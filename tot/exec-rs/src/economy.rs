@@ -136,6 +136,49 @@ async fn bot_is_dead(client: &HarnessClient, bot_guid: u64) -> bool {
     matches!(crate::grind::read_self(client, bot_guid).await, Ok(s) if s.hp_pct == 0)
 }
 
+/// Hop length for long vendor legs (yd). A single nav.find_path NOPATHs beyond
+/// ~200 yd (live-verified 2026-06-10); ≤150 yd hops path reliably.
+const WALK_FAR_HOP_YD: f64 = 150.0;
+/// Hop budget: 10 hops ≈ 1500 yd ceiling — far beyond any mined vendor leg (≤712 yd).
+const WALK_FAR_MAX_HOPS: u32 = 10;
+
+/// Walk a long leg in ≤WALK_FAR_HOP_YD segments: re-read the bot position each
+/// hop (obs.get_position), aim at the straight-line interpolation toward `dest`,
+/// and walk_to it. Hop targets snap to the navmesh server-side (FARFROMPOLY is
+/// tolerated); a hop that genuinely cannot path returns the NavError to the
+/// caller's soft-failure policy. The final hop walks to `dest` exactly.
+pub(crate) async fn walk_far(
+    client: &HarnessClient,
+    bot_guid: u64,
+    dest: crate::nav::Dest,
+) -> Result<(), crate::nav::NavError> {
+    use crate::nav::{self, NavError};
+    for _ in 0..WALK_FAR_MAX_HOPS {
+        let (bx, by, bz) = crate::grind::bot_world_pos(client, bot_guid)
+            .await
+            .map_err(|e| match e {
+                crate::grind::GrindError::Harness(h) => NavError::Harness(h),
+                crate::grind::GrindError::Shape(s) => NavError::Shape(s),
+            })?;
+        let (dx, dy, dz) = (dest.x - bx, dest.y - by, dest.z - bz);
+        // 2-D horizontal distance (z ignored for hop sizing, consistent with
+        // the navmesh server treating Z as terrain-snapped).
+        let dist = (dx * dx + dy * dy).sqrt();
+        if dist <= WALK_FAR_HOP_YD {
+            return nav::walk_to(client, bot_guid, dest).await;
+        }
+        let frac = WALK_FAR_HOP_YD / dist;
+        nav::walk_to(client, bot_guid, crate::nav::Dest {
+            x: bx + dx * frac,
+            y: by + dy * frac,
+            z: bz + dz * frac,
+        }).await?;
+    }
+    // Hop budget exhausted without reaching the final approach — treat as stuck.
+    // NavError::Stuck carries the repath count; we pass the hop budget as proxy.
+    Err(crate::nav::NavError::Stuck(WALK_FAR_MAX_HOPS))
+}
+
 /// The trip (spec §4): walk to the vendor → sell greys → repair (if able) →
 /// walk back to the anchor. Every failure is soft (spec §5); death at any
 /// checkpoint aborts into the caller's Recovering path.
@@ -151,7 +194,7 @@ pub(crate) async fn run_vendor_trip(
         free_slots = bags.free_slots, grey_count = bags.grey_count,
         trigger, "vendor_trip_start");
 
-    let walked = match crate::nav::walk_to(client, bot_guid,
+    let walked = match walk_far(client, bot_guid,
         crate::nav::Dest { x: vendor.pos.x, y: vendor.pos.y, z: vendor.pos.z }).await
     {
         Ok(()) => true,
@@ -213,7 +256,7 @@ pub(crate) async fn run_vendor_trip(
 
         // Return leg — best-effort; Scanning recenters via Wandering on failure (spec §5).
         let a = &goal.anchor_point;
-        if let Err(e) = crate::nav::walk_to(client, bot_guid,
+        if let Err(e) = walk_far(client, bot_guid,
             crate::nav::Dest { x: a.x, y: a.y, z: a.z }).await
         {
             tracing::warn!(bot_guid, error = %e, "vendor_trip: return nav failed");
@@ -254,13 +297,17 @@ mod tests {
     fn client(base: &str) -> HarnessClient { HarnessClient::new(base, "tok", Duration::from_secs(5)) }
 
     fn vendor() -> VendorInfo {
+        // Placed 100 yd from origin along +x so both outbound (0→100) and return
+        // (100→50) legs are ≤150 yd — a single walk_far hop each. Tests that need
+        // a longer leg spawn their own mock with custom coords.
         VendorInfo { spawn_id: 40001,
-                     pos: WorldPos { map_id: 1, x: 2200.0, y: -300.0, z: 95.0 },
+                     pos: WorldPos { map_id: 1, x: 100.0, y: 0.0, z: 0.0 },
                      can_repair: true }
     }
     fn goal_with_vendor() -> GrindGoal {
         GrindGoal {
-            anchor_point: WorldPos { map_id: 1, x: 2100.0, y: -210.0, z: 92.0 },
+            // Anchor 50 yd from origin — return leg is 100→50 = 50 yd, within one hop.
+            anchor_point: WorldPos { map_id: 1, x: 50.0, y: 0.0, z: 0.0 },
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 19, max_level: 25, creature_type: None },
             to_level: 23, kill_count: None, rest_threshold: 0.35,
@@ -486,6 +533,9 @@ mod tests {
         let base = spawn_mock(move |name, _| {
             c2.lock().unwrap().push(name.clone());
             match name.as_str() {
+                // walk_far reads obs.get_position before the first hop to get the bot position.
+                "obs.get_position" => json!({"x": 0.0, "y": 0.0, "z": 0.0,
+                    "map_id": 1, "zone_id": 1, "area_id": 1, "orientation": 0.0}),
                 "nav.find_path" => json!({"path_type": 8i64, "points": []}), // NOPATH
                 "obs.get_state" => json!({"self": {"level": 22, "hp_pct": 100}}),
                 "obs.get_inventory" => json!({"equipped": [], "bags": [], "nested_bags": []}),
@@ -510,6 +560,178 @@ mod tests {
         assert_eq!(out, VendorTripOutcome::BotDead);
         assert!(!calls.lock().unwrap().contains(&"bot.vendor_sell".to_string()),
                 "dead bot must not sell");
+    }
+
+    // ── walk_far unit tests ────────────────────────────────────────────────────────────────
+
+    /// walk_far with dest ≤150 yd away must issue exactly ONE nav.find_path aimed at
+    /// the exact dest (no intermediate hop).
+    #[tokio::test]
+    async fn walk_far_single_hop_when_close() {
+        use std::sync::Arc;
+        use std::sync::Mutex;
+        // Track every dest_x sent to nav.find_path.
+        let fp_dests: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
+        let fp2 = fp_dests.clone();
+        // Tracked position so walk_to's arrival check sees the bot at the final waypoint.
+        let pos: Arc<Mutex<(f64, f64, f64)>> = Arc::new(Mutex::new((0.0, 0.0, 0.0)));
+        let pos2 = pos.clone();
+        let base = spawn_mock(move |name, args| {
+            match name.as_str() {
+                // walk_far calls obs.get_position to measure distance before hopping.
+                // walk_to's arrival check also calls obs.get_position — it needs to see
+                // the bot at the final waypoint so the arrival tolerance (≤2 yd) passes.
+                "obs.get_position" => {
+                    let (x, y, z) = *pos2.lock().unwrap();
+                    json!({"x": x, "y": y, "z": z,
+                           "map_id": 0, "zone_id": 1, "area_id": 1, "orientation": 0.0})
+                }
+                "nav.find_path" => {
+                    fp2.lock().unwrap().push(args["dest_x"].as_f64().unwrap());
+                    json!({"path_type": 1i64, "points": [
+                        {"x": 0.0, "y": 0.0, "z": 0.0},
+                        {"x": args["dest_x"], "y": args["dest_y"], "z": args["dest_z"]}
+                    ]})
+                }
+                "bot.move_path" => {
+                    let pts = args["points"].as_array().unwrap();
+                    let p = pts.last().unwrap();
+                    let nx = p["x"].as_f64().unwrap();
+                    let ny = p["y"].as_f64().unwrap();
+                    let nz = p["z"].as_f64().unwrap();
+                    // Advance tracked position so the arrival check passes.
+                    *pos2.lock().unwrap() = (nx, ny, nz);
+                    json!({"launched": true, "duration_ms": 0,
+                           "final": {"x": nx, "y": ny, "z": nz}})
+                }
+                other => panic!("unexpected tool {other}"),
+            }
+        }).await;
+        // Dest 100 yd away — below the 150 yd hop threshold.
+        let dest = crate::nav::Dest { x: 100.0, y: 0.0, z: 0.0 };
+        let result = walk_far(&client(&base), 1, dest).await;
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        let dests = fp_dests.lock().unwrap().clone();
+        assert_eq!(dests.len(), 1, "exactly one nav.find_path call, got {} calls: {dests:?}", dests.len());
+        assert!((dests[0] - 100.0).abs() < 0.001,
+            "dest_x of the single call must equal the exact dest (100), got {}", dests[0]);
+    }
+
+    /// walk_far with a 400 yd leg must segment into 3 nav.find_path calls:
+    /// hop at 150 yd, hop at 300 yd, then final exact dest at 400 yd.
+    #[tokio::test]
+    async fn walk_far_segments_long_leg() {
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
+        // Tracked position — starts at (0,0,0); updated on each bot.move_path.
+        let pos: Arc<Mutex<(f64, f64, f64)>> = Arc::new(Mutex::new((0.0, 0.0, 0.0)));
+        let pos2 = pos.clone();
+        // Record every dest_x sent to nav.find_path.
+        let fp_dests: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
+        let fp2 = fp_dests.clone();
+
+        let base = spawn_mock(move |name, args| {
+            match name.as_str() {
+                "obs.get_position" => {
+                    let (x, y, z) = *pos2.lock().unwrap();
+                    json!({"x": x, "y": y, "z": z,
+                           "map_id": 0, "zone_id": 1, "area_id": 1, "orientation": 0.0})
+                }
+                "nav.find_path" => {
+                    fp2.lock().unwrap().push(args["dest_x"].as_f64().unwrap());
+                    json!({"path_type": 1i64, "points": [
+                        {"x": args["dest_x"].as_f64().unwrap() - 1.0, "y": 0.0, "z": 0.0},
+                        {"x": args["dest_x"], "y": args["dest_y"], "z": args["dest_z"]}
+                    ]})
+                }
+                "bot.move_path" => {
+                    // Advance tracked position to the last waypoint (final destination of this hop).
+                    let pts = args["points"].as_array().unwrap();
+                    let p = pts.last().unwrap();
+                    let nx = p["x"].as_f64().unwrap();
+                    let ny = p["y"].as_f64().unwrap();
+                    let nz = p["z"].as_f64().unwrap();
+                    *pos2.lock().unwrap() = (nx, ny, nz);
+                    json!({"launched": true, "duration_ms": 0,
+                           "final": {"x": nx, "y": ny, "z": nz}})
+                }
+                other => panic!("unexpected tool {other}"),
+            }
+        }).await;
+
+        // Dest 400 yd along +x.
+        // Hop arithmetic: dist=400>150 → hop to 150; dist=250>150 → hop to 300;
+        // dist=100≤150 → final walk_to exact dest. Total: 3 find_path calls.
+        let dest = crate::nav::Dest { x: 400.0, y: 0.0, z: 0.0 };
+        let result = walk_far(&client(&base), 2, dest).await;
+        assert!(result.is_ok(), "expected Ok for 400yd leg, got: {result:?}");
+
+        let dests = fp_dests.lock().unwrap().clone();
+        assert_eq!(dests.len(), 3,
+            "expected 3 nav.find_path calls (150, 300, 400), got {}: {dests:?}", dests.len());
+        // Last call must be exact dest.
+        assert!((dests[2] - 400.0).abs() < 0.1,
+            "final hop must aim at exact dest (400), got {}", dests[2]);
+    }
+
+    /// A hop that returns NOPATH mid-leg must propagate the error; walk_far must issue
+    /// ≤2 nav.find_path calls (first OK, second NOPATH).
+    #[tokio::test]
+    async fn walk_far_propagates_nopath_mid_leg() {
+        use std::sync::Arc;
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+
+        let fp_count = Arc::new(AtomicU32::new(0));
+        let fp2 = fp_count.clone();
+        let pos: Arc<Mutex<(f64, f64, f64)>> = Arc::new(Mutex::new((0.0, 0.0, 0.0)));
+        let pos2 = pos.clone();
+
+        let base = spawn_mock(move |name, args| {
+            match name.as_str() {
+                "obs.get_position" => {
+                    let (x, y, z) = *pos2.lock().unwrap();
+                    json!({"x": x, "y": y, "z": z,
+                           "map_id": 0, "zone_id": 1, "area_id": 1, "orientation": 0.0})
+                }
+                "nav.find_path" => {
+                    let n = fp2.fetch_add(1, SeqCst);
+                    if n == 0 {
+                        // First hop: NORMAL → walk succeeds.
+                        json!({"path_type": 1i64, "points": [
+                            {"x": 0.0, "y": 0.0, "z": 0.0},
+                            {"x": args["dest_x"], "y": args["dest_y"], "z": args["dest_z"]}
+                        ]})
+                    } else {
+                        // Second hop: NOPATH → walk_far propagates the error.
+                        json!({"path_type": 8i64, "points": []})
+                    }
+                }
+                "bot.move_path" => {
+                    let pts = args["points"].as_array().unwrap();
+                    let p = pts.last().unwrap();
+                    let nx = p["x"].as_f64().unwrap();
+                    let ny = p["y"].as_f64().unwrap();
+                    let nz = p["z"].as_f64().unwrap();
+                    *pos2.lock().unwrap() = (nx, ny, nz);
+                    json!({"launched": true, "duration_ms": 0,
+                           "final": {"x": nx, "y": ny, "z": nz}})
+                }
+                other => panic!("unexpected tool {other}"),
+            }
+        }).await;
+
+        // 400 yd leg: hop 1 OK (150 yd), hop 2 NOPATH (150→300) → error.
+        let dest = crate::nav::Dest { x: 400.0, y: 0.0, z: 0.0 };
+        let result = walk_far(&client(&base), 3, dest).await;
+        assert!(result.is_err(), "expected Err on NOPATH mid-leg");
+        match result.unwrap_err() {
+            crate::nav::NavError::NoPath => {}
+            other => panic!("expected NoPath, got: {other:?}"),
+        }
+        assert!(fp_count.load(SeqCst) <= 2,
+            "must have issued ≤2 nav.find_path calls, got {}", fp_count.load(SeqCst));
     }
 
     /// Bot sells successfully, then dies on the walk home.
