@@ -164,6 +164,19 @@ fn dist(a: &PathPoint, b: &PathPoint) -> f64 {
 /// `STUCK_THRESHOLD` each segment). The separate `NavError::RepathBudgetExceeded` is returned
 /// when the raw re-path count cap (`MAX_REPATH`) is hit regardless of progress.
 pub async fn walk_to(client: &HarnessClient, bot_guid: u64, dest: Dest) -> Result<(), NavError> {
+    walk_to_with_arrival_checks(client, bot_guid, dest, MAX_ARRIVAL_CHECKS).await
+}
+
+/// `walk_to` with a caller-chosen arrival-poll budget (`arrival_checks` ×
+/// RECHECK_INTERVAL_MS after the spline sleep). Vendor legs are latency-tolerant
+/// and proved marginal on the default 5-poll window live (2026-06-11: 1114's
+/// flat 74 yd leg timed out twice); grind/loot movement keeps the tight default.
+pub async fn walk_to_with_arrival_checks(
+    client: &HarnessClient,
+    bot_guid: u64,
+    dest: Dest,
+    arrival_checks: u32,
+) -> Result<(), NavError> {
     let mut repath_count = 0u32;
     // Tracks the bot's distance to `dest` at the end of each INCOMPLETE segment, so that the
     // next iteration can verify we got meaningfully closer.
@@ -193,7 +206,7 @@ pub async fn walk_to(client: &HarnessClient, bot_guid: u64, dest: Dest) -> Resul
 
         // Poll for arrival at the segment's final waypoint.
         let mut arrival_pos: Option<PathPoint> = None;
-        for _ in 0..MAX_ARRIVAL_CHECKS {
+        for _ in 0..arrival_checks {
             let pos = get_position(client, bot_guid).await?;
             if dist(&pos, &final_wp) <= ARRIVAL_TOLERANCE {
                 arrival_pos = Some(pos);
@@ -576,5 +589,29 @@ mod tests {
         let pts = vec![pp(0.0, 0.0, 0.0), pp(0.0, 0.0, 10.0), pp(80.0, 0.0, 10.0)];
         let t = hop_target_along(&pts, 60.0).unwrap();
         assert!((t.x - 60.0).abs() < 1e-9 && (t.z - 10.0).abs() < 1e-9);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn walk_to_with_arrival_checks_honors_custom_poll_count() {
+        // Never-arriving bot: with arrival_checks=2 the loop must poll obs.get_position
+        // exactly 2 times before Timeout (default walk_to polls 5).
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+        let polls = std::sync::Arc::new(AtomicU32::new(0));
+        let p2 = polls.clone();
+        let base = spawn_mock(move |name, _args| match name.as_str() {
+            "nav.find_path" => serde_json::json!({ "path_type": 1i64,
+                "points": [{"x":0.0,"y":0.0,"z":0.0},{"x":10.0,"y":0.0,"z":0.0}] }),
+            "bot.move_path" => make_move_response(true, 0, 10.0, 0.0, 0.0),
+            "obs.get_position" => {
+                p2.fetch_add(1, SeqCst);
+                serde_json::json!({ "x":0.0,"y":0.0,"z":0.0,
+                    "map_id":0,"zone_id":1,"area_id":1,"orientation":0.0 })
+            }
+            other => panic!("unexpected tool: {other}"),
+        }).await;
+        let err = walk_to_with_arrival_checks(&client(&base), 42,
+            Dest { x: 10.0, y: 0.0, z: 0.0 }, 2).await.unwrap_err();
+        match err { NavError::Timeout => {}, other => panic!("expected Timeout, got: {other:?}") }
+        assert_eq!(polls.load(SeqCst), 2, "must poll exactly arrival_checks times");
     }
 }
