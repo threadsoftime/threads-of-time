@@ -391,17 +391,19 @@ mod tests {
         assert!(!BagSummary { free_slots: 16, grey_count: 7 }.triggered());
     }
 
+    type CallLog = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+    type TrackedPos = std::sync::Arc<std::sync::Mutex<(f64, f64, f64)>>;
+
     /// Stateful mock for full trips: tracks call order + last move_path endpoint
     /// so arrival polls succeed for BOTH legs (vendor out, anchor back).
-    fn trip_mock_state() -> (std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-                             std::sync::Arc<std::sync::Mutex<(f64, f64, f64)>>) {
+    fn trip_mock_state() -> (CallLog, TrackedPos) {
         (std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
          std::sync::Arc::new(std::sync::Mutex::new((0.0, 0.0, 0.0))))
     }
 
     fn trip_handler(
-        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-        pos: std::sync::Arc<std::sync::Mutex<(f64, f64, f64)>>,
+        calls: CallLog,
+        pos: TrackedPos,
         hp_pct: u32,
         sell_result: serde_json::Value,
     ) -> impl Fn(String, serde_json::Value) -> serde_json::Value + Send + Sync + 'static {
