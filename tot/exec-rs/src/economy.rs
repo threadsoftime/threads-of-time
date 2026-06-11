@@ -106,6 +106,123 @@ pub(crate) async fn economy_due(
     }
 }
 
+/// How a vendor trip ended. Both are non-terminal for the grind goal (spec §5).
+#[allow(dead_code)] // wired in Task 8
+#[derive(Debug, PartialEq)]
+pub(crate) enum VendorTripOutcome {
+    /// Trip ran (possibly with soft fails) — resume Scanning under the cooldown.
+    Done,
+    /// Bot found dead at a checkpoint — caller enters Recovering.
+    BotDead,
+}
+
+#[derive(Debug, Deserialize)]
+struct SellResult {
+    #[serde(default)]
+    sold_count: u32,
+    #[serde(default)]
+    copper_gained: u64,
+    #[serde(default)]
+    fail_code: Option<String>,
+}
+#[derive(Debug, Deserialize)]
+struct RepairResult {
+    #[serde(default)]
+    copper_spent: u64,
+    #[serde(default)]
+    fail_code: Option<String>,
+}
+
+/// Dead-check between trip phases. Read errors count as alive — a transient obs
+/// failure must not bounce the bot into death recovery.
+async fn bot_is_dead(client: &HarnessClient, bot_guid: u64) -> bool {
+    matches!(crate::grind::read_self(client, bot_guid).await, Ok(s) if s.hp_pct == 0)
+}
+
+/// The trip (spec §4): walk to the vendor → sell greys → repair (if able) →
+/// walk back to the anchor. Every failure is soft (spec §5); death at any
+/// checkpoint aborts into the caller's Recovering path.
+#[allow(dead_code)] // wired in Task 8
+pub(crate) async fn run_vendor_trip(
+    client: &HarnessClient,
+    bot_guid: u64,
+    goal: &tot_goal_contract::GrindGoal,
+    vendor: &tot_goal_contract::VendorInfo,
+    bags: BagSummary,
+) -> VendorTripOutcome {
+    tracing::info!(bot_guid, vendor_spawn_id = vendor.spawn_id,
+        free_slots = bags.free_slots, grey_count = bags.grey_count, "vendor_trip_start");
+
+    let walked = match crate::nav::walk_to(client, bot_guid,
+        crate::nav::Dest { x: vendor.pos.x, y: vendor.pos.y, z: vendor.pos.z }).await
+    {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(bot_guid, error = %e, "vendor_trip: outbound nav failed");
+            false
+        }
+    };
+    if bot_is_dead(client, bot_guid).await { return VendorTripOutcome::BotDead; }
+
+    let mut sold_count = 0u32;
+    let mut copper_gained = 0u64;
+    let mut repair_copper = 0u64;
+    if walked {
+        match client.call("bot.vendor_sell", serde_json::json!({
+            "bot_guid": bot_guid as i64,
+            "vendor_spawn_id": vendor.spawn_id,
+            "max_quality": 0,
+        })).await {
+            Ok(raw) => match serde_json::from_value::<SellResult>(raw) {
+                Ok(r) => {
+                    if let Some(code) = &r.fail_code {
+                        tracing::warn!(bot_guid, fail_code = %code, "vendor_trip: sell soft-fail");
+                    }
+                    sold_count = r.sold_count;
+                    copper_gained = r.copper_gained;
+                }
+                Err(e) => tracing::warn!(bot_guid, error = %e, "vendor_trip: sell shape"),
+            },
+            Err(e) => tracing::warn!(bot_guid, error = %e, "vendor_trip: sell errored"),
+        }
+        // Repair is independent of the sell outcome (spec §5) and self-gating (§1).
+        if vendor.can_repair {
+            match client.call("bot.repair", serde_json::json!({
+                "bot_guid": bot_guid as i64,
+                "vendor_spawn_id": vendor.spawn_id,
+            })).await {
+                Ok(raw) => match serde_json::from_value::<RepairResult>(raw) {
+                    Ok(r) => {
+                        if let Some(code) = &r.fail_code {
+                            tracing::warn!(bot_guid, fail_code = %code, "vendor_trip: repair soft-fail");
+                        }
+                        repair_copper = r.copper_spent;
+                    }
+                    Err(e) => tracing::warn!(bot_guid, error = %e, "vendor_trip: repair shape"),
+                },
+                Err(e) => tracing::warn!(bot_guid, error = %e, "vendor_trip: repair errored"),
+            }
+        }
+    }
+    if bot_is_dead(client, bot_guid).await { return VendorTripOutcome::BotDead; }
+
+    // free_slots_after: best-effort observability (spec §4 step 6).
+    let free_after = read_bags(client, bot_guid).await.map(|s| s.free_slots).ok();
+
+    // Return leg — best-effort; Scanning recenters via Wandering on failure (spec §5).
+    let a = &goal.anchor_point;
+    if let Err(e) = crate::nav::walk_to(client, bot_guid,
+        crate::nav::Dest { x: a.x, y: a.y, z: a.z }).await
+    {
+        tracing::warn!(bot_guid, error = %e, "vendor_trip: return nav failed");
+    }
+    if bot_is_dead(client, bot_guid).await { return VendorTripOutcome::BotDead; }
+
+    tracing::info!(bot_guid, sold_count, copper_gained, repair_copper_spent = repair_copper,
+        free_slots_after = ?free_after, "vendor_trip_result");
+    VendorTripOutcome::Done
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,5 +383,121 @@ mod tests {
     fn triggered_on_grey_count() {
         assert!(BagSummary { free_slots: 16, grey_count: 8 }.triggered());
         assert!(!BagSummary { free_slots: 16, grey_count: 7 }.triggered());
+    }
+
+    /// Stateful mock for full trips: tracks call order + last move_path endpoint
+    /// so arrival polls succeed for BOTH legs (vendor out, anchor back).
+    fn trip_mock_state() -> (std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+                             std::sync::Arc<std::sync::Mutex<(f64, f64, f64)>>) {
+        (std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+         std::sync::Arc::new(std::sync::Mutex::new((0.0, 0.0, 0.0))))
+    }
+
+    fn trip_handler(
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        pos: std::sync::Arc<std::sync::Mutex<(f64, f64, f64)>>,
+        hp_pct: u32,
+        sell_result: serde_json::Value,
+    ) -> impl Fn(String, serde_json::Value) -> serde_json::Value + Send + Sync + 'static {
+        move |name: String, args: serde_json::Value| {
+            calls.lock().unwrap().push(name.clone());
+            match name.as_str() {
+                "nav.find_path" => json!({"path_type": 1i64, "points": [
+                    {"x": args["dest_x"], "y": args["dest_y"], "z": args["dest_z"]}]}),
+                "bot.move_path" => {
+                    let p = args["points"][0].clone();
+                    *pos.lock().unwrap() = (p["x"].as_f64().unwrap(),
+                                            p["y"].as_f64().unwrap(),
+                                            p["z"].as_f64().unwrap());
+                    json!({"launched": true, "duration_ms": 0,
+                           "final": {"x": p["x"], "y": p["y"], "z": p["z"]}})
+                }
+                "obs.get_position" => {
+                    let (x, y, z) = *pos.lock().unwrap();
+                    json!({"x": x, "y": y, "z": z, "map_id": 1, "zone_id": 1,
+                           "area_id": 1, "orientation": 0.0})
+                }
+                "obs.get_state" => json!({"self": {"level": 22, "hp_pct": hp_pct}}),
+                "bot.vendor_sell" => sell_result.clone(),
+                "bot.repair" => json!({"copper_spent": 123u64}),
+                "obs.get_inventory" => json!({"equipped": [], "bags": [], "nested_bags": []}),
+                other => panic!("unexpected tool {other}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn vendor_trip_happy_path_sells_then_repairs_then_returns() {
+        let (calls, pos) = trip_mock_state();
+        let base = spawn_mock(trip_handler(calls.clone(), pos, 100,
+            json!({"sold_count": 9u32, "copper_gained": 1234u64}))).await;
+        let out = run_vendor_trip(&client(&base), 1114, &goal_with_vendor(), &vendor(),
+                                  BagSummary { free_slots: 0, grey_count: 10 }).await;
+        assert_eq!(out, VendorTripOutcome::Done);
+        let seq = calls.lock().unwrap().clone();
+        let idx = |t: &str| seq.iter().position(|c| c == t)
+            .unwrap_or_else(|| panic!("{t} not called: {seq:?}"));
+        assert!(idx("nav.find_path") < idx("bot.vendor_sell"), "walk before sell: {seq:?}");
+        assert!(idx("bot.vendor_sell") < idx("bot.repair"), "sell before repair: {seq:?}");
+        assert!(idx("bot.repair") < seq.iter().rposition(|c| c == "nav.find_path").unwrap(),
+                "repair before the return leg: {seq:?}");
+    }
+
+    #[tokio::test]
+    async fn vendor_trip_skips_repair_when_vendor_cannot() {
+        let (calls, pos) = trip_mock_state();
+        let base = spawn_mock(trip_handler(calls.clone(), pos, 100,
+            json!({"sold_count": 9u32, "copper_gained": 1234u64}))).await;
+        let mut v = vendor();
+        v.can_repair = false;
+        let out = run_vendor_trip(&client(&base), 1114, &goal_with_vendor(), &v,
+                                  BagSummary { free_slots: 0, grey_count: 10 }).await;
+        assert_eq!(out, VendorTripOutcome::Done);
+        assert!(!calls.lock().unwrap().contains(&"bot.repair".to_string()));
+    }
+
+    #[tokio::test]
+    async fn vendor_trip_soft_fail_still_repairs_and_returns() {
+        // no_vendor on sell: repair is an independent gate (spec §5) — still attempted.
+        let (calls, pos) = trip_mock_state();
+        let base = spawn_mock(trip_handler(calls.clone(), pos, 100,
+            json!({"sold_count": 0u32, "copper_gained": 0u64, "fail_code": "no_vendor"}))).await;
+        let out = run_vendor_trip(&client(&base), 1114, &goal_with_vendor(), &vendor(),
+                                  BagSummary { free_slots: 0, grey_count: 10 }).await;
+        assert_eq!(out, VendorTripOutcome::Done);
+        assert!(calls.lock().unwrap().contains(&"bot.repair".to_string()));
+    }
+
+    #[tokio::test]
+    async fn vendor_trip_outbound_nav_failure_skips_verbs() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let c2 = calls.clone();
+        let base = spawn_mock(move |name, _| {
+            c2.lock().unwrap().push(name.clone());
+            match name.as_str() {
+                "nav.find_path" => json!({"path_type": 8i64, "points": []}), // NOPATH
+                "obs.get_state" => json!({"self": {"level": 22, "hp_pct": 100}}),
+                "obs.get_inventory" => json!({"equipped": [], "bags": [], "nested_bags": []}),
+                other => panic!("unexpected tool {other} after NOPATH"),
+            }
+        }).await;
+        let out = run_vendor_trip(&client(&base), 1114, &goal_with_vendor(), &vendor(),
+                                  BagSummary { free_slots: 0, grey_count: 10 }).await;
+        assert_eq!(out, VendorTripOutcome::Done, "nav failure is non-terminal (spec §5)");
+        let seq = calls.lock().unwrap().clone();
+        assert!(!seq.contains(&"bot.vendor_sell".to_string()), "no sell after NOPATH: {seq:?}");
+        assert!(!seq.contains(&"bot.repair".to_string()), "no repair after NOPATH: {seq:?}");
+    }
+
+    #[tokio::test]
+    async fn vendor_trip_dead_after_outbound_aborts_to_recovery() {
+        let (calls, pos) = trip_mock_state();
+        let base = spawn_mock(trip_handler(calls.clone(), pos, 0, // hp 0 at every checkpoint
+            json!({"sold_count": 0u32, "copper_gained": 0u64}))).await;
+        let out = run_vendor_trip(&client(&base), 1114, &goal_with_vendor(), &vendor(),
+                                  BagSummary { free_slots: 0, grey_count: 10 }).await;
+        assert_eq!(out, VendorTripOutcome::BotDead);
+        assert!(!calls.lock().unwrap().contains(&"bot.vendor_sell".to_string()),
+                "dead bot must not sell");
     }
 }
