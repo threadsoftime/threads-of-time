@@ -279,7 +279,7 @@ pub enum GrindState {
     /// Bot died — release for native self-revive, teleport back, re-claim.
     Recovering,
     /// Bags hit a trigger — run the vendor trip, then rescan (slice 2.4).
-    Vendoring { bags: crate::economy::BagSummary },
+    Vendoring { bags: crate::economy::BagSummary, vendor: tot_goal_contract::VendorInfo },
     Idle,
     Done,
 }
@@ -640,14 +640,19 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
                 // Rest-threshold check BEFORE completion check (design §7).
                 if should_rest(hp_pct, mana_pct, goal.rest_threshold) {
                     GrindState::Resting
-                } else if let Some(bags) = crate::economy::economy_due(
-                    client, bot_guid, goal, kills,
-                    &mut kills_at_last_econ_check, last_vendor_trip, econ_cooldown,
-                ).await {
+                } else if let (Some(bags), Some(vendor)) = (
+                    crate::economy::economy_due(
+                        client, bot_guid, goal, kills,
+                        &mut kills_at_last_econ_check, last_vendor_trip, econ_cooldown,
+                    ).await,
+                    goal.vendor,
+                ) {
                     // Economy interrupt BEFORE the completion check (spec §4) — a
                     // level-up on the trigger kill still vendors first; one extra
-                    // grind pass after the trip is accepted.
-                    GrindState::Vendoring { bags }
+                    // grind pass after the trip is accepted. economy_due only fires
+                    // when goal.vendor is Some; carrying it in the variant keeps the
+                    // Vendoring arm panic-free.
+                    GrindState::Vendoring { bags, vendor }
                 } else if lvl >= goal.to_level
                     || goal.kill_count.map(|k| kills >= k).unwrap_or(false)
                 {
@@ -726,11 +731,9 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
                     }
                 }
             }
-            GrindState::Vendoring { bags } => {
-                // economy_due only fires when goal.vendor is Some.
-                let vendor = goal.vendor.as_ref().expect("Vendoring requires goal.vendor");
+            GrindState::Vendoring { bags, vendor } => {
                 let outcome =
-                    crate::economy::run_vendor_trip(client, bot_guid, goal, vendor, bags).await;
+                    crate::economy::run_vendor_trip(client, bot_guid, goal, &vendor, bags).await;
                 // Cooldown runs from trip END, success or not (spec §3).
                 last_vendor_trip = Some(std::time::Instant::now());
                 match outcome {
