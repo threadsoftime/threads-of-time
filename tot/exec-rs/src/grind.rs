@@ -346,7 +346,7 @@ pub(crate) async fn read_self(client: &HarnessClient, bot_guid: u64) -> Result<S
 /// Obtain the bot's current world-space position via `obs.get_position`.
 /// On harness error, propagates as `GrindError::Harness` — never falls back to a
 /// made-up position (a (0,0,0) fallback would interpolate destinations from map origin).
-async fn bot_world_pos(client: &HarnessClient, bot_guid: u64) -> Result<(f64, f64, f64), GrindError> {
+pub(crate) async fn bot_world_pos(client: &HarnessClient, bot_guid: u64) -> Result<(f64, f64, f64), GrindError> {
     let raw = client
         .call("obs.get_position", serde_json::json!({ "target_guid": bot_guid as i64 }))
         .await?;
