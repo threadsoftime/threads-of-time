@@ -132,6 +132,7 @@ pub(crate) async fn recover_from_death(
         tracing::warn!(bot_guid, error = %e, "recovery: release failed");
     }
     let mut alive = false;
+    let mut polls_used: u32 = 0;
     for poll in 0..RECOVERY_MAX_POLLS {
         tokio::time::sleep(Duration::from_millis(RECOVERY_POLL_MS)).await;
         if poll == RECOVERY_MAX_POLLS / 2 {
@@ -141,7 +142,7 @@ pub(crate) async fn recover_from_death(
             }
         }
         match read_self(client, bot_guid).await {
-            Ok(s) if s.hp_pct > 0 => { alive = true; break; }
+            Ok(s) if s.hp_pct > 0 => { alive = true; polls_used = poll + 1; break; }
             Ok(_) => {}
             Err(e) => tracing::warn!(bot_guid, error = %e, "recovery: state poll failed"),
         }
@@ -162,7 +163,14 @@ pub(crate) async fn recover_from_death(
     if let Err(e) = crate::own::set_ai_owned(client, bot_guid, true).await {
         tracing::warn!(bot_guid, error = %e, "recovery: re-claim failed");
     }
-    if alive { RecoveryOutcome::Recovered } else { RecoveryOutcome::StillDead }
+    if alive {
+        // Obs rider (2.4 spec §8): successful recovery was warn!-silent — make it
+        // provable from the journal (the audit log stays the secondary surface).
+        tracing::info!(bot_guid, polls_used, "recovery_succeeded: revived, teleported to anchor, re-claimed");
+        RecoveryOutcome::Recovered
+    } else {
+        RecoveryOutcome::StillDead
+    }
 }
 
 /// Deterministic pseudo-sample in [min,max] from a rolling seed (avoids a rng dep and
