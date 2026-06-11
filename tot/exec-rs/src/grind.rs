@@ -791,6 +791,7 @@ mod tests {
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
             to_level: 6, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
         }
     }
 
@@ -937,6 +938,7 @@ mod tests {
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
             to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
         };
         let status = run_grind(&client(&base), 1003, &goal).await;
         assert!(matches!(status, GoalStatus::Completed { .. }), "got {status:?}");
@@ -1197,6 +1199,7 @@ mod tests {
             kill_count: Some(1),
             rest_threshold: 0.35,
             rotation_id: None,
+            vendor: None,
         };
         let status = run_grind(&client(&base), 1003, &goal).await;
         // After resting exits hp≥75 → Scanning → no targets → Wandering → Scanning → no targets
@@ -1254,6 +1257,7 @@ mod tests {
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
             to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
         };
         let status = run_grind(&client(&base), 1003, &goal).await;
         match status {
@@ -1321,6 +1325,7 @@ mod tests {
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
             to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
         };
 
         let status = run_grind(&client(&base), 1003, &goal).await;
@@ -1378,6 +1383,7 @@ mod tests {
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
             to_level: 10, kill_count: None, rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
         };
         let target = Target { guid: 222, x: 20.0, y: 0.0, z: 0.0, distance: 20.0 };
         let rotation = crate::rotations::build("mage_frost_b1").unwrap();
@@ -1489,6 +1495,7 @@ mod tests {
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
             to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
         };
         let out = recover_from_death(&client(&base), 1003, &goal).await;
         assert!(matches!(out, RecoveryOutcome::Recovered));
@@ -1525,6 +1532,7 @@ mod tests {
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
             to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
         };
         let out = recover_from_death(&client(&base), 1003, &goal).await;
         assert!(matches!(out, RecoveryOutcome::StillDead));
@@ -1573,6 +1581,7 @@ mod tests {
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
             to_level: 99, kill_count: Some(10), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
         };
         let status = run_grind(&client(&base), 1003, &goal).await;
         assert!(
@@ -1629,6 +1638,7 @@ mod tests {
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
             to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
         };
         let status = run_grind(&client(&base), 1003, &goal).await;
         assert!(matches!(status, GoalStatus::Completed { .. }), "got {status:?}");

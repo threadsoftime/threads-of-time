@@ -37,6 +37,7 @@ async fn main() {
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 2, max_level: 10, creature_type: Some("humanoid".into()) },
             to_level: 7, kill_count: None, rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
         }),
     };
     if let Err(e) = sink.set_goal(bot_guid, goal).await {

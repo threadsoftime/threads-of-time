@@ -138,6 +138,7 @@ mod tests {
             wander_radius: 90.0, max_search_radius: 35.0,
             mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
             to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
         }
     }
 
