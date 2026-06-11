@@ -576,6 +576,21 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
         }
     }
 
+    // Goal-entry economy check (spec round 4): death-loop bots re-emit goals before
+    // the kill stride can fire — but bag state carries across goal lives. One poll
+    // at entry catches accumulated greys; the stride handles mid-goal accumulation.
+    if !matches!(state, GrindState::Recovering) {
+        if let Some(vendor) = goal.vendor {
+            match crate::economy::read_bags(client, bot_guid).await {
+                Ok(bags) if bags.triggered() => {
+                    state = GrindState::Vendoring { bags, vendor };
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(bot_guid, error = %e, "entry economy check failed — skipping"),
+            }
+        }
+    }
+
     loop {
         state = match state {
             GrindState::Scanning => match scan_for_target(client, bot_guid, goal).await {
@@ -1747,5 +1762,105 @@ mod tests {
         let sells = seq.iter().filter(|c| *c == "bot.vendor_sell").count();
         assert_eq!(sells, 1, "exactly one trip (stride/cooldown suppress #2): {seq:?}");
         assert!(seq.contains(&"bot.repair".to_string()));
+    }
+
+    /// Goal-entry economy check (spec round 4): bags are triggered BEFORE any kill fires.
+    /// Death-loop bots re-emit goals before the 5-kill stride can fire, but bag state
+    /// carries across goal lives — the entry poll catches accumulated greys.
+    ///
+    /// Sequence: entry-check → Vendoring (trip) → Scanning → kill → Looting →
+    /// HealthCheck (stride blocks: kills=1 < 5; cooldown blocks: trip just ran) →
+    /// completion check (kills=1 >= kill_count=1) → Completed.
+    ///
+    /// Asserts: GoalStatus::Completed; `bot.vendor_sell` called EXACTLY once;
+    /// first `bot.vendor_sell` precedes first `bot.attack` in the call log (entry trip
+    /// fires before combat).
+    #[tokio::test]
+    async fn run_grind_entry_check_vendors_before_first_kill() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let attacks = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+        let move_target = std::sync::Arc::new(std::sync::Mutex::new((0.0f64, 0.0f64, 0.0f64)));
+        let (c2, a2, m2) = (calls.clone(), attacks.clone(), move_target.clone());
+
+        let base = spawn_mock(move |name, args| {
+            c2.lock().unwrap().push(name.clone());
+            match name.as_str() {
+                // 16 grey backpack items → triggered() == true (grey_count=16 >= GREY_COUNT_TRIGGER=8)
+                "obs.get_inventory" => json!({
+                    "equipped": [],
+                    "bags": (0u32..16).map(|s| json!({
+                        "quality": 0, "slot": s, "item_entry": 750,
+                        "name": "Grey Item", "itemset": 0, "count": 1, "guid": s
+                    })).collect::<Vec<_>>(),
+                    "nested_bags": []
+                }),
+                "obs.get_nearby_hostiles" => {
+                    // Guid bumps on each attack so fight()'s liveness poll misses the old guid → TargetDead.
+                    let k = *a2.lock().unwrap() as u64;
+                    json!({"hostiles": [{"guid": 200 + k, "name": "Wolf", "level": 5,
+                        "hp_pct": 100.0, "distance": 3.0, "is_alive": true,
+                        "x": 3.0, "y": 0.0, "z": 0.0}]})
+                }
+                "bot.attack" => { *a2.lock().unwrap() += 1; json!({"attacking": true}) }
+                "obs.get_state" => json!({"self": {"level": 5, "hp_pct": 90}}),
+                "obs.get_auras" => json!({"auras": []}),
+                "obs.get_lootable_corpses" => json!({"corpses": []}),
+                "nav.find_path" => json!({"path_type": 1i64, "points": [
+                    {"x": 0.0, "y": 0.0, "z": 0.0},
+                    {"x": args["dest_x"], "y": args["dest_y"], "z": args["dest_z"]}
+                ]}),
+                "bot.move_path" => {
+                    let p = args["points"].as_array().unwrap().last().unwrap().clone();
+                    *m2.lock().unwrap() = (p["x"].as_f64().unwrap(),
+                                          p["y"].as_f64().unwrap(), p["z"].as_f64().unwrap());
+                    json!({"launched": true, "duration_ms": 0,
+                           "final": {"x": p["x"], "y": p["y"], "z": p["z"]}})
+                }
+                "obs.get_position" => {
+                    let (x, y, z) = *m2.lock().unwrap();
+                    json!({"x": x, "y": y, "z": z, "map_id": 0, "zone_id": 1,
+                           "area_id": 1, "orientation": 0.0})
+                }
+                "bot.vendor_sell" => json!({"sold_count": 16u32, "copper_gained": 320u64}),
+                "bot.repair" => json!({"copper_spent": 0u64}),
+                other => panic!("unexpected tool {other}"),
+            }
+        }).await;
+
+        let goal = GrindGoal {
+            anchor_point: WorldPos { map_id: 0, x: 0.0, y: 0.0, z: 0.0 },
+            wander_radius: 90.0, max_search_radius: 35.0,
+            mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
+            to_level: 99,
+            kill_count: Some(1),
+            rest_threshold: 0.35,
+            rotation_id: None,
+            vendor: Some(VendorInfo {
+                spawn_id: 40002,
+                pos: WorldPos { map_id: 0, x: 50.0, y: 0.0, z: 0.0 },
+                can_repair: true,
+            }),
+        };
+
+        let status = run_grind(&client(&base), 1173, &goal).await;
+        assert!(matches!(status, GoalStatus::Completed { .. }), "expected Completed, got {status:?}");
+
+        let seq = calls.lock().unwrap().clone();
+
+        // Exactly one vendor_sell — entry trip fires; stride (kills=1 < 5) + cooldown
+        // together prevent a second trip at HealthCheck.
+        let sells = seq.iter().filter(|c| *c == "bot.vendor_sell").count();
+        assert_eq!(sells, 1, "exactly one vendor_sell: {seq:?}");
+
+        // The FIRST vendor_sell must appear BEFORE the FIRST bot.attack in the call log —
+        // the entry economy check fires before combat starts.
+        let first_sell = seq.iter().position(|c| c == "bot.vendor_sell")
+            .expect("vendor_sell must be in call log");
+        let first_attack = seq.iter().position(|c| c == "bot.attack")
+            .expect("bot.attack must be in call log");
+        assert!(
+            first_sell < first_attack,
+            "entry vendor trip must precede first attack; first_sell={first_sell}, first_attack={first_attack}, seq={seq:?}"
+        );
     }
 }
