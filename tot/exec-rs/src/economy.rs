@@ -57,14 +57,14 @@ impl BagSummary {
 
 /// Pure derivation per spec §3: free = (16 − backpack items) + Σ(bag capacity − bag
 /// items); greys = quality==0 across backpack + nested bags. Equipped NEVER counts.
-pub(crate) fn summarize_inventory(raw: &serde_json::Value) -> Result<BagSummary, GrindError> {
-    let inv: Inventory = serde_json::from_value(raw.clone())
+pub(crate) fn summarize_inventory(raw: serde_json::Value) -> Result<BagSummary, GrindError> {
+    let inv: Inventory = serde_json::from_value(raw)
         .map_err(|e| GrindError::Shape(format!("obs.get_inventory: {e}")))?;
     let mut free = BACKPACK_SLOTS.saturating_sub(inv.bags.len() as u32);
     let mut greys = inv.bags.iter().filter(|i| i.quality == 0).count() as u32;
     for b in &inv.nested_bags {
-        free += b.capacity.saturating_sub(b.contents.len() as u32);
-        greys += b.contents.iter().filter(|i| i.quality == 0).count() as u32;
+        free = free.saturating_add(b.capacity.saturating_sub(b.contents.len() as u32));
+        greys = greys.saturating_add(b.contents.iter().filter(|i| i.quality == 0).count() as u32);
     }
     Ok(BagSummary { free_slots: free, grey_count: greys })
 }
@@ -75,7 +75,7 @@ pub(crate) async fn read_bags(client: &HarnessClient, bot_guid: u64) -> Result<B
     let raw = client
         .call("obs.get_inventory", serde_json::json!({ "target_guid": bot_guid as i64 }))
         .await?;
-    summarize_inventory(&raw)
+    summarize_inventory(raw)
 }
 
 #[cfg(test)]
@@ -103,14 +103,14 @@ mod tests {
 
     #[test]
     fn summarize_counts_free_slots_and_greys() {
-        let s = summarize_inventory(&busy_inventory()).unwrap();
+        let s = summarize_inventory(busy_inventory()).unwrap();
         assert_eq!(s.free_slots, 4, "(16-14) backpack + (6-4) nested");
         assert_eq!(s.grey_count, 14, "12 backpack + 2 nested; equipped excluded");
     }
 
     #[test]
     fn empty_inventory_is_untriggered() {
-        let s = summarize_inventory(&json!({"equipped": [], "bags": [], "nested_bags": []})).unwrap();
+        let s = summarize_inventory(json!({"equipped": [], "bags": [], "nested_bags": []})).unwrap();
         assert_eq!(s.free_slots, 16);
         assert_eq!(s.grey_count, 0);
         assert!(!s.triggered());
@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn missing_nested_bags_defaults_empty() {
         // Older mocks / minimal responses omit nested_bags — must not be a Shape error.
-        let s = summarize_inventory(&json!({"bags": []})).unwrap();
+        let s = summarize_inventory(json!({"bags": []})).unwrap();
         assert_eq!(s.free_slots, 16);
     }
 
