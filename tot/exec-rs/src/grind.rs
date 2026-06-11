@@ -300,11 +300,11 @@ const REST_POLL_INTERVAL_MS: u64 = 2000;
 const REST_MAX_POLLS: u32 = 30;
 
 #[derive(Debug, Deserialize)]
-struct SelfState {
-    level: u32,
+pub(crate) struct SelfState {
+    pub(crate) level: u32,
     /// Health as an integer percentage 0–100 (design §6.1, pre-flight note).
     #[serde(default)]
-    hp_pct: u32,
+    pub(crate) hp_pct: u32,
     /// Present after the 2.2 digest extension; None against older worldservers.
     #[serde(default)]
     mana_pct: Option<u32>,
@@ -329,7 +329,7 @@ async fn read_self_digest(client: &HarnessClient, bot_guid: u64) -> Result<State
 }
 
 /// Convenience wrapper: read the bot's own SelfState.
-async fn read_self(client: &HarnessClient, bot_guid: u64) -> Result<SelfState, GrindError> {
+pub(crate) async fn read_self(client: &HarnessClient, bot_guid: u64) -> Result<SelfState, GrindError> {
     Ok(read_self_digest(client, bot_guid).await?.self_)
 }
 

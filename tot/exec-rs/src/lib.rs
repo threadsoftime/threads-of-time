@@ -16,3 +16,4 @@ pub mod supervisor;
 pub mod combat;
 pub mod rotations;
 pub mod loot;
+pub mod economy;
