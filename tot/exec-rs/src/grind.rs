@@ -169,7 +169,7 @@ pub(crate) async fn recover_from_death(
         match is_mounted(client, bot_guid).await {
             Ok(true) => {
                 tracing::warn!(bot_guid, "mount_check: mounted after recovery re-claim — dismount cycle");
-                if matches!(dismount_via_native(client, bot_guid).await, DismountOutcome::StillMounted) {
+                if matches!(dismount(client, bot_guid).await, DismountOutcome::StillMounted) {
                     // No terminal here — the cast-spin backoff bounds the worst case.
                     tracing::warn!(bot_guid, "mount_check: still mounted post-recovery; spin backoff will bound it");
                 }
@@ -586,8 +586,45 @@ const DISMOUNT_MAX_POLLS: u32 = 36;
 #[derive(Debug)]
 pub(crate) enum DismountOutcome { Dismounted, StillMounted }
 
-/// Finding #12: no dismount verb exists (bot.dismount = reconciliation-#9 rider),
-/// so release to the native AI, poll the mount aura away, re-claim.
+/// Finding #12 + M3 #9 rider: attempt `bot.dismount` (instant RPC, requires claim).
+///
+/// On success: returns `Dismounted` immediately without releasing ownership.
+/// On any error (tool unknown, bot not found, not externally owned, harness
+/// unavailable): falls back to `dismount_via_native` (release→poll→re-claim).
+///
+/// Graceful degradation is mandatory: the live daemon may not yet have
+/// `bot.dismount` registered (e.g. after a daemon rollback). In that case
+/// the harness returns an error and the native path keeps behaviour intact.
+pub(crate) async fn dismount(client: &HarnessClient, bot_guid: u64) -> DismountOutcome {
+    let args = serde_json::json!({ "bot_guid": bot_guid as i64 });
+    match client.call("bot.dismount", args).await {
+        Ok(result) => {
+            // bot.dismount succeeded — bot is now unmounted, still claimed.
+            let was_mounted = result
+                .get("was_mounted")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            tracing::info!(bot_guid, was_mounted, "dismount_direct: bot.dismount ok");
+            DismountOutcome::Dismounted
+        }
+        Err(e) => {
+            // Graceful degradation: bot.dismount unavailable or errored.
+            // Fall back to the release/poll/re-claim native dance.
+            tracing::warn!(
+                bot_guid,
+                error = %e,
+                "dismount_direct: bot.dismount failed — falling back to native dismount"
+            );
+            dismount_via_native(client, bot_guid).await
+        }
+    }
+}
+
+/// Finding #12 (fallback): no direct dismount verb — release to native AI,
+/// poll the mount aura away, re-claim.
+///
+/// Kept as the fallback for `dismount()` when bot.dismount is unavailable
+/// (e.g. daemon rollback to a version without the M3 #9 rider).
 ///
 /// INVARIANT: re-claims ownership on EVERY exit path (same as recover_from_death).
 pub(crate) async fn dismount_via_native(client: &HarnessClient, bot_guid: u64) -> DismountOutcome {
@@ -654,7 +691,7 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
         && is_mounted(client, bot_guid).await.unwrap_or(false)
     {
         tracing::warn!(bot_guid, "mount_check: mounted at goal entry — dismount cycle");
-        if matches!(dismount_via_native(client, bot_guid).await, DismountOutcome::StillMounted) {
+        if matches!(dismount(client, bot_guid).await, DismountOutcome::StillMounted) {
             return GoalStatus::Blocked {
                 reason: tot_goal_contract::BlockedReason::Other,
                 detail: Some("mount_wedge: still mounted after dismount budget".into()),
@@ -732,11 +769,12 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
                 Ok(FightOutcome::TargetDead) => GrindState::PostKillPause { target },
                 Ok(FightOutcome::BotDied) => GrindState::Recovering,
                 Ok(FightOutcome::CastSpin { detail }) => {
-                    // Finding #12: probe-don't-guess. Mounted → native dismount cycle;
+                    // Finding #12 + M3 #9: probe-don't-guess. Mounted → dismount
+                    // (tries bot.dismount direct first; falls back to native cycle);
                     // anything else → bounded Blocked retry (300s ledger cooldown),
                     // never an in-place spin.
                     if is_mounted(client, bot_guid).await.unwrap_or(false) {
-                        match dismount_via_native(client, bot_guid).await {
+                        match dismount(client, bot_guid).await {
                             DismountOutcome::Dismounted => {
                                 if let Err(e) = ensure_buffs(client, bot_guid, &rotation).await {
                                     tracing::warn!(error = %e, "post-dismount buff pass failed");
@@ -1817,6 +1855,83 @@ mod tests {
         let out = dismount_via_native(&client(&base), 1323).await;
         assert!(matches!(out, DismountOutcome::StillMounted));
         assert!(reclaimed.load(std::sync::atomic::Ordering::SeqCst), "must re-claim on every exit path");
+    }
+
+    // ── M3 #9 rider: dismount() prefers bot.dismount with native fallback ────────
+
+    /// dismount(): when bot.dismount is available and succeeds, returns Dismounted
+    /// immediately WITHOUT calling bot.set_ai_enabled (no release/re-claim dance).
+    #[tokio::test]
+    async fn dismount_prefers_direct_when_available() {
+        let set_ai_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let s2 = set_ai_called.clone();
+        let base = spawn_mock(move |name, args| match name.as_str() {
+            "bot.dismount" => {
+                assert_eq!(args["bot_guid"], 1323_i64, "bot_guid forwarded correctly");
+                json!({"dismounted": true, "was_mounted": true})
+            }
+            "bot.set_ai_enabled" => {
+                s2.store(true, std::sync::atomic::Ordering::SeqCst);
+                json!({"owned": true, "reset": true})
+            }
+            other => panic!("unexpected tool {other} in dismount_prefers_direct"),
+        }).await;
+        let out = dismount(&client(&base), 1323).await;
+        assert!(matches!(out, DismountOutcome::Dismounted));
+        assert!(
+            !set_ai_called.load(std::sync::atomic::Ordering::SeqCst),
+            "bot.set_ai_enabled must NOT be called when bot.dismount succeeds"
+        );
+    }
+
+    /// dismount(): when bot.dismount is unavailable (unknown_tool error),
+    /// falls back to the native release/poll/re-claim dance.
+    #[tokio::test]
+    async fn dismount_falls_back_to_native_on_error() {
+        let native_reclaimed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let r2 = native_reclaimed.clone();
+        let aura_polls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let a2 = aura_polls.clone();
+        let base = spawn_mock(move |name, args| match name.as_str() {
+            // bot.dismount is unavailable (simulated via ok:false)
+            "bot.dismount" => {
+                // Return an error body — the mock wraps everything in ok:true,result
+                // but the client checks the envelope. We simulate an unknown-tool
+                // by having the mock server itself panic so the outer mock returns it.
+                // Instead: just have it return an aura with still-mounted=true
+                // so we know the fallback polled. Actually, the mock always wraps
+                // in ok:true, so we can't simulate ok:false this way.
+                // Use a non-zero mounted aura to trigger fallback-but-native-dismounts.
+                // Simpler: test via the error path by not registering bot.dismount
+                // and letting the default branch fire. Use a flag to distinguish.
+                panic!("bot.dismount: unknown_tool")
+            }
+            "bot.set_ai_enabled" => {
+                let enabled = args["enabled"].as_bool().unwrap();
+                if !enabled { r2.store(true, std::sync::atomic::Ordering::SeqCst); }
+                json!({"owned": !enabled, "reset": true})
+            }
+            "obs.get_auras" => {
+                let polls = a2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // dismount after 2 polls
+                if polls < 2 {
+                    json!({"auras":[{"spell_id":17453,
+                            "effect_amounts":[{"amount":0,"aura_type":78,"index":0}]}]})
+                } else {
+                    json!({"auras":[]})
+                }
+            }
+            other => panic!("unexpected tool {other}"),
+        }).await;
+
+        // The mock panics on bot.dismount, which the axum handler recovers from
+        // as a 500. The client sees a harness error → falls back to native.
+        let out = dismount(&client(&base), 1323).await;
+        assert!(matches!(out, DismountOutcome::Dismounted), "fallback should have dismounted via native");
+        assert!(
+            native_reclaimed.load(std::sync::atomic::Ordering::SeqCst),
+            "native fallback must re-claim ownership"
+        );
     }
 
     /// read_self correctly parses the new v2 SelfState fields (mana_pct / power_pct / combo_points).
