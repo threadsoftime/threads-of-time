@@ -12,6 +12,7 @@
 pub mod nav;
 pub mod own;
 pub mod grind;
+pub mod quest;
 pub mod supervisor;
 pub mod combat;
 pub mod rotations;

@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use tot_goal_contract::{Goal, GoalEnvelope, GoalReceiver, GoalStatus, StatusSender};
 use tot_harness_client::HarnessClient;
 
-use crate::{grind, own};
+use crate::{grind, own, quest};
 
 /// Owns the running per-bot tasks.
 ///
@@ -101,8 +101,9 @@ async fn dispose_goal(harness: &HarnessClient, bot_guid: u64, env: GoalEnvelope)
     }
     match env.goal {
         Goal::Grind(g) => grind::run_grind(harness, bot_guid, &g).await,
+        Goal::Quest(q) => quest::run_quest(harness, bot_guid, &q).await,
         // `Goal` is #[non_exhaustive]; a wildcard is REQUIRED to match it from another
-        // crate. M2 variants land here until exec implements them.
+        // crate. Future variants land here until exec implements them.
         _ => GoalStatus::Blocked {
             reason: tot_goal_contract::BlockedReason::UnknownGoalVariant,
             detail: Some("exec-rs does not implement this Goal variant yet".into()),
