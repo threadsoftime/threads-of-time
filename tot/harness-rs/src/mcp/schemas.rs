@@ -886,11 +886,123 @@ pub struct BotMovePathArgs {
     pub bot_guid: i64,
     /// Ordered waypoints (≥2); typically the `points` from a preceding `nav.find_path`.
     pub points: Vec<PathPointArg>,
+    /// If true, use FORCED_MOVEMENT_RUN (run speed).
+    /// If false or omitted, use FORCED_MOVEMENT_WALK (default).
+    /// Omit for backward-compat default (walk).
+    #[serde(default)]
+    pub run: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotMovePathWrapper {
     pub args: BotMovePathArgs,
+}
+
+// ── bot.dismount ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotDismountArgs {
+    /// Low-32 GUID of the bot to dismount.
+    /// Idempotent: if the bot is not mounted, returns dismounted:true immediately.
+    /// Requires the bot to be claimed (externally owned).
+    pub bot_guid: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotDismountWrapper {
+    pub args: BotDismountArgs,
+}
+
+// ── bot.accept_quest ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotAcceptQuestArgs {
+    /// Low-32 GUID of the bot accepting the quest.
+    pub bot_guid: i64,
+    /// Quest template ID (quest_template.ID in world DB).
+    pub quest_id: i64,
+    /// Packed raw uint64 ObjectGuid of the NPC or GO quest giver.
+    /// Obtained from obs.get_nearby_hostiles/obs.get_lootable_corpses guid field
+    /// or from a DB probe (creature/gameobject table spawn → GetRawValue()).
+    /// Same format as bot.loot target_guid and bot.attack target_guid.
+    /// MUST be u64: a packed NPC GUID (HighGuid bits set) exceeds i64::MAX.
+    pub quest_giver_guid: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotAcceptQuestWrapper {
+    pub args: BotAcceptQuestArgs,
+}
+
+// ── bot.turnin_quest ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotTurninQuestArgs {
+    /// Low-32 GUID of the bot turning in the quest.
+    pub bot_guid: i64,
+    /// Quest template ID.
+    pub quest_id: i64,
+    /// Packed raw uint64 ObjectGuid of the NPC or GO quest ender.
+    /// Same format as quest_giver_guid in bot.accept_quest.
+    /// MUST be u64: packed GUIDs exceed i64::MAX.
+    pub quest_giver_guid: u64,
+    /// Zero-based index into the quest's reward_choice_items list.
+    /// Omit or pass 0 for quests with no choice or to pick index 0.
+    #[serde(default)]
+    pub reward_choice: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotTurninQuestWrapper {
+    pub args: BotTurninQuestArgs,
+}
+
+// ── bot.use_item ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotUseItemArgs {
+    /// Low-32 GUID of the bot using the item.
+    pub bot_guid: i64,
+    /// Item template ID. Bot must have at least one in bags or equipped.
+    pub item_entry: i64,
+    /// Packed raw uint64 ObjectGuid of the target. Omit to use on self (0).
+    /// Phase-1: targeted path returns fail_code:'targeted_phase2' — implement in phase-2.
+    /// MUST be u64: packed GUIDs exceed i64::MAX.
+    #[serde(default)]
+    pub target_guid: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotUseItemWrapper {
+    pub args: BotUseItemArgs,
+}
+
+// ── bot.interact_object ───────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotInteractObjectArgs {
+    /// Low-32 GUID of the bot interacting with the object.
+    pub bot_guid: i64,
+    /// Packed raw uint64 ObjectGuid of the specific gameobject spawn.
+    /// Preferred when available — unambiguous.
+    /// Mutually exclusive with object_entry (object_guid wins if both given).
+    /// MUST be u64: packed GUIDs exceed i64::MAX.
+    #[serde(default)]
+    pub object_guid: Option<u64>,
+    /// Gameobject template entry ID.
+    /// Adapter finds the nearest spawn of this type within search_range yards.
+    /// Use when the specific spawn GUID is not known.
+    #[serde(default)]
+    pub object_entry: Option<i64>,
+    /// Radius (yards) for object_entry nearest-search. Default 25yd.
+    /// Ignored when object_guid is provided. Hard cap 100yd enforced by adapter.
+    #[serde(default)]
+    pub search_range: Option<f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotInteractObjectWrapper {
+    pub args: BotInteractObjectArgs,
 }
 
 // ── bot.set_ai_enabled ────────────────────────────────────────────────────────
@@ -1074,7 +1186,7 @@ mod tests {
     }
 
     #[test]
-    fn all_58_wrappers_have_args_envelope() {
+    fn all_63_wrappers_have_args_envelope() {
         // gm (7)
         assert!(has_args_envelope(&schema_for!(GmAdditemWrapper)),     "gm.additem");
         assert!(has_args_envelope(&schema_for!(GmEquipAllWrapper)),    "gm.equip_all");
@@ -1083,7 +1195,7 @@ mod tests {
         assert!(has_args_envelope(&schema_for!(GmRunConsoleWrapper)),  "gm.run_console");
         assert!(has_args_envelope(&schema_for!(GmReadConsoleOutputWrapper)), "gm.read_console_output");
         assert!(has_args_envelope(&schema_for!(GmStripGearWrapper)),   "gm.strip_gear");
-        // bot (12)
+        // bot (17)
         assert!(has_args_envelope(&schema_for!(BotSetGoalWrapper)),      "bot.set_goal");
         assert!(has_args_envelope(&schema_for!(BotSetStrategyWrapper)),  "bot.set_strategy");
         assert!(has_args_envelope(&schema_for!(BotGetStrategiesWrapper)),"bot.get_strategies");
@@ -1096,6 +1208,12 @@ mod tests {
         assert!(has_args_envelope(&schema_for!(BotSetRoleWrapper)),      "bot.set_role");
         assert!(has_args_envelope(&schema_for!(BotQueueForDungeonWrapper)),"bot.queue_for_dungeon");
         assert!(has_args_envelope(&schema_for!(BotEnterInstanceWrapper)),"bot.enter_instance");
+        // M3 #9 riders — quest verbs + move (5)
+        assert!(has_args_envelope(&schema_for!(BotDismountWrapper)),       "bot.dismount");
+        assert!(has_args_envelope(&schema_for!(BotAcceptQuestWrapper)),    "bot.accept_quest");
+        assert!(has_args_envelope(&schema_for!(BotTurninQuestWrapper)),    "bot.turnin_quest");
+        assert!(has_args_envelope(&schema_for!(BotUseItemWrapper)),        "bot.use_item");
+        assert!(has_args_envelope(&schema_for!(BotInteractObjectWrapper)), "bot.interact_object");
         // obs (17)
         assert!(has_args_envelope(&schema_for!(ObsPingWrapper)),           "obs.ping");
         assert!(has_args_envelope(&schema_for!(ObsGetStateWrapper)),       "obs.get_state");
@@ -1127,7 +1245,7 @@ mod tests {
         assert!(has_args_envelope(&schema_for!(MemoryDeleteWrapper)), "memory.delete");
         // nav (1)
         assert!(has_args_envelope(&schema_for!(NavFindPathWrapper)), "nav.find_path");
-        // bot.move_path (1) — nested Vec<struct>; Vec<PathPointArg> precedent
+        // bot.move_path (1) — nested Vec<struct>; Vec<PathPointArg> precedent; + optional run
         assert!(has_args_envelope(&schema_for!(BotMovePathWrapper)), "bot.move_path");
         // bot.set_ai_enabled (1) — first bare #[serde(default)] Option<bool> (absent → None)
         assert!(has_args_envelope(&schema_for!(BotSetAiEnabledWrapper)), "bot.set_ai_enabled");
@@ -1184,6 +1302,93 @@ mod tests {
         let w: BotVendorSellWrapper =
             serde_json::from_str(r#"{"args":{"bot_guid":1,"vendor_spawn_id":2}}"#).unwrap();
         assert_eq!(w.args.max_quality, 0, "max_quality must default to 0 (grey only)");
+    }
+
+    // ── M3 #9 riders — schema default/parity tests ───────────────────────────
+
+    /// bot.move_path: run field is optional; absent → None (walk).
+    #[test]
+    fn bot_move_path_run_defaults_to_none() {
+        let w: BotMovePathWrapper = serde_json::from_str(
+            r#"{"args":{"bot_guid":1173,"points":[{"x":1.0,"y":2.0,"z":3.0},{"x":4.0,"y":5.0,"z":6.0}]}}"#,
+        ).unwrap();
+        assert_eq!(w.args.run, None, "absent run must be None (walk)");
+        // explicit false also works
+        let w2: BotMovePathWrapper = serde_json::from_str(
+            r#"{"args":{"bot_guid":1173,"points":[{"x":1.0,"y":2.0,"z":3.0},{"x":4.0,"y":5.0,"z":6.0}],"run":false}}"#,
+        ).unwrap();
+        assert_eq!(w2.args.run, Some(false));
+    }
+
+    /// bot.dismount: bot_guid required; no optional fields.
+    #[test]
+    fn bot_dismount_requires_bot_guid() {
+        let w: BotDismountWrapper =
+            serde_json::from_str(r#"{"args":{"bot_guid":1194}}"#).unwrap();
+        assert_eq!(w.args.bot_guid, 1194);
+        let err = serde_json::from_str::<BotDismountWrapper>(r#"{"args":{}}"#);
+        assert!(err.is_err(), "bot_guid is required");
+    }
+
+    /// bot.accept_quest: quest_giver_guid is u64; packed GUIDs > i64::MAX must work.
+    #[test]
+    fn bot_accept_quest_giver_guid_accepts_packed_u64() {
+        let packed: u64 = 0xF130_0000_0000_0005;
+        assert!(packed > i64::MAX as u64, "test value must exceed i64::MAX");
+        let body = format!(r#"{{"args":{{"bot_guid":1173,"quest_id":26,"quest_giver_guid":{packed}}}}}"#);
+        let w: BotAcceptQuestWrapper = serde_json::from_str(&body)
+            .expect("quest_giver_guid must accept u64 > i64::MAX");
+        assert_eq!(w.args.quest_giver_guid, packed);
+    }
+
+    /// bot.turnin_quest: quest_giver_guid is u64; reward_choice is optional (absent → None).
+    #[test]
+    fn bot_turnin_quest_optional_reward_choice() {
+        let w: BotTurninQuestWrapper = serde_json::from_str(
+            r#"{"args":{"bot_guid":1173,"quest_id":26,"quest_giver_guid":12345}}"#,
+        ).unwrap();
+        assert_eq!(w.args.reward_choice, None, "absent reward_choice must be None");
+        let w2: BotTurninQuestWrapper = serde_json::from_str(
+            r#"{"args":{"bot_guid":1173,"quest_id":26,"quest_giver_guid":12345,"reward_choice":1}}"#,
+        ).unwrap();
+        assert_eq!(w2.args.reward_choice, Some(1));
+    }
+
+    /// bot.use_item: target_guid is optional and must accept packed u64 > i64::MAX.
+    #[test]
+    fn bot_use_item_optional_target_guid() {
+        // absent → None (self-use)
+        let w: BotUseItemWrapper = serde_json::from_str(
+            r#"{"args":{"bot_guid":1173,"item_entry":4540}}"#,
+        ).unwrap();
+        assert_eq!(w.args.target_guid, None, "absent target_guid must be None (self-use)");
+        // packed u64 > i64::MAX
+        let packed: u64 = 0xF130_0000_0000_0007;
+        let body = format!(r#"{{"args":{{"bot_guid":1173,"item_entry":4540,"target_guid":{packed}}}}}"#);
+        let w2: BotUseItemWrapper = serde_json::from_str(&body)
+            .expect("target_guid must accept u64 > i64::MAX");
+        assert_eq!(w2.args.target_guid, Some(packed));
+    }
+
+    /// bot.interact_object: all three optional fields absent → None.
+    #[test]
+    fn bot_interact_object_all_optional_absent() {
+        let w: BotInteractObjectWrapper = serde_json::from_str(
+            r#"{"args":{"bot_guid":1173}}"#,
+        ).unwrap();
+        assert_eq!(w.args.object_guid, None);
+        assert_eq!(w.args.object_entry, None);
+        assert_eq!(w.args.search_range, None);
+    }
+
+    /// bot.interact_object: object_guid is u64 and accepts packed GUIDs.
+    #[test]
+    fn bot_interact_object_guid_accepts_packed_u64() {
+        let packed: u64 = 0xF150_0000_0000_0001;
+        let body = format!(r#"{{"args":{{"bot_guid":1173,"object_guid":{packed}}}}}"#);
+        let w: BotInteractObjectWrapper = serde_json::from_str(&body)
+            .expect("object_guid must accept u64 > i64::MAX");
+        assert_eq!(w.args.object_guid, Some(packed));
     }
 
     /// bot.cast_spell: absent target_guid → None (self-cast); bot.mail: absent

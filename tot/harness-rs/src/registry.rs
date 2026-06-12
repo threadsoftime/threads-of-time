@@ -138,6 +138,12 @@ pub fn build_v1_registry() -> Registry {
         ToolEntry::new("bot.stop",                "bot.stop",               Some("bot_guid"),    true),
         // Bot-tier (M1-walk)
         ToolEntry::new("bot.move_path",           "bot.move_path",          Some("bot_guid"),    true),
+        // Bot-tier (M3 #9 riders — quest verbs + dismount)
+        ToolEntry::new("bot.accept_quest",        "bot.accept_quest",       Some("bot_guid"),    true),
+        ToolEntry::new("bot.dismount",            "bot.dismount",           Some("bot_guid"),    true),
+        ToolEntry::new("bot.interact_object",     "bot.interact_object",    Some("bot_guid"),    true),
+        ToolEntry::new("bot.turnin_quest",        "bot.turnin_quest",       Some("bot_guid"),    true),
+        ToolEntry::new("bot.use_item",            "bot.use_item",           Some("bot_guid"),    true),
         // Bot-tier (M1-own)
         ToolEntry::new("bot.set_ai_enabled",      "bot.set_ai_enabled",     Some("bot_guid"),    true),
         // Bot-tier (V1.5 — grouping primitives)
@@ -209,9 +215,9 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn registry_has_58_tools() {
+    fn registry_has_63_tools() {
         let reg = build_v1_registry();
-        assert_eq!(reg.names().len(), 58);
+        assert_eq!(reg.names().len(), 63);
     }
 
     #[test]
@@ -364,6 +370,70 @@ mod tests {
         assert_eq!(e.required_scope, "obs.get_lootable_corpses");
         assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
         assert!(e.forwards_to_ac, "obs.get_lootable_corpses must forward to AC");
+    }
+
+    // ── M3 #9 riders ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn bot_dismount_registered() {
+        let reg = build_v1_registry();
+        let e = reg.find("bot.dismount").unwrap();
+        assert_eq!(e.name, "bot.dismount");
+        assert_eq!(e.required_scope, "bot.dismount");
+        assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
+        assert!(e.forwards_to_ac, "bot.dismount must forward to AC");
+    }
+
+    #[test]
+    fn bot_accept_quest_registered() {
+        let reg = build_v1_registry();
+        let e = reg.find("bot.accept_quest").unwrap();
+        assert_eq!(e.name, "bot.accept_quest");
+        assert_eq!(e.required_scope, "bot.accept_quest");
+        assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
+        assert!(e.forwards_to_ac, "bot.accept_quest must forward to AC");
+    }
+
+    #[test]
+    fn bot_turnin_quest_registered() {
+        let reg = build_v1_registry();
+        let e = reg.find("bot.turnin_quest").unwrap();
+        assert_eq!(e.name, "bot.turnin_quest");
+        assert_eq!(e.required_scope, "bot.turnin_quest");
+        assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
+        assert!(e.forwards_to_ac, "bot.turnin_quest must forward to AC");
+    }
+
+    #[test]
+    fn bot_use_item_registered() {
+        let reg = build_v1_registry();
+        let e = reg.find("bot.use_item").unwrap();
+        assert_eq!(e.name, "bot.use_item");
+        assert_eq!(e.required_scope, "bot.use_item");
+        assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
+        assert!(e.forwards_to_ac, "bot.use_item must forward to AC");
+    }
+
+    #[test]
+    fn bot_interact_object_registered() {
+        let reg = build_v1_registry();
+        let e = reg.find("bot.interact_object").unwrap();
+        assert_eq!(e.name, "bot.interact_object");
+        assert_eq!(e.required_scope, "bot.interact_object");
+        assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
+        assert!(e.forwards_to_ac, "bot.interact_object must forward to AC");
+    }
+
+    #[test]
+    fn quest_verbs_all_registered() {
+        let reg = build_v1_registry();
+        for name in ["bot.dismount", "bot.accept_quest", "bot.turnin_quest",
+                     "bot.use_item", "bot.interact_object"] {
+            let e = reg.find(name).unwrap_or_else(|_| panic!("{name} missing from registry"));
+            assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()),
+                       "{name} must use bot_guid as subject arg");
+            assert!(e.forwards_to_ac, "{name} must forward to AC");
+        }
     }
 
     #[test]

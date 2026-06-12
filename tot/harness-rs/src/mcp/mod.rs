@@ -272,12 +272,12 @@ mod tests {
         let handler = HarnessMcp::new(state);
 
         // The #[tool_router] generates a ToolRouter; there is no public
-        // runtime count on it, but we can verify the registry has 58 tools.
+        // runtime count on it, but we can verify the registry has 63 tools.
         let registry = build_v1_registry();
         assert_eq!(
             registry.names().len(),
-            58,
-            "registry must have 58 tools matching the 58 #[tool] methods"
+            63,
+            "registry must have 63 tools matching the 63 #[tool] methods"
         );
 
         // Verify that the flat Args types (no wrapper) serialize correctly.

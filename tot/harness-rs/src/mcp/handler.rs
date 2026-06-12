@@ -1,4 +1,4 @@
-//! MCP ServerHandler with all 58 V1 tools.
+//! MCP ServerHandler with all 63 V1 tools.
 //!
 //! Port of `harness_daemon/mcp_server.py:build_mcp_server`.
 //!
@@ -101,7 +101,7 @@ fn gen_mcp_request_id() -> String {
 }
 
 impl HarnessMcp {
-    /// Shared dispatch path for all 50 tool methods.
+    /// Shared dispatch path for all 63 tool methods.
     ///
     /// Steps (mirror mcp_server.py:111-150):
     /// 1. Resolve TokenRecord from Parts extensions → build AuthResult.
@@ -177,7 +177,7 @@ impl HarnessMcp {
     }
 }
 
-// ── 58-tool #[tool_router] impl ───────────────────────────────────────────────
+// ── 63-tool #[tool_router] impl ───────────────────────────────────────────────
 //
 // CRITICAL: Each tool method MUST be defined directly with `#[tool(...)]` on
 // the function. Do NOT use macro_rules! invocations here — the `#[tool_router]`
@@ -323,6 +323,33 @@ impl HarnessMcp {
     #[tool(name = "bot.loot", description = "Loot a dead creature (must be tapped by this bot, solo loot only). target_guid is the packed creature uint64 from obs.get_lootable_corpses.")]
     async fn bot_loot(&self, Parameters(w): Parameters<schemas::BotLootWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
         self.forward("bot.loot", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
+    }
+
+    // ── bot.* M3 #9 riders (5) ────────────────────────────────────────────────
+
+    #[tool(name = "bot.dismount", description = "Dismount a bot (idempotent; ok if already on foot). Requires the bot to be claimed. Returns {dismounted:true, was_mounted:bool}.")]
+    async fn bot_dismount(&self, Parameters(w): Parameters<schemas::BotDismountWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
+        self.forward("bot.dismount", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
+    }
+
+    #[tool(name = "bot.accept_quest", description = "Accept a quest from an NPC or GO quest giver. quest_giver_guid is the packed raw uint64 ObjectGuid (same format as bot.attack target_guid). Returns {accepted:bool, fail_reason:str|null}.")]
+    async fn bot_accept_quest(&self, Parameters(w): Parameters<schemas::BotAcceptQuestWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
+        self.forward("bot.accept_quest", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
+    }
+
+    #[tool(name = "bot.turnin_quest", description = "Turn in a completed quest and collect reward (optional reward choice index). quest_giver_guid is packed raw uint64. Returns {rewarded:bool, fail_reason:str|null}.")]
+    async fn bot_turnin_quest(&self, Parameters(w): Parameters<schemas::BotTurninQuestWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
+        self.forward("bot.turnin_quest", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
+    }
+
+    #[tool(name = "bot.use_item", description = "Use an item from the bot's inventory (on self or a target). Phase-1: targeted path (target_guid non-zero) returns fail_code:'targeted_phase2'. Returns {used:bool, fail_code:str|null}.")]
+    async fn bot_use_item(&self, Parameters(w): Parameters<schemas::BotUseItemWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
+        self.forward("bot.use_item", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
+    }
+
+    #[tool(name = "bot.interact_object", description = "Interact with a nearby gameobject (chest, node, door, quest object). Dual-mode: object_guid (packed uint64, preferred) XOR object_entry+search_range (nearest-search). Returns {interacted:bool, object_entry:int, distance_yards:float, fail_code:str|null}.")]
+    async fn bot_interact_object(&self, Parameters(w): Parameters<schemas::BotInteractObjectWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
+        self.forward("bot.interact_object", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
     }
 
     // ── obs.* (19) ────────────────────────────────────────────────────────────
@@ -534,7 +561,7 @@ mod tests {
     // FAIL TO BOOT.
     //
     // This test asserts the representative case (obs.ping).  The full suite
-    // covering all 58 wrappers lives in mcp::schemas::tests::all_58_wrappers_have_args_envelope.
+    // covering all 63 wrappers lives in mcp::schemas::tests::all_63_wrappers_have_args_envelope.
     // (A live tools/list assertion previously lived in the Python parity gate,
     // retired along with the Python sidecars.)
     #[test]
