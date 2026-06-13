@@ -106,84 +106,75 @@ const MAX_EMPTY_SCAN_CYCLES: u32 = 24;
 const RESPAWN_WAIT_MS: u64 = if cfg!(test) { 20 } else { 45_000 };
 const MAX_RESPAWN_WAITS: u32 = 20;
 
-/// Death-recovery (design 2026-06-10 §2.2). Poll the self-revive every 5 s for up
-/// to 180 s, with the ops-proven "second release kick" at the halfway mark.
-const RECOVERY_POLL_MS: u64 = if cfg!(test) { 20 } else { 5_000 };
-const RECOVERY_MAX_POLLS: u32 = 36;
-/// Deaths 1..=MAX resume grinding after recovery; death MAX+1 still runs the full
-/// recovery (bot ends alive, at anchor, owned) but then returns terminal
-/// `NeedsDecision{BotDied}` so the brain paces re-emission with its cooldown.
+/// Death-recovery (Finding #17, design 2026-06-12). The bot stays CLAIMED throughout —
+/// `bot.revive` resurrects it in place (no ownership release → no #12 re-mount window).
+const REVIVE_MAX_ATTEMPTS: u32 = 3;
+const REVIVE_RETRY_MS: u64 = if cfg!(test) { 5 } else { 1_000 };
+/// After a successful bot.revive, confirm the live state (revive is synchronous
+/// server-side; this guards a racing state read).
+const REVIVE_CONFIRM_POLLS: u32 = 5;
+const REVIVE_POLL_MS: u64 = if cfg!(test) { 5 } else { 1_000 };
+/// Deaths 1..=MAX resume grinding after recovery; death MAX+1 still recovers (bot ends
+/// alive, at anchor, owned) but returns terminal `NeedsDecision{BotDied}` so the brain
+/// paces re-emission with its cooldown.
 const MAX_DEATHS_PER_GOAL: u32 = 3;
 
 #[derive(Debug)]
 pub(crate) enum RecoveryOutcome { Recovered, StillDead }
 
-/// BotDied recovery: release ownership so the native playerbots AI self-revives,
-/// poll until alive, gm.teleport back to the camp anchor, re-claim.
-///
-/// INVARIANT: attempts to re-claim ownership on EVERY exit path — `per_bot_loop`
-/// releases on shutdown and assumes the claim is held throughout the goal.
+/// BotDied recovery (Finding #17): resurrect the bot IN PLACE via `bot.revive`, confirm
+/// alive, gm.teleport to the camp anchor. The bot stays claimed the entire time — there
+/// is NO ownership release, so the native AI never relocates it and the #12 re-mount
+/// vector (which lived in the old release window) is gone. `bot.revive` is inventory-safe
+/// (Finding #10 intact — it never calls Refresh()/ClearInventory()).
 pub(crate) async fn recover_from_death(
     client: &HarnessClient,
     bot_guid: u64,
     goal: &GrindGoal,
 ) -> RecoveryOutcome {
-    if let Err(e) = crate::own::set_ai_owned(client, bot_guid, false).await {
-        tracing::warn!(bot_guid, error = %e, "recovery: release failed");
-    }
-    let mut alive = false;
-    let mut polls_used: u32 = 0;
-    for poll in 0..RECOVERY_MAX_POLLS {
-        tokio::time::sleep(Duration::from_millis(RECOVERY_POLL_MS)).await;
-        if poll == RECOVERY_MAX_POLLS / 2 {
-            // Second kick at ~the halfway mark (poll 18 of 36 ≈ 95 s in): some deaths need a repeat release before the native AI revives.
-            if let Err(e) = crate::own::set_ai_owned(client, bot_guid, false).await {
-                tracing::warn!(bot_guid, error = %e, "recovery: second release failed");
+    // 1. Resurrect in place (bounded retry).
+    let mut revived = false;
+    for attempt in 0..REVIVE_MAX_ATTEMPTS {
+        match crate::own::bot_revive(client, bot_guid).await {
+            Ok(_) => { revived = true; break; }
+            Err(e) => {
+                tracing::warn!(bot_guid, attempt, error = %e, "recovery: bot.revive failed");
+                tokio::time::sleep(Duration::from_millis(REVIVE_RETRY_MS)).await;
             }
         }
+    }
+    if !revived {
+        return RecoveryOutcome::StillDead;
+    }
+
+    // 2. Confirm alive.
+    let mut alive = false;
+    let mut polls_used: u32 = 0;
+    for poll in 0..REVIVE_CONFIRM_POLLS {
         match read_self(client, bot_guid).await {
             Ok(s) if s.hp_pct > 0 => { alive = true; polls_used = poll + 1; break; }
             Ok(_) => {}
-            Err(e) => tracing::warn!(bot_guid, error = %e, "recovery: state poll failed"),
+            Err(e) => tracing::warn!(bot_guid, error = %e, "recovery: post-revive state poll failed"),
         }
+        tokio::time::sleep(Duration::from_millis(REVIVE_POLL_MS)).await;
     }
-    if alive {
-        let a = &goal.anchor_point;
-        if let Err(e) = client.call("gm.teleport", serde_json::json!({
-            "target_guid": bot_guid as i64,
-            "map": a.map_id as i64,
-            "x": a.x, "y": a.y, "z": a.z,
-            "orientation": 0.0,
-        })).await {
-            tracing::warn!(bot_guid, error = %e, "recovery: teleport to anchor failed");
-        }
+    if !alive {
+        return RecoveryOutcome::StillDead;
     }
-    // Re-claim on every path (see invariant). For a still-dead bot this leaves it
-    // dead-but-owned; the next goal's dead-on-arrival check retries recovery.
-    if let Err(e) = crate::own::set_ai_owned(client, bot_guid, true).await {
-        tracing::warn!(bot_guid, error = %e, "recovery: re-claim failed");
+
+    // 3. Re-home to the camp anchor.
+    let a = &goal.anchor_point;
+    if let Err(e) = client.call("gm.teleport", serde_json::json!({
+        "target_guid": bot_guid as i64,
+        "map": a.map_id as i64,
+        "x": a.x, "y": a.y, "z": a.z,
+        "orientation": 0.0,
+    })).await {
+        tracing::warn!(bot_guid, error = %e, "recovery: teleport to anchor failed");
     }
-    if alive {
-        // Finding #12: the recovery release window is THE re-mount vector
-        // (0.12s claim-to-wedge, live-proven). Probe after the re-claim.
-        match is_mounted(client, bot_guid).await {
-            Ok(true) => {
-                tracing::warn!(bot_guid, "mount_check: mounted after recovery re-claim — dismount cycle");
-                if matches!(dismount(client, bot_guid).await, DismountOutcome::StillMounted) {
-                    // No terminal here — the cast-spin backoff bounds the worst case.
-                    tracing::warn!(bot_guid, "mount_check: still mounted post-recovery; spin backoff will bound it");
-                }
-            }
-            Ok(false) => {}
-            Err(e) => tracing::warn!(bot_guid, error = %e, "mount_check: aura probe failed post-recovery"),
-        }
-        // Obs rider (2.4 spec §8): successful recovery was warn!-silent — make it
-        // provable from the journal (the audit log stays the secondary surface).
-        tracing::info!(bot_guid, polls_used, "recovery_succeeded: revived, teleported to anchor, re-claimed");
-        RecoveryOutcome::Recovered
-    } else {
-        RecoveryOutcome::StillDead
-    }
+
+    tracing::info!(bot_guid, polls_used, "recovery_succeeded: revived (bot.revive), teleported to anchor");
+    RecoveryOutcome::Recovered
 }
 
 /// Deterministic pseudo-sample in [min,max] from a rolling seed (avoids a rng dep and
@@ -626,7 +617,7 @@ pub(crate) async fn dismount(client: &HarnessClient, bot_guid: u64) -> DismountO
 /// Kept as the fallback for `dismount()` when bot.dismount is unavailable
 /// (e.g. daemon rollback to a version without the M3 #9 rider).
 ///
-/// INVARIANT: re-claims ownership on EVERY exit path (same as recover_from_death).
+/// INVARIANT: re-claims ownership on EVERY exit path (bot must be owned when this returns).
 pub(crate) async fn dismount_via_native(client: &HarnessClient, bot_guid: u64) -> DismountOutcome {
     if let Err(e) = crate::own::set_ai_owned(client, bot_guid, false).await {
         tracing::warn!(bot_guid, error = %e, "dismount: release failed");
@@ -1316,12 +1307,10 @@ mod tests {
             "obs.get_position" => json!({"x":3.0,"y":0.0,"z":0.0,
                 "map_id":0,"zone_id":1,"area_id":1,"orientation":0.0}),
             "bot.attack" => json!({"attacked": true, "target_guid": 111u64, "target_name": "Kobold"}),
-            // Bot is dead — the DOA check fires immediately; recovery exhausts budget.
+            // Bot is dead — the DOA check fires immediately; recovery exhausts revive budget.
             "obs.get_state" => json!({"self": {"level": 5, "hp_pct": 0}}),
-            "bot.set_ai_enabled" => {
-                let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
-                json!({"owned": !enabled, "reset": enabled})
-            }
+            // bot.revive returns bad shape → OwnError::Shape → StillDead after REVIVE_MAX_ATTEMPTS
+            "bot.revive" => json!({"unexpected_key": "x"}),
             other => panic!("unexpected tool in escalate_bot_died test: {other}"),
         }).await;
 
@@ -1982,37 +1971,21 @@ mod tests {
         }
     }
 
-    /// recover_from_death: after the re-claim of an alive bot, a mount aura triggers
-    /// the dismount cycle (assert ≥2 release calls in the set_ai_enabled ledger:
-    /// recovery release + dismount release).
+    /// recover_from_death (Finding #17): calls bot.revive then obs.get_state then gm.teleport.
+    /// NO bot.set_ai_enabled calls (bot stays claimed throughout).
+    /// NO obs.get_auras (mount check dropped — the release window that created the #12 re-mount
+    /// vector no longer exists).
     #[tokio::test]
-    async fn recovery_reclaim_runs_mount_check() {
+    async fn recovery_revive_polls_teleports_no_ownership_release() {
         let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let c2 = calls.clone();
-        let aura_calls = Arc::new(std::sync::Mutex::new(0u32));
-        let a2 = aura_calls.clone();
-        let base = spawn_mock(move |name, args| {
+        let base = spawn_mock(move |name, _args| {
             c2.lock().unwrap().push(name.clone());
             match name.as_str() {
-                "bot.set_ai_enabled" => {
-                    let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
-                    json!({"owned": !enabled, "reset": enabled})
-                }
-                "obs.get_state" => json!({"self": {"level": 7, "hp_pct": 100}}), // alive 1st poll
+                "bot.revive" => json!({"revived": true, "was_dead": true}),
+                "obs.get_state" => json!({"self": {"level": 7, "hp_pct": 100}}),
                 "gm.teleport" => json!({"teleported": true}),
-                "obs.get_auras" => {
-                    let mut n = a2.lock().unwrap();
-                    *n += 1;
-                    if *n <= 2 {
-                        // First 2 mount probes: mounted
-                        json!({"auras":[{"spell_id":17453,
-                                "effect_amounts":[{"amount":0,"aura_type":78,"index":0}]}]})
-                    } else {
-                        // Third probe: dismounted
-                        json!({"auras":[]})
-                    }
-                }
-                other => panic!("unexpected tool {other} in recovery_reclaim_runs_mount_check"),
+                other => panic!("unexpected tool {other} in recovery_revive test"),
             }
         }).await;
 
@@ -2027,71 +2000,34 @@ mod tests {
         assert!(matches!(out, RecoveryOutcome::Recovered));
 
         let seq = calls.lock().unwrap().clone();
-        // There must be ≥4 set_ai_enabled calls: recovery release + re-claim + dismount release + dismount re-claim
-        let ai_calls: Vec<&String> = seq.iter().filter(|s| s.as_str() == "bot.set_ai_enabled").collect();
-        assert!(ai_calls.len() >= 4,
-            "expected ≥4 set_ai_enabled calls (recovery + dismount cycle), got {}: {seq:?}",
-            ai_calls.len());
+        // No ownership release: bot.set_ai_enabled must never appear.
+        assert!(!seq.contains(&"bot.set_ai_enabled".to_string()),
+            "bot.set_ai_enabled must not be called — bot stays claimed: {seq:?}");
+        // Order: bot.revive → obs.get_state → gm.teleport
+        let revive_pos = seq.iter().position(|s| s == "bot.revive").expect("bot.revive called");
+        let poll_pos = seq.iter().position(|s| s == "obs.get_state").expect("obs.get_state called");
+        let tp_pos = seq.iter().position(|s| s == "gm.teleport").expect("gm.teleport called");
+        assert!(revive_pos < poll_pos, "bot.revive must precede obs.get_state: {seq:?}");
+        assert!(poll_pos < tp_pos, "obs.get_state must precede gm.teleport: {seq:?}");
     }
 
-    // ── Task-6 new tests ──────────────────────────────────────────────────────
-
-    /// recover_from_death: release → poll → teleport → re-claim, in that order.
+    /// recover_from_death (Finding #17): all REVIVE_MAX_ATTEMPTS (3) bot.revive calls fail →
+    /// StillDead returned immediately, NO teleport, NO bot.set_ai_enabled.
     #[tokio::test]
-    async fn recovery_releases_polls_teleports_reclaims_in_order() {
-        let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let c2 = calls.clone();
-        let base = spawn_mock(move |name, args| {
-            c2.lock().unwrap().push(name.clone());
-            match name.as_str() {
-                "bot.set_ai_enabled" => {
-                    let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
-                    json!({"owned": !enabled, "reset": enabled})
-                }
-                "obs.get_state" => json!({"self": {"level": 7, "hp_pct": 100}}), // alive 1st poll
-                "gm.teleport" => json!({"teleported": true}),
-                // Finding #12: recovery now probes for mount after re-claim. Empty = not mounted.
-                "obs.get_auras" => json!({"auras": []}),
-                other => panic!("unexpected tool {other}"),
-            }
-        }).await;
-
-        let goal = GrindGoal {
-            anchor_point: WorldPos { map_id: 0, x: -5447.0, y: -378.0, z: 399.0 },
-            wander_radius: 90.0, max_search_radius: 35.0,
-            mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
-            to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
-            vendor: None,
-        };
-        let out = recover_from_death(&client(&base), 1003, &goal).await;
-        assert!(matches!(out, RecoveryOutcome::Recovered));
-
-        let seq = calls.lock().unwrap().clone();
-        assert_eq!(seq.first().map(String::as_str), Some("bot.set_ai_enabled"), "release first");
-        // Finding #12: recovery now probes mount after the re-claim. The re-claim is no longer
-        // the very last call (obs.get_auras follows). Verify it still happened.
-        let reclaim_pos = seq.iter().rposition(|s| s == "bot.set_ai_enabled").expect("re-claim present");
-        let poll = seq.iter().position(|s| s == "obs.get_state").expect("state polled");
-        let tp = seq.iter().position(|s| s == "gm.teleport").expect("teleport called");
-        assert!(poll < tp && tp < reclaim_pos, "order: release → poll → teleport → re-claim, got {seq:?}");
-    }
-
-    /// Recovery budget exhausted: 2 releases (initial + halfway kick), NO teleport
-    /// of a corpse, re-claim still attempted, StillDead reported.
-    #[tokio::test]
-    async fn recovery_exhausts_budget_reclaims_and_reports_still_dead() {
+    async fn recovery_exhausts_revive_budget_reports_still_dead() {
         use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
-        let releases = Arc::new(AtomicU32::new(0));
-        let claims = Arc::new(AtomicU32::new(0));
-        let (r2, cl2) = (releases.clone(), claims.clone());
-        let base = spawn_mock(move |name, args| match name.as_str() {
-            "bot.set_ai_enabled" => {
-                let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
-                if enabled { r2.fetch_add(1, SeqCst); } else { cl2.fetch_add(1, SeqCst); }
-                json!({"owned": !enabled, "reset": enabled})
+        let revive_calls = Arc::new(AtomicU32::new(0));
+        let r2 = revive_calls.clone();
+        let base = spawn_mock(move |name, _args| match name.as_str() {
+            "bot.revive" => {
+                r2.fetch_add(1, SeqCst);
+                // Simulate a harness error by returning ok:false — the HarnessClient maps
+                // this to HarnessError::Tool, which bot_revive wraps as OwnError::Harness.
+                // We abuse the mock: return a shape that fails serde deserialization instead.
+                json!({"unexpected_key": "x"}) // serde will fail → OwnError::Shape
             }
-            "obs.get_state" => json!({"self": {"level": 7, "hp_pct": 0}}), // never revives
             "gm.teleport" => panic!("must not teleport a corpse"),
+            "bot.set_ai_enabled" => panic!("must not release ownership"),
             other => panic!("unexpected tool {other}"),
         }).await;
 
@@ -2104,30 +2040,59 @@ mod tests {
         };
         let out = recover_from_death(&client(&base), 1003, &goal).await;
         assert!(matches!(out, RecoveryOutcome::StillDead));
-        assert_eq!(releases.load(SeqCst), 2, "initial release + halfway second kick");
-        assert_eq!(claims.load(SeqCst), 1, "re-claim attempted on exit");
+        assert_eq!(revive_calls.load(SeqCst), REVIVE_MAX_ATTEMPTS,
+            "must attempt exactly REVIVE_MAX_ATTEMPTS ({REVIVE_MAX_ATTEMPTS}) bot.revive calls");
+    }
+
+    /// recover_from_death (Finding #17): bot.revive succeeds but all REVIVE_CONFIRM_POLLS
+    /// obs.get_state calls return hp_pct==0 → StillDead (revive RPC may lag, confirm polls guard it).
+    #[tokio::test]
+    async fn recovery_revive_ok_but_still_dead_after_confirm_polls() {
+        let base = spawn_mock(move |name, _args| match name.as_str() {
+            "bot.revive" => json!({"revived": true, "was_dead": true}),
+            "obs.get_state" => json!({"self": {"level": 7, "hp_pct": 0}}), // never comes alive
+            "gm.teleport" => panic!("must not teleport a corpse"),
+            "bot.set_ai_enabled" => panic!("must not release ownership"),
+            other => panic!("unexpected tool {other}"),
+        }).await;
+
+        let goal = GrindGoal {
+            anchor_point: WorldPos { map_id: 0, x: 0.0, y: 0.0, z: 0.0 },
+            wander_radius: 90.0, max_search_radius: 35.0,
+            mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
+            to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
+        };
+        let out = recover_from_death(&client(&base), 1003, &goal).await;
+        assert!(matches!(out, RecoveryOutcome::StillDead));
     }
 
     /// 4 deaths in one goal: every recovery succeeds, but the 4th exceeds
     /// MAX_DEATHS_PER_GOAL → terminal NeedsDecision{BotDied}, bot left alive+owned.
+    /// Finding #17: recovery uses bot.revive (no ownership release); obs.get_state
+    /// returns hp=0 during fight and hp=100 after bot.revive is called.
     #[tokio::test(flavor = "multi_thread")]
     async fn run_grind_death_cap_goes_terminal_after_recoveries() {
         use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::SeqCst};
-        // NOTE: this world model assumes exec awaits each HTTP call sequentially and
-        // that recovery polls get_state only AFTER the release call — if recovery ever
-        // polled before releasing, the flag would read stale and this test would break.
-        let released = Arc::new(AtomicBool::new(false)); // start owned (per_bot_loop claimed)
+        // Model: bot is alive until it enters fight(), then dies (hp=0 from obs.get_state).
+        // bot.revive resets the alive flag so the recovery confirm poll sees hp=100.
+        let revived = Arc::new(AtomicBool::new(true)); // starts alive at goal entry
         let teleports = Arc::new(AtomicU32::new(0));
-        let (rel2, tp2) = (released.clone(), teleports.clone());
-        let base = spawn_mock(move |name, args| match name.as_str() {
-            "bot.set_ai_enabled" => {
-                let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
-                rel2.store(enabled, SeqCst); // enabled:true == released
-                json!({"owned": !enabled, "reset": enabled})
+        let (rev2, tp2) = (revived.clone(), teleports.clone());
+        let base = spawn_mock(move |name, _args| match name.as_str() {
+            "bot.revive" => {
+                // Revive succeeds; flip flag so subsequent obs.get_state returns alive.
+                rev2.store(true, SeqCst);
+                json!({"revived": true, "was_dead": true})
             }
             "obs.get_state" => {
-                let hp = if rel2.load(SeqCst) { 100 } else { 0 };
+                let hp = if rev2.load(SeqCst) { 100 } else { 0 };
                 json!({"self": {"level": 7, "hp_pct": hp}})
+            }
+            "bot.attack" => {
+                // Fight: kill the bot → obs.get_state returns 0 next poll.
+                rev2.store(false, SeqCst);
+                json!({"attacked": true, "target_guid": 9u64, "target_name": "Trogg"})
             }
             "gm.teleport" => { tp2.fetch_add(1, SeqCst); json!({"teleported": true}) }
             "obs.get_nearby_hostiles" => json!({"hostiles": [
@@ -2139,7 +2104,6 @@ mod tests {
                 "final": {"x":4.0,"y":0.0,"z":0.0}}),
             "obs.get_position" => json!({"x":4.0,"y":0.0,"z":0.0,"map_id":0,
                 "zone_id":1,"area_id":1,"orientation":0.0}),
-            "bot.attack" => json!({"attacked": true, "target_guid": 9u64, "target_name": "Trogg"}),
             "obs.get_lootable_corpses" => json!({"corpses": []}),
             other => panic!("unexpected tool {other}"),
         }).await;
@@ -2169,16 +2133,15 @@ mod tests {
         let (st2, tp2) = (state_calls.clone(), teleports.clone());
         let scan_calls = Arc::new(AtomicU32::new(0));
         let sc2 = scan_calls.clone();
-        let base = spawn_mock(move |name, args| match name.as_str() {
+        let base = spawn_mock(move |name, _args| match name.as_str() {
             "obs.get_state" => {
-                // First read (the DOA check) sees a corpse; everything after is alive.
+                // First read (the DOA check) sees a corpse; everything after is alive
+                // (bot.revive was called first, so the confirm poll sees hp=90).
                 let n = st2.fetch_add(1, SeqCst);
                 json!({"self": {"level": 5, "hp_pct": if n == 0 { 0 } else { 90 }}})
             }
-            "bot.set_ai_enabled" => {
-                let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
-                json!({"owned": !enabled, "reset": enabled})
-            }
+            // Finding #17: recovery calls bot.revive (no ownership release).
+            "bot.revive" => json!({"revived": true, "was_dead": true}),
             "gm.teleport" => { tp2.fetch_add(1, SeqCst); json!({"teleported": true}) }
             "obs.get_nearby_hostiles" => {
                 let n = sc2.fetch_add(1, SeqCst);
@@ -2284,7 +2247,7 @@ mod tests {
     /// Post-recovery economy check (spec round 4b): DOA death-loop bots vendor after revival.
     ///
     /// A bot that arrives dead (DOA) skips the goal-entry economy check (Recovering state
-    /// at entry). After recovery completes (release → poll → teleport → re-claim), the
+    /// at entry). After recovery completes (bot.revive → confirm → teleport), the
     /// post-recovery path runs `entry_check`. If bags are triggered (accumulated greys from
     /// prior goal lives), the bot vendors BEFORE resuming combat.
     ///
@@ -2295,37 +2258,30 @@ mod tests {
     /// Asserts: GoalStatus::Completed; `bot.vendor_sell` called exactly once;
     /// first `bot.vendor_sell` appears AFTER first `gm.teleport` (i.e., post-recovery,
     /// not at goal entry — entry check was correctly skipped because DOA).
+    /// Finding #17: no bot.set_ai_enabled in the recovery path.
     #[tokio::test(flavor = "multi_thread")]
     async fn run_grind_vendors_after_doa_recovery() {
         use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::SeqCst};
 
         let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        // Tracks whether the bot has been released (set_ai_enabled false).
-        // Recovery polls obs.get_state AFTER releasing; once released, return hp 100.
-        let released = Arc::new(AtomicBool::new(false));
+        // Tracks whether bot.revive has been called; obs.get_state returns alive after revive.
+        let revived = Arc::new(AtomicBool::new(false));
         let attacks = Arc::new(AtomicU32::new(0));
         let move_target = Arc::new(std::sync::Mutex::new((0.0f64, 0.0f64, 0.0f64)));
-        let (c2, rel2, a2, m2) = (calls.clone(), released.clone(), attacks.clone(), move_target.clone());
+        let (c2, rev2, a2, m2) = (calls.clone(), revived.clone(), attacks.clone(), move_target.clone());
 
         let base = spawn_mock(move |name, args| {
             c2.lock().unwrap().push(name.clone());
             match name.as_str() {
                 "obs.get_state" => {
-                    // DOA check at goal start: dead. Recovery polls: alive once released.
-                    let hp = if rel2.load(SeqCst) { 100 } else { 0 };
+                    // DOA check at goal start: dead. After bot.revive: alive.
+                    let hp = if rev2.load(SeqCst) { 100 } else { 0 };
                     json!({"self": {"level": 5, "hp_pct": hp}})
                 }
-                "bot.set_ai_enabled" => {
-                    let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
-                    // set_ai_owned semantics (own.rs lines 3-4):
-                    //   owned=false (release) → sends enabled:true + reset_on_release:true
-                    //   owned=true (claim)    → sends enabled:false
-                    // So enabled:true means "release" — mark released on first such call
-                    // so subsequent obs.get_state polls return hp 100 (bot revived).
-                    if enabled {
-                        rel2.store(true, SeqCst);
-                    }
-                    json!({"owned": !enabled, "reset": enabled})
+                // Finding #17: recovery calls bot.revive (no ownership release).
+                "bot.revive" => {
+                    rev2.store(true, SeqCst);
+                    json!({"revived": true, "was_dead": true})
                 }
                 "gm.teleport" => json!({"teleported": true}),
                 // 16 grey backpack items → triggered() == true at all times (greys accumulated).
