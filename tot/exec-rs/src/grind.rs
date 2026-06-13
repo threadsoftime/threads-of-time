@@ -139,7 +139,9 @@ pub(crate) async fn recover_from_death(
             Ok(_) => { revived = true; break; }
             Err(e) => {
                 tracing::warn!(bot_guid, attempt, error = %e, "recovery: bot.revive failed");
-                tokio::time::sleep(Duration::from_millis(REVIVE_RETRY_MS)).await;
+                if attempt + 1 < REVIVE_MAX_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_millis(REVIVE_RETRY_MS)).await;
+                }
             }
         }
     }
@@ -156,7 +158,9 @@ pub(crate) async fn recover_from_death(
             Ok(_) => {}
             Err(e) => tracing::warn!(bot_guid, error = %e, "recovery: post-revive state poll failed"),
         }
-        tokio::time::sleep(Duration::from_millis(REVIVE_POLL_MS)).await;
+        if poll + 1 < REVIVE_CONFIRM_POLLS {
+            tokio::time::sleep(Duration::from_millis(REVIVE_POLL_MS)).await;
+        }
     }
     if !alive {
         return RecoveryOutcome::StillDead;
