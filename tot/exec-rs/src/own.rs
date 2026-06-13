@@ -23,6 +23,22 @@ struct SetAiEnabledResult {
     reset: bool,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ReviveResult {
+    pub revived: bool,
+    #[allow(dead_code)]
+    pub was_dead: bool,
+}
+
+/// Resurrect a dead bot in place via the harness `bot.revive` primitive (server-side
+/// `ResurrectPlayer` + `SpawnCorpseBones`; never touches inventory — Finding #10 safe).
+/// Idempotent: a live bot returns `{revived:false, was_dead:false}`. The bot stays
+/// claimed throughout (no ownership release), so there is no #12 re-mount window.
+pub async fn bot_revive(client: &HarnessClient, bot_guid: u64) -> Result<ReviveResult, OwnError> {
+    let result = client.call("bot.revive", json!({ "bot_guid": bot_guid as i64 })).await?;
+    serde_json::from_value(result).map_err(|e| OwnError::Shape(format!("bot.revive serde: {e}")))
+}
+
 /// Claim (`owned=true`) or release (`owned=false`) external ownership of a bot.
 /// On release, requests `reset_on_release:true` for a clean handback.
 pub async fn set_ai_owned(client: &HarnessClient, bot_guid: u64, owned: bool) -> Result<(), OwnError> {
@@ -105,5 +121,15 @@ mod tests {
         let base = spawn_mock(|_n, _a| json!({ "owned": false, "reset": false })).await; // we'll ask owned=true
         let err = set_ai_owned(&client(&base), 42, true).await.unwrap_err();
         match err { OwnError::Shape(msg) => assert!(msg.contains("owned:false")), other => panic!("expected Shape, got {other:?}") }
+    }
+
+    #[tokio::test]
+    async fn bot_revive_sends_guid_and_parses_result() {
+        let received = std::sync::Arc::new(std::sync::Mutex::new(serde_json::Value::Null));
+        let recv = received.clone();
+        let base = spawn_mock(move |_n, args| { *recv.lock().unwrap() = args; json!({ "revived": true, "was_dead": true }) }).await;
+        let r = bot_revive(&client(&base), 1323).await.unwrap();
+        assert!(r.revived);
+        assert_eq!(received.lock().unwrap()["bot_guid"], 1323_i64);
     }
 }
