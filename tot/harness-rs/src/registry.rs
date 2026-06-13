@@ -146,6 +146,8 @@ pub fn build_v1_registry() -> Registry {
         ToolEntry::new("bot.use_item",            "bot.use_item",           Some("bot_guid"),    true),
         // Bot-tier (M1-own)
         ToolEntry::new("bot.set_ai_enabled",      "bot.set_ai_enabled",     Some("bot_guid"),    true),
+        // Bot-tier (Finding #17 — idle-death recovery)
+        ToolEntry::new("bot.revive",              "bot.revive",             Some("bot_guid"),    true),
         // Bot-tier (V1.5 — grouping primitives)
         ToolEntry::new("bot.invite_to_group",     "bot.invite_to_group",    Some("bot_guid"),    true),
         ToolEntry::new("bot.accept_invite",       "bot.accept_invite",      Some("bot_guid"),    true),
@@ -215,9 +217,9 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn registry_has_63_tools() {
+    fn registry_has_64_tools() {
         let reg = build_v1_registry();
-        assert_eq!(reg.names().len(), 63);
+        assert_eq!(reg.names().len(), 64);
     }
 
     #[test]
@@ -318,6 +320,16 @@ mod tests {
         let e = reg.find("bot.set_ai_enabled").unwrap();
         assert_eq!(e.name, "bot.set_ai_enabled");
         assert_eq!(e.required_scope, "bot.set_ai_enabled");
+        assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
+        assert!(e.forwards_to_ac);
+    }
+
+    #[test]
+    fn bot_revive_registered() {
+        let reg = build_v1_registry();
+        let e = reg.find("bot.revive").unwrap();
+        assert_eq!(e.name, "bot.revive");
+        assert_eq!(e.required_scope, "bot.revive");
         assert_eq!(e.subject_guid_arg, Some("bot_guid".to_string()));
         assert!(e.forwards_to_ac);
     }

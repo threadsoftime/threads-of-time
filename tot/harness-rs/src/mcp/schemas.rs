@@ -1022,6 +1022,17 @@ pub struct BotSetAiEnabledArgs {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct BotSetAiEnabledWrapper { pub args: BotSetAiEnabledArgs }
 
+// ── bot.revive ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotReviveArgs {
+    /// Low-32 GUID of the dead bot to resurrect in place.
+    pub bot_guid: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BotReviveWrapper { pub args: BotReviveArgs }
+
 // ── bot.attack ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -1186,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    fn all_63_wrappers_have_args_envelope() {
+    fn all_64_wrappers_have_args_envelope() {
         // gm (7)
         assert!(has_args_envelope(&schema_for!(GmAdditemWrapper)),     "gm.additem");
         assert!(has_args_envelope(&schema_for!(GmEquipAllWrapper)),    "gm.equip_all");
@@ -1262,6 +1273,8 @@ mod tests {
         assert!(has_args_envelope(&schema_for!(BotVendorSellWrapper)), "bot.vendor_sell");
         assert!(has_args_envelope(&schema_for!(BotRepairWrapper)),     "bot.repair");
         assert!(has_args_envelope(&schema_for!(BotMailWrapper)),       "bot.mail");
+        // bot.revive (1) — idle-death recovery; resurrects a dead bot in place
+        assert!(has_args_envelope(&schema_for!(BotReviveWrapper)), "bot.revive");
     }
 
     // ── MCP default-fill parity tests ─────────────────────────────────────────

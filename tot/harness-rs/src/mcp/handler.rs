@@ -280,6 +280,11 @@ impl HarnessMcp {
         self.forward("bot.set_ai_enabled", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
     }
 
+    #[tool(name = "bot.revive", description = "Resurrect a dead owned bot in place (ResurrectPlayer + SpawnCorpseBones). Inventory-safe (never refreshes). Idempotent on a live bot.")]
+    async fn bot_revive(&self, Parameters(w): Parameters<schemas::BotReviveWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
+        self.forward("bot.revive", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
+    }
+
     #[tool(name = "bot.set_role", description = "Set LFG role or transfer group leadership.")]
     async fn bot_set_role(&self, Parameters(w): Parameters<schemas::BotSetRoleWrapper>, Extension(parts): Extension<http::request::Parts>) -> CallToolResult {
         self.forward("bot.set_role", serde_json::to_value(&w.args).unwrap_or_default(), &parts).await
