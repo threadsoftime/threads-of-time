@@ -658,15 +658,31 @@ pub(crate) async fn maybe_anchor_on_entry(
 ) -> bool {
     let a = &goal.anchor_point;
     let reach = goal.wander_radius as f64;
-    let need_home = match bot_world_pos(client, bot_guid).await {
-        Ok((x, y, _z)) => {
-            let dx = x - a.x;
-            let dy = y - a.y;
-            (dx * dx + dy * dy).sqrt() > reach
-        }
-        Err(e) => {
-            tracing::warn!(bot_guid, error = %e, "anchor_on_entry: pos read failed");
-            false
+    // Read position with map_id so cross-continent displacement is caught even when
+    // the bot's x,y coincidentally fall within wander_radius (AzerothCore overlaps EK/Kalimdor).
+    let need_home = {
+        #[derive(Deserialize)]
+        struct PosWithMap { x: f64, y: f64, map_id: i64 }
+        match client.call("obs.get_position",
+            serde_json::json!({ "target_guid": bot_guid as i64 })).await
+        {
+            Ok(raw) => match serde_json::from_value::<PosWithMap>(raw) {
+                Ok(p) => {
+                    let wrong_map = p.map_id != a.map_id as i64;
+                    let dx = p.x - a.x;
+                    let dy = p.y - a.y;
+                    let out_of_range = (dx * dx + dy * dy).sqrt() > reach;
+                    wrong_map || out_of_range
+                }
+                Err(e) => {
+                    tracing::warn!(bot_guid, error = %e, "anchor_on_entry: pos deserialize failed");
+                    false
+                }
+            },
+            Err(e) => {
+                tracing::warn!(bot_guid, error = %e, "anchor_on_entry: pos read failed");
+                false
+            }
         }
     };
     if need_home {
@@ -2564,5 +2580,40 @@ mod tests {
         };
         let teleported = maybe_anchor_on_entry(&client(&base), 1003, &goal).await;
         assert!(!teleported, "on-camp bot must not be teleported");
+    }
+
+    /// Cross-continent displacement: bot is on map 0 (Eastern Kingdoms), anchor is on
+    /// map 1 (Kalimdor). The bot's x,y happen to fall within `wander_radius` of the
+    /// anchor's x,y (simulating the AzerothCore coordinate-overlap that defeats 2D-only
+    /// distance checks). Map mismatch alone MUST force a re-home.
+    #[tokio::test]
+    async fn anchor_on_entry_teleports_cross_map_bot() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let c2 = calls.clone();
+        let base = spawn_mock(move |name, _args| {
+            c2.lock().unwrap().push(name.clone());
+            match name.as_str() {
+                // Bot is on map 0 (EK), x/y coincidentally within wander_radius=90 of
+                // the anchor (which is on map 1 / Kalimdor). Without map check this
+                // would NOT trigger a teleport — that is the bug being fixed.
+                "obs.get_position" => json!({"x": 5.0, "y": 0.0, "z": 0.0,
+                    "map_id": 0, "zone_id": 12, "area_id": 12, "orientation": 0.0}),
+                "gm.teleport" => json!({"teleported": true}),
+                other => panic!("unexpected tool {other} in anchor_on_entry_teleports_cross_map_bot"),
+            }
+        }).await;
+
+        // Anchor is on map 1 (Kalimdor) at nearly the same x,y as the bot.
+        let goal = GrindGoal {
+            anchor_point: WorldPos { map_id: 1, x: 5.0, y: 0.0, z: 0.0 },
+            wander_radius: 90.0, max_search_radius: 35.0,
+            mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
+            to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
+        };
+        let teleported = maybe_anchor_on_entry(&client(&base), 1003, &goal).await;
+        assert!(teleported, "cross-map bot must trigger teleport even when x,y are within wander_radius");
+        let seq = calls.lock().unwrap().clone();
+        assert!(seq.contains(&"gm.teleport".to_string()), "gm.teleport must be called: {seq:?}");
     }
 }
