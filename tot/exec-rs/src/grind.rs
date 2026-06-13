@@ -644,6 +644,47 @@ pub(crate) async fn dismount_via_native(client: &HarnessClient, bot_guid: u64) -
     }
 }
 
+/// On goal entry, if the bot is alive but displaced from its camp (farther than
+/// `wander_radius` from the anchor), teleport it home once. No-op for on-camp bots.
+///
+/// Finding #17 hardening: catches any alive-but-displaced bot (e.g. legacy drift from
+/// the old release-window relocation, or a cross-zone warp by native AI). The bot stays
+/// claimed; `gm.teleport` moves it silently without affecting inventory.
+/// Returns `true` if a teleport was issued, `false` otherwise.
+pub(crate) async fn maybe_anchor_on_entry(
+    client: &HarnessClient,
+    bot_guid: u64,
+    goal: &GrindGoal,
+) -> bool {
+    let a = &goal.anchor_point;
+    let reach = goal.wander_radius as f64;
+    let need_home = match bot_world_pos(client, bot_guid).await {
+        Ok((x, y, _z)) => {
+            let dx = x - a.x;
+            let dy = y - a.y;
+            (dx * dx + dy * dy).sqrt() > reach
+        }
+        Err(e) => {
+            tracing::warn!(bot_guid, error = %e, "anchor_on_entry: pos read failed");
+            false
+        }
+    };
+    if need_home {
+        if let Err(e) = client.call("gm.teleport", serde_json::json!({
+            "target_guid": bot_guid as i64,
+            "map": a.map_id as i64,
+            "x": a.x, "y": a.y, "z": a.z,
+            "orientation": 0.0,
+        })).await {
+            tracing::warn!(bot_guid, error = %e, "anchor_on_entry: teleport failed");
+            return false;
+        }
+        tracing::info!(bot_guid, "anchor_on_entry: re-homed displaced bot to camp anchor");
+        return true;
+    }
+    false
+}
+
 /// Drive a `Grind` goal to a terminal `GoalStatus`. All states are real.
 pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) -> GoalStatus {
     let mut kills: u32 = 0;
@@ -688,6 +729,13 @@ pub async fn run_grind(client: &HarnessClient, bot_guid: u64, goal: &GrindGoal) 
                 detail: Some("mount_wedge: still mounted after dismount budget".into()),
             };
         }
+    }
+
+    // Start-anchor teleport (Finding #17 hardening): re-home a live-but-displaced bot
+    // before the first scan. Skipped when arriving dead — dead bot teleport would be
+    // a no-op server-side and we don't want to race the Recovering state.
+    if !matches!(state, GrindState::Recovering) {
+        maybe_anchor_on_entry(client, bot_guid, goal).await;
     }
 
     // Buff pass at grind entry — skipped when arriving dead (buffing a corpse
@@ -1287,7 +1335,7 @@ mod tests {
         let hostile_calls = std::sync::Arc::new(AtomicU32::new(0));
         let hc2 = hostile_calls.clone();
 
-        let base = spawn_mock(move |name, args| match name.as_str() {
+        let base = spawn_mock(move |name, _args| match name.as_str() {
             "obs.get_nearby_hostiles" => {
                 let n = hc2.fetch_add(1, SeqCst);
                 if n == 0 {
@@ -2462,5 +2510,59 @@ mod tests {
             first_sell < first_attack,
             "entry vendor trip must precede first attack; first_sell={first_sell}, first_attack={first_attack}, seq={seq:?}"
         );
+    }
+
+    // ── C3: maybe_anchor_on_entry tests ──────────────────────────────────────
+
+    /// A displaced bot (farther than wander_radius from the anchor) triggers a
+    /// gm.teleport and returns true.
+    #[tokio::test]
+    async fn anchor_on_entry_teleports_displaced_bot() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let c2 = calls.clone();
+        let base = spawn_mock(move |name, _args| {
+            c2.lock().unwrap().push(name.clone());
+            match name.as_str() {
+                // Bot is far from anchor (200y away; wander_radius=90)
+                "obs.get_position" => json!({"x": 200.0, "y": 0.0, "z": 0.0,
+                    "map_id": 0, "zone_id": 1, "area_id": 1, "orientation": 0.0}),
+                "gm.teleport" => json!({"teleported": true}),
+                other => panic!("unexpected tool {other} in anchor_on_entry_teleports_displaced_bot"),
+            }
+        }).await;
+
+        let goal = GrindGoal {
+            anchor_point: WorldPos { map_id: 0, x: 0.0, y: 0.0, z: 0.0 },
+            wander_radius: 90.0, max_search_radius: 35.0,
+            mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
+            to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
+        };
+        let teleported = maybe_anchor_on_entry(&client(&base), 1003, &goal).await;
+        assert!(teleported, "displaced bot must trigger teleport");
+        let seq = calls.lock().unwrap().clone();
+        assert!(seq.contains(&"gm.teleport".to_string()), "gm.teleport must be called: {seq:?}");
+    }
+
+    /// A bot already within wander_radius of the anchor does NOT trigger a teleport.
+    #[tokio::test]
+    async fn anchor_on_entry_no_teleport_for_on_camp_bot() {
+        let base = spawn_mock(move |name, _args| match name.as_str() {
+            // Bot is 5y from anchor (wander_radius=90) — well within range.
+            "obs.get_position" => json!({"x": 5.0, "y": 0.0, "z": 0.0,
+                "map_id": 0, "zone_id": 1, "area_id": 1, "orientation": 0.0}),
+            "gm.teleport" => panic!("must not teleport an on-camp bot"),
+            other => panic!("unexpected tool {other} in anchor_on_entry_no_teleport test"),
+        }).await;
+
+        let goal = GrindGoal {
+            anchor_point: WorldPos { map_id: 0, x: 0.0, y: 0.0, z: 0.0 },
+            wander_radius: 90.0, max_search_radius: 35.0,
+            mob_filter: MobFilter { min_level: 4, max_level: 7, creature_type: None },
+            to_level: 99, kill_count: Some(1), rest_threshold: 0.35, rotation_id: None,
+            vendor: None,
+        };
+        let teleported = maybe_anchor_on_entry(&client(&base), 1003, &goal).await;
+        assert!(!teleported, "on-camp bot must not be teleported");
     }
 }
