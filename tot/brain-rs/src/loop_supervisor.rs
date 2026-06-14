@@ -131,6 +131,19 @@ pub struct LoopSupervisor {
     profile_map: std::collections::HashMap<i64, String>,  // bot_guid → profile_id
 }
 
+/// R1: true when the bot's observed `hp_pct` is exactly 0 (a corpse). The exec
+/// idle health poll revives at-cap bots within IDLE_HEALTH_POLL_INTERVAL; until
+/// then the brain skips behavior dispatch so it never set_goal/send_chat on a
+/// dead bot. Missing/non-integer hp is treated as alive (never skip on unknown).
+fn is_dead_in_hot_inputs(hot_inputs: &HashMap<String, Value>) -> bool {
+    hot_inputs
+        .get("state_summary")
+        .and_then(|s| s.get("self"))
+        .and_then(|s| s.get("hp_pct"))
+        .and_then(Value::as_u64)
+        == Some(0)
+}
+
 impl LoopSupervisor {
     /// Full constructor — all collaborators supplied.
     ///
@@ -682,6 +695,19 @@ impl LoopSupervisor {
                         .insert("recalled_memories".to_string(), Value::Array(vec![]));
                 }
             }
+        }
+
+        // ── At-cap death guard (R1) ──────────────────────────────────────
+        // Don't LLM-drive a corpse. The exec idle poll revives at-cap bots
+        // within IDLE_HEALTH_POLL_INTERVAL; skip dispatch until alive again.
+        if is_dead_in_hot_inputs(&hot_inputs) {
+            record["triage_reason"] = Value::String("dead".to_string());
+            info!("decision_skip bot_guid={} reason=dead", bot_guid);
+            return Ok(TickState {
+                bot_guid,
+                last_tick_ms: now_ms,
+                last_decision_id: last_state.last_decision_id.clone(),
+            });
         }
 
         // ── LLM decide ───────────────────────────────────────────────────
@@ -1419,6 +1445,28 @@ rotation_id = "auto_attack"
         assert!(di < re, "disposition must come before reasoning");
         assert!(re < to, "reasoning must come before tool");
         assert!(to < tr, "tool must come before triage");
+    }
+
+    #[test]
+    fn is_dead_in_hot_inputs_true_only_when_hp_zero() {
+        use std::collections::HashMap;
+        use serde_json::json;
+
+        let mut dead = HashMap::new();
+        dead.insert("state_summary".to_string(), json!({"self": {"hp_pct": 0, "level": 25}}));
+        assert!(super::is_dead_in_hot_inputs(&dead));
+
+        let mut alive = HashMap::new();
+        alive.insert("state_summary".to_string(), json!({"self": {"hp_pct": 90, "level": 25}}));
+        assert!(!super::is_dead_in_hot_inputs(&alive));
+
+        // Missing hp_pct → treat as alive (never skip on unknown).
+        let mut missing = HashMap::new();
+        missing.insert("state_summary".to_string(), json!({"self": {"level": 25}}));
+        assert!(!super::is_dead_in_hot_inputs(&missing));
+
+        // No state_summary at all → alive.
+        assert!(!super::is_dead_in_hot_inputs(&HashMap::new()));
     }
 
     #[test]
