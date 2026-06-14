@@ -5,7 +5,7 @@
 
 use serde::Deserialize;
 use thiserror::Error;
-use tot_goal_contract::GrindGoal;
+use tot_goal_contract::{GrindGoal, WorldPos};
 use tot_harness_client::{HarnessClient, HarnessError};
 
 use crate::combat::{CombatContext, FightMemo, RotationAction, RotationPlugin, TickOutcome};
@@ -122,15 +122,23 @@ const MAX_DEATHS_PER_GOAL: u32 = 3;
 #[derive(Debug)]
 pub(crate) enum RecoveryOutcome { Recovered, StillDead }
 
-/// BotDied recovery (Finding #17): resurrect the bot IN PLACE via `bot.revive`, confirm
-/// alive, gm.teleport to the camp anchor. The bot stays claimed the entire time — there
-/// is NO ownership release, so the native AI never relocates it and the #12 re-mount
-/// vector (which lived in the old release window) is gone. `bot.revive` is inventory-safe
-/// (Finding #10 intact — it never calls Refresh()/ClearInventory()).
 pub(crate) async fn recover_from_death(
     client: &HarnessClient,
     bot_guid: u64,
     goal: &GrindGoal,
+) -> RecoveryOutcome {
+    revive_and_home(client, bot_guid, &goal.anchor_point).await
+}
+
+/// Resurrect the bot IN PLACE via `bot.revive`, confirm alive, then `gm.teleport`
+/// to `anchor`. The bot stays claimed the entire time — there is NO ownership
+/// release, so native AI never relocates it and the #12 re-mount vector is gone.
+/// `bot.revive` is inventory-safe (Finding #10 intact — no Refresh()/ClearInventory()).
+/// Anchor-driven (not goal-driven) so the at-cap idle poll can reuse it.
+pub(crate) async fn revive_and_home(
+    client: &HarnessClient,
+    bot_guid: u64,
+    anchor: &WorldPos,
 ) -> RecoveryOutcome {
     // 1. Resurrect in place (bounded retry).
     let mut revived = false;
@@ -167,11 +175,10 @@ pub(crate) async fn recover_from_death(
     }
 
     // 3. Re-home to the camp anchor.
-    let a = &goal.anchor_point;
     if let Err(e) = client.call("gm.teleport", serde_json::json!({
         "target_guid": bot_guid as i64,
-        "map": a.map_id as i64,
-        "x": a.x, "y": a.y, "z": a.z,
+        "map": anchor.map_id as i64,
+        "x": anchor.x, "y": anchor.y, "z": anchor.z,
         "orientation": 0.0,
     })).await {
         tracing::warn!(bot_guid, error = %e, "recovery: teleport to anchor failed");
@@ -234,8 +241,6 @@ pub async fn approach(
         Err(NavError::Shape(s)) => Err(GrindError::Shape(s)),
     }
 }
-
-use tot_goal_contract::WorldPos;
 
 const IDLE_SCAN_INTERVAL_MS: u64 = 5000;
 
@@ -2619,5 +2624,28 @@ mod tests {
         assert!(teleported, "cross-map bot must trigger teleport even when x,y are within wander_radius");
         let seq = calls.lock().unwrap().clone();
         assert!(seq.contains(&"gm.teleport".to_string()), "gm.teleport must be called: {seq:?}");
+    }
+
+    /// `revive_and_home` resurrects, confirms alive, and teleports to the given
+    /// anchor — independent of any GrindGoal (used by the at-cap idle poll).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revive_and_home_revives_confirms_and_teleports() {
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+        let revives = Arc::new(AtomicU32::new(0));
+        let teleports = Arc::new(AtomicU32::new(0));
+        let (rv2, tp2) = (revives.clone(), teleports.clone());
+        let base = spawn_mock(move |name, _args| match name.as_str() {
+            "bot.revive" => { rv2.fetch_add(1, SeqCst); json!({"revived": true, "was_dead": true}) }
+            "obs.get_state" => json!({"self": {"level": 25, "hp_pct": 90}}),
+            "gm.teleport" => { tp2.fetch_add(1, SeqCst); json!({"teleported": true}) }
+            other => panic!("unexpected tool {other}"),
+        }).await;
+
+        let anchor = WorldPos { map_id: 1, x: 2055.0, y: -1030.0, z: 95.0 };
+        let outcome = revive_and_home(&client(&base), 1194, &anchor).await;
+
+        assert!(matches!(outcome, RecoveryOutcome::Recovered), "got {outcome:?}");
+        assert_eq!(revives.load(SeqCst), 1, "exactly one bot.revive");
+        assert_eq!(teleports.load(SeqCst), 1, "exactly one gm.teleport to anchor");
     }
 }
