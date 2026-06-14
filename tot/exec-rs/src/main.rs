@@ -26,7 +26,7 @@ async fn main() {
     let harness = Arc::new(HarnessClient::new(url, bearer, Duration::from_secs(10)));
     let (sink, source, goal_rx, status_tx) = wire(bot_guid);
     let mut sup = BotSupervisor::new();
-    sup.start(bot_guid, harness, goal_rx, status_tx);
+    sup.start(bot_guid, harness, goal_rx, status_tx, None);
 
     // A single demo Grind goal (Elwynn-style anchor; coordinates are illustrative).
     let goal = GoalEnvelope {

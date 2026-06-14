@@ -569,7 +569,7 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
 
             for &guid in &roster {
                 let (sink, source, goal_rx, status_tx) = wire(guid);
-                exec_sup.start(guid, exec_harness.clone(), goal_rx, status_tx);
+                exec_sup.start(guid, exec_harness.clone(), goal_rx, status_tx, None);
                 registry.register(guid, sink);
                 sources.push((guid, source));
             }

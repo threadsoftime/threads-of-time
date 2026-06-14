@@ -2,12 +2,27 @@
 //! report status, release on exit.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::task::JoinHandle;
-use tot_goal_contract::{Goal, GoalEnvelope, GoalReceiver, GoalStatus, StatusSender};
+use tot_goal_contract::{Goal, GoalEnvelope, GoalReceiver, GoalStatus, StatusSender, WorldPos};
 use tot_harness_client::HarnessClient;
 
 use crate::{grind, own, quest};
+
+/// Idle health-poll cadence. While a bot is parked (no goal in flight), the loop
+/// polls its own state at this interval and revives it if it is a dead at-cap bot.
+/// Small under cfg(test) so the supervisor tests run fast.
+const IDLE_HEALTH_POLL_INTERVAL_MS: u64 = if cfg!(test) { 20 } else { 30_000 };
+
+/// Per-bot idle-recovery configuration. When present, the idle poll revives a
+/// dead at-cap bot (level >= cap_level) and re-anchors it to `anchor`. `None`
+/// disables the idle poll (used by tests and any non-roster bot).
+#[derive(Debug)]
+pub struct IdleConfig {
+    pub anchor: WorldPos,
+    pub cap_level: u32,
+}
 
 /// Owns the running per-bot tasks.
 ///
@@ -41,8 +56,9 @@ impl BotSupervisor {
         harness: Arc<HarnessClient>,
         goal_rx: GoalReceiver,
         status_tx: StatusSender,
+        idle: Option<IdleConfig>,
     ) {
-        let task = tokio::spawn(per_bot_loop(bot_guid, harness, goal_rx, status_tx));
+        let task = tokio::spawn(per_bot_loop(bot_guid, harness, goal_rx, status_tx, idle));
         self.handles.insert(bot_guid, task);
     }
 
@@ -66,6 +82,7 @@ pub async fn per_bot_loop(
     harness: Arc<HarnessClient>,
     mut goal_rx: GoalReceiver,
     status_tx: StatusSender,
+    idle: Option<IdleConfig>,
 ) {
     if let Err(e) = own::set_ai_owned(&harness, bot_guid, true).await {
         tracing::error!("exec: claim ownership failed bot={bot_guid}: {e}");
@@ -73,17 +90,37 @@ pub async fn per_bot_loop(
     }
 
     loop {
-        // Wait until a (new) goal is published or the channel closes (shutdown).
-        if goal_rx.changed().await.is_err() {
-            break; // sender dropped → shutdown
+        tokio::select! {
+            // Goal path (unchanged): wait for a new goal or shutdown.
+            changed = goal_rx.changed() => {
+                if changed.is_err() {
+                    break; // sender dropped → shutdown
+                }
+                let envelope: Option<GoalEnvelope> = goal_rx.borrow_and_update().clone();
+                let Some(env) = envelope else { continue };
+                let status = dispose_goal(&harness, bot_guid, env).await;
+                let _ = status_tx.send(status).await;
+            }
+            // Idle health poll: only meaningful while parked (no goal in flight).
+            // changed() is cancel-safe: if the sleep arm wins, cancelling the
+            // in-flight changed() future loses no notification.
+            _ = tokio::time::sleep(Duration::from_millis(IDLE_HEALTH_POLL_INTERVAL_MS)) => {
+                if let Some(cfg) = idle.as_ref() {
+                    match grind::read_self(&harness, bot_guid).await {
+                        Ok(st) if st.hp_pct == 0 && st.level >= cfg.cap_level => {
+                            match grind::revive_and_home(&harness, bot_guid, &cfg.anchor).await {
+                                grind::RecoveryOutcome::Recovered =>
+                                    tracing::info!(bot_guid, "idle_recovery: at-cap bot revived + re-anchored"),
+                                grind::RecoveryOutcome::StillDead =>
+                                    tracing::warn!(bot_guid, "idle_recovery: revive failed, will retry next poll"),
+                            }
+                        }
+                        Ok(_) => {} // alive or below cap → no action
+                        Err(e) => tracing::warn!(bot_guid, error = %e, "idle_recovery: state read failed"),
+                    }
+                }
+            }
         }
-        // borrow_and_update (NOT borrow) marks this goal seen, so the next changed()
-        // waits for a genuinely new goal instead of re-firing on the same one.
-        let envelope: Option<GoalEnvelope> = goal_rx.borrow_and_update().clone();
-        let Some(env) = envelope else { continue };
-
-        let status = dispose_goal(&harness, bot_guid, env).await;
-        let _ = status_tx.send(status).await;
     }
 
     if let Err(e) = own::set_ai_owned(&harness, bot_guid, false).await {
@@ -190,7 +227,7 @@ mod tests {
         let harness = Arc::new(HarnessClient::new(base, "tok", Duration::from_secs(5)));
         let (sink, source, goal_rx, status_tx) = wire(1003);
         let mut sup = BotSupervisor::new();
-        sup.start(1003, harness, goal_rx, status_tx);
+        sup.start(1003, harness, goal_rx, status_tx, None);
 
         // Push a goal, then wait for the Completed status.
         sink.set_goal(1003, GoalEnvelope { goal_id: "g-1".into(), version: 1,
@@ -242,7 +279,7 @@ mod tests {
         let harness = Arc::new(HarnessClient::new(base, "tok", Duration::from_secs(5)));
         let (sink, source, goal_rx, status_tx) = wire(2001);
         let mut sup = BotSupervisor::new();
-        sup.start(2001, harness, goal_rx, status_tx);
+        sup.start(2001, harness, goal_rx, status_tx, None);
 
         // Push a goal to mirror the real call shape (the loop exits before reading it).
         sink.set_goal(2001, GoalEnvelope { goal_id: "g-fail".into(), version: 1,
@@ -325,8 +362,8 @@ mod tests {
         reg.register(3002, sink_b);
 
         let mut sup = BotSupervisor::new();
-        sup.start(3001, harness.clone(), rx_a, tx_a);
-        sup.start(3002, harness.clone(), rx_b, tx_b);
+        sup.start(3001, harness.clone(), rx_a, tx_a, None);
+        sup.start(3002, harness.clone(), rx_b, tx_b, None);
 
         // Route a goal to EACH bot via the registry (by guid).
         reg.set_goal(3001, GoalEnvelope { goal_id: "g-a".into(), version: 1,
@@ -349,5 +386,97 @@ mod tests {
         // Clean shutdown: drop the registry (all sinks) → both loops exit.
         drop(reg);
         sup.join_all().await;
+    }
+
+    /// A parked AT-CAP bot that is a corpse (hp==0, level>=cap) is revived by the
+    /// idle poll and teleported to its anchor — WITHOUT any goal, and the claim is
+    /// held throughout (released only at shutdown).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn idle_poll_revives_at_cap_corpse_and_keeps_claim() {
+        use std::sync::atomic::{AtomicI32, AtomicU32, Ordering::SeqCst};
+        let owned = Arc::new(AtomicI32::new(0)); // +1 claim, -1 release
+        let state_calls = Arc::new(AtomicU32::new(0));
+        let teleports = Arc::new(AtomicU32::new(0));
+        let (ow2, st2, tp2) = (owned.clone(), state_calls.clone(), teleports.clone());
+        let base = spawn_mock(move |name, args| match name.as_str() {
+            "bot.set_ai_enabled" => {
+                let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+                if enabled { ow2.fetch_sub(1, SeqCst); json!({"owned": false, "reset": true}) }
+                else       { ow2.fetch_add(1, SeqCst); json!({"owned": true,  "reset": false}) }
+            }
+            // First read (idle poll) sees a corpse; after bot.revive, alive.
+            "obs.get_state" => {
+                let n = st2.fetch_add(1, SeqCst);
+                json!({"self": {"level": 25, "hp_pct": if n == 0 { 0 } else { 90 }}})
+            }
+            "bot.revive" => json!({"revived": true, "was_dead": true}),
+            "gm.teleport" => { tp2.fetch_add(1, SeqCst); json!({"teleported": true}) }
+            other => panic!("unexpected tool {other}"),
+        }).await;
+
+        let harness = Arc::new(HarnessClient::new(base, "tok", Duration::from_secs(5)));
+        let (sink, _source, goal_rx, status_tx) = wire(1194);
+        let mut sup = BotSupervisor::new();
+        let idle = Some(IdleConfig {
+            anchor: WorldPos { map_id: 1, x: 2055.0, y: -1030.0, z: 95.0 },
+            cap_level: 25,
+        });
+        sup.start(1194, harness, goal_rx, status_tx, idle);
+
+        // No goal pushed. Wait until the idle poll has revived + teleported.
+        let mut recovered = false;
+        for _ in 0..100 {
+            if teleports.load(SeqCst) >= 1 { recovered = true; break; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(recovered, "idle poll did not revive the at-cap corpse");
+
+        // Stop the loop BEFORE asserting final counts so no further poll can run.
+        drop(sink);
+        sup.join(1194).await;
+        assert_eq!(teleports.load(SeqCst), 1, "exactly one idle recovery (no re-revive once alive)");
+        assert_eq!(owned.load(SeqCst), 0, "claimed once, released once at shutdown");
+    }
+
+    /// A parked BELOW-CAP corpse (hp==0, level<cap) must NOT be revived by the idle
+    /// poll — that would defeat run_grind's MAX_DEATHS escalation. bot.revive panics
+    /// if called.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn idle_poll_skips_below_cap_corpse() {
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+        let state_calls = Arc::new(AtomicU32::new(0));
+        let sc2 = state_calls.clone();
+        let base = spawn_mock(move |name, args| match name.as_str() {
+            "bot.set_ai_enabled" => {
+                let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+                if enabled { json!({"owned": false, "reset": true}) }
+                else       { json!({"owned": true,  "reset": false}) }
+            }
+            "obs.get_state" => { sc2.fetch_add(1, SeqCst); json!({"self": {"level": 20, "hp_pct": 0}}) }
+            "bot.revive" => panic!("idle poll must not revive a below-cap bot"),
+            "gm.teleport" => panic!("idle poll must not teleport a below-cap bot"),
+            other => panic!("unexpected tool {other}"),
+        }).await;
+
+        let harness = Arc::new(HarnessClient::new(base, "tok", Duration::from_secs(5)));
+        let (sink, _source, goal_rx, status_tx) = wire(1195);
+        let mut sup = BotSupervisor::new();
+        let idle = Some(IdleConfig {
+            anchor: WorldPos { map_id: 1, x: 0.0, y: 0.0, z: 0.0 },
+            cap_level: 25,
+        });
+        sup.start(1195, harness, goal_rx, status_tx, idle);
+
+        // Let several idle polls fire (each reads obs.get_state), then shut down.
+        let mut polled = false;
+        for _ in 0..50 {
+            if state_calls.load(SeqCst) >= 3 { polled = true; break; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(polled, "idle poll did not run for the below-cap bot");
+
+        drop(sink);
+        sup.join(1195).await;
+        // Reaching here without a panic proves bot.revive/gm.teleport were never called.
     }
 }
