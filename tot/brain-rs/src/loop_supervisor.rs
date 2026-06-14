@@ -131,17 +131,26 @@ pub struct LoopSupervisor {
     profile_map: std::collections::HashMap<i64, String>,  // bot_guid → profile_id
 }
 
-/// R1: true when the bot's observed `hp_pct` is exactly 0 (a corpse). The exec
-/// idle health poll revives at-cap bots within IDLE_HEALTH_POLL_INTERVAL; until
-/// then the brain skips behavior dispatch so it never set_goal/send_chat on a
-/// dead bot. Missing/non-integer hp is treated as alive (never skip on unknown).
-fn is_dead_in_hot_inputs(hot_inputs: &HashMap<String, Value>) -> bool {
-    hot_inputs
+/// R1: true when the bot is a corpse (`hp_pct == 0`) AND at the level cap
+/// (`level >= cap_level`). The exec idle health poll revives at-cap bots
+/// (which have no grind goal) within IDLE_HEALTH_POLL_INTERVAL; the brain skips
+/// LLM dispatch for them so it never set_goal/send_chat on a corpse. BELOW-cap
+/// dead bots must NOT be skipped here — they still need `maybe_emit_goal` to emit
+/// the grind goal that triggers run_grind's DOA recovery. Missing/non-integer
+/// hp or level is treated as not-skippable (never skip on unknown).
+fn is_dead_at_cap(hot_inputs: &HashMap<String, Value>, cap_level: u32) -> bool {
+    let self_obj = hot_inputs
         .get("state_summary")
-        .and_then(|s| s.get("self"))
+        .and_then(|s| s.get("self"));
+    let hp_zero = self_obj
         .and_then(|s| s.get("hp_pct"))
         .and_then(Value::as_u64)
-        == Some(0)
+        == Some(0);
+    let at_cap = self_obj
+        .and_then(|s| s.get("level"))
+        .and_then(Value::as_u64)
+        .map_or(false, |lvl| lvl >= cap_level as u64);
+    hp_zero && at_cap
 }
 
 impl LoopSupervisor {
@@ -700,7 +709,7 @@ impl LoopSupervisor {
         // ── At-cap death guard (R1) ──────────────────────────────────────
         // Don't LLM-drive a corpse. The exec idle poll revives at-cap bots
         // within IDLE_HEALTH_POLL_INTERVAL; skip dispatch until alive again.
-        if is_dead_in_hot_inputs(&hot_inputs) {
+        if is_dead_at_cap(&hot_inputs, self.decider.max_player_level) {
             record["triage_reason"] = Value::String("dead".to_string());
             info!("decision_skip bot_guid={} reason=dead", bot_guid);
             return Ok(TickState {
@@ -1448,25 +1457,28 @@ rotation_id = "auto_attack"
     }
 
     #[test]
-    fn is_dead_in_hot_inputs_true_only_when_hp_zero() {
+    fn is_dead_at_cap_true_only_when_dead_and_at_cap() {
         use std::collections::HashMap;
         use serde_json::json;
+        let cap = 25u32;
+        let mk = |hp: i64, lvl: i64| {
+            let mut m = HashMap::new();
+            m.insert(
+                "state_summary".to_string(),
+                json!({"self": {"hp_pct": hp, "level": lvl}}),
+            );
+            m
+        };
 
-        let mut dead = HashMap::new();
-        dead.insert("state_summary".to_string(), json!({"self": {"hp_pct": 0, "level": 25}}));
-        assert!(super::is_dead_in_hot_inputs(&dead));
-
-        let mut alive = HashMap::new();
-        alive.insert("state_summary".to_string(), json!({"self": {"hp_pct": 90, "level": 25}}));
-        assert!(!super::is_dead_in_hot_inputs(&alive));
-
-        // Missing hp_pct → treat as alive (never skip on unknown).
-        let mut missing = HashMap::new();
-        missing.insert("state_summary".to_string(), json!({"self": {"level": 25}}));
-        assert!(!super::is_dead_in_hot_inputs(&missing));
-
-        // No state_summary at all → alive.
-        assert!(!super::is_dead_in_hot_inputs(&HashMap::new()));
+        assert!(super::is_dead_at_cap(&mk(0, 25), cap)); // dead + at cap -> skip
+        assert!(super::is_dead_at_cap(&mk(0, 26), cap)); // dead + above cap -> skip
+        assert!(!super::is_dead_at_cap(&mk(0, 23), cap)); // dead + BELOW cap -> do NOT skip (recovery path)
+        assert!(!super::is_dead_at_cap(&mk(90, 25), cap)); // alive + at cap -> no skip
+        // missing fields -> never skip
+        let mut no_self = HashMap::new();
+        no_self.insert("state_summary".to_string(), json!({}));
+        assert!(!super::is_dead_at_cap(&no_self, cap));
+        assert!(!super::is_dead_at_cap(&HashMap::new(), cap));
     }
 
     #[test]
