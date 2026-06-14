@@ -46,7 +46,7 @@ use crate::state::StateStore;
 use crate::subset_gate::{BotSnapshot, SubsetGate, SubsetGateConfig};
 use crate::triage::TriageGate;
 
-use exec_rs::supervisor::BotSupervisor;
+use exec_rs::supervisor::{BotSupervisor, IdleConfig};
 use tot_goal_contract::{wire, ChannelStatusSource, GoalSink, GoalSinkRegistry, GoalStatus, StatusSource};
 use tot_harness_client::HarnessClient;
 
@@ -541,6 +541,28 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
         },
     ));
 
+    // ── M2 slice 2.1: load grind profiles + resolve the roster→profile map ─────
+    // Must be before the exec-embed block so IdleConfig can be resolved per bot.
+    let profiles_path = std::env::var("BRAIN_PROFILES_PATH")
+        .unwrap_or_else(|_| "/opt/containers/brain/profiles.toml".to_string());
+    let profile_registry = std::sync::Arc::new(
+        crate::profile::ProfileRegistry::load(std::path::Path::new(&profiles_path))
+            .map_err(|e| anyhow::anyhow!("failed to load grind profiles from {profiles_path}: {e}"))?,
+    );
+    let profile_map: std::collections::HashMap<i64, String> = settings
+        .exec_profile_map()
+        .into_iter()
+        .map(|(g, pid)| (g as i64, pid))
+        .collect();
+    for (guid, pid) in &profile_map {
+        if !profile_registry.contains(pid) {
+            return Err(anyhow::anyhow!(
+                "roster bot {guid} references unknown profile '{pid}' (not in {profiles_path})"
+            ));
+        }
+    }
+    info!("profiles_loaded count={} roster_bound={}", profile_registry.len(), profile_map.len());
+
     // ── G3 / M2-F: exec supervisor embed (roster) ─────────────────────────────
     // For each enrolled bot, wire an in-process goal→exec channel and start a
     // per_bot_loop on the shared BotSupervisor. All per-bot sinks are collected
@@ -569,7 +591,21 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
 
             for &guid in &roster {
                 let (sink, source, goal_rx, status_tx) = wire(guid);
-                exec_sup.start(guid, exec_harness.clone(), goal_rx, status_tx, None);
+                // Resolve the camp anchor for the idle at-cap health poll. cap_level is
+                // the fleet bracket cap (same value the Decider uses for at_cap).
+                let idle = profile_map
+                    .get(&(guid as i64))
+                    .and_then(|pid| profile_registry.get(pid))
+                    .map(|p| IdleConfig {
+                        anchor: tot_goal_contract::WorldPos {
+                            map_id: p.anchor.map_id,
+                            x: p.anchor.x,
+                            y: p.anchor.y,
+                            z: p.anchor.z,
+                        },
+                        cap_level: settings.max_player_level,
+                    });
+                exec_sup.start(guid, exec_harness.clone(), goal_rx, status_tx, idle);
                 registry.register(guid, sink);
                 sources.push((guid, source));
             }
@@ -601,27 +637,6 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
             Some(Arc::new(registry) as Arc<dyn GoalSink>)
         }
     };
-
-    // ── M2 slice 2.1: load grind profiles + resolve the roster→profile map ─────
-    let profiles_path = std::env::var("BRAIN_PROFILES_PATH")
-        .unwrap_or_else(|_| "/opt/containers/brain/profiles.toml".to_string());
-    let profile_registry = std::sync::Arc::new(
-        crate::profile::ProfileRegistry::load(std::path::Path::new(&profiles_path))
-            .map_err(|e| anyhow::anyhow!("failed to load grind profiles from {profiles_path}: {e}"))?,
-    );
-    let profile_map: std::collections::HashMap<i64, String> = settings
-        .exec_profile_map()
-        .into_iter()
-        .map(|(g, pid)| (g as i64, pid))
-        .collect();
-    for (guid, pid) in &profile_map {
-        if !profile_registry.contains(pid) {
-            return Err(anyhow::anyhow!(
-                "roster bot {guid} references unknown profile '{pid}' (not in {profiles_path})"
-            ));
-        }
-    }
-    info!("profiles_loaded count={} roster_bound={}", profile_registry.len(), profile_map.len());
 
     let supervisor = LoopSupervisor::new(
         triage.clone(),
