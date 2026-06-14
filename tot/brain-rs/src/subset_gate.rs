@@ -165,6 +165,11 @@ fn _euclid_raw(ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64) -> f64 {
 /// * Proximity ranking (same-map bots, sorted by min distance to same-map player).
 /// * Phase B warm-cache extension up to `living_bot_count`.
 /// * `_reconcile` delegation (release / enroll / tier / backoff output).
+///
+/// `pinned_roster` is the exec-roster set: bots in this set are NEVER released
+/// by `_reconcile`, even if they would otherwise meet the hysteresis release
+/// threshold.  This is a superset of `currently_pinned` (the DB pin flag).
+/// Pass an empty `HashSet` for standard behaviour with no pinned roster.
 pub fn recompute_once(
     snapshot: &WorldSnapshot,
     currently_enrolled: &HashMap<i64, i64>, // bot_guid -> last_seen_ms (or 0)
@@ -172,6 +177,7 @@ pub fn recompute_once(
     backoff_set: &std::collections::HashSet<i64>,
     hysteresis: &HashMap<i64, (i64, i64)>, // bot_guid -> (in_ticks, out_ticks)
     config: &SubsetGateConfig,
+    pinned_roster: &std::collections::HashSet<i64>,
 ) -> SubsetDecision {
     use std::collections::HashSet;
 
@@ -200,6 +206,7 @@ pub fn recompute_once(
             hysteresis,
             config,
             &HashSet::new(), // proximity_picks
+            pinned_roster,
         );
     }
 
@@ -304,6 +311,7 @@ pub fn recompute_once(
         hysteresis,
         config,
         &proximity_picks,
+        pinned_roster,
     )
 }
 
@@ -314,7 +322,7 @@ pub fn recompute_once(
 /// Compute `to_enroll`, `to_release`, tier sets, and backoff output from the
 /// target set and gate state.
 ///
-/// Mirrors Python `_reconcile(...)` exactly.
+/// `pinned_roster` bots are NEVER released (exec-roster exemption).
 #[allow(clippy::too_many_arguments)]
 fn _reconcile(
     snapshot: &WorldSnapshot,
@@ -327,6 +335,7 @@ fn _reconcile(
     hysteresis: &HashMap<i64, (i64, i64)>,
     config: &SubsetGateConfig,
     proximity_picks: &std::collections::HashSet<i64>,
+    pinned_roster: &std::collections::HashSet<i64>,
 ) -> SubsetDecision {
     use std::collections::HashSet;
 
@@ -336,7 +345,11 @@ fn _reconcile(
     // ── Release pass ─────────────────────────────────────────────────────────
     // Currently enrolled bots not in target and not pinned.
     for &bot_guid in currently_enrolled.keys() {
-        if target.contains(&bot_guid) || currently_pinned.contains(&bot_guid) {
+        // Never release a pinned-DB bot, a sticky bot, or an exec-roster bot.
+        if target.contains(&bot_guid)
+            || currently_pinned.contains(&bot_guid)
+            || pinned_roster.contains(&bot_guid)
+        {
             continue;
         }
         let (_in_ticks, out_ticks) = hysteresis.get(&bot_guid).copied().unwrap_or((0, 0));
@@ -428,16 +441,25 @@ pub struct SubsetGate {
     pub config: SubsetGateConfig,
     /// Per-bot enroll-backoff deadlines: `bot_guid → deadline_unix_secs`.
     backoff_state: std::sync::Mutex<HashMap<i64, f64>>,
+    /// Exec-roster bots: NEVER released by the SubsetGate, regardless of proximity.
+    /// Populated from `settings.exec_roster()` in app.rs.
+    /// Empty set → standard behaviour (no exemptions).
+    pinned_roster: std::collections::HashSet<i64>,
 }
 
 impl SubsetGate {
     /// Construct a new `SubsetGate`.
+    ///
+    /// `pinned_roster` is the exec-roster set of bot guids that must NEVER be
+    /// released by the SubsetGate, regardless of proximity or hysteresis.
+    /// Pass an empty `HashSet::new()` for standard behaviour without exec-roster.
     pub fn new(
         state_store: Arc<StateStore>,
         snapshot_fetcher: SnapshotFetcher,
         enroll_fn: EnrollFn,
         release_fn: ReleaseFn,
         config: SubsetGateConfig,
+        pinned_roster: std::collections::HashSet<i64>,
     ) -> Self {
         Self {
             state_store,
@@ -446,6 +468,7 @@ impl SubsetGate {
             release_fn,
             config,
             backoff_state: std::sync::Mutex::new(HashMap::new()),
+            pinned_roster,
         }
     }
 
@@ -522,6 +545,7 @@ impl SubsetGate {
             &backoff_set,
             &hysteresis,
             &self.config,
+            &self.pinned_roster,
         );
 
         self._apply(&decision, &snapshot).await;
@@ -717,6 +741,10 @@ mod tests {
         HashSet::new()
     }
 
+    fn empty_roster() -> HashSet<i64> {
+        HashSet::new()
+    }
+
     // ── pure-function tests ───────────────────────────────────────────────────
 
     #[test]
@@ -732,6 +760,7 @@ mod tests {
             &empty_backoff(),
             &empty_hysteresis(),
             &cfg(5),
+            &empty_roster(),
         );
         assert!(
             dec.target_living_set.is_empty(),
@@ -758,6 +787,7 @@ mod tests {
             &empty_backoff(),
             &empty_hysteresis(),
             &phase_b_cfg,
+            &empty_roster(),
         );
         // Phase B: enrolled bots stay in target even with no players.
         assert!(dec.target_living_set.contains(&1));
@@ -785,6 +815,7 @@ mod tests {
             &empty_backoff(),
             &empty_hysteresis(),
             &c,
+            &empty_roster(),
         );
         assert!(dec.proximity_picks.contains(&1), "nearest bot selected");
         assert!(dec.proximity_picks.contains(&10), "second nearest selected");
@@ -816,6 +847,7 @@ mod tests {
             &empty_backoff(),
             &empty_hysteresis(),
             &cfg(1), // cap=1 (just sticky occupies slot)
+            &empty_roster(),
         );
         assert!(
             dec.sticky_pinned.contains(&99),
@@ -849,6 +881,7 @@ mod tests {
             &empty_backoff(),
             &empty_hysteresis(),
             &cfg(5),
+            &empty_roster(),
         );
         assert!(dec.sticky_pinned.contains(&7), "pvp-combat bot is sticky");
         assert!(dec.to_enroll.contains(&7));
@@ -873,6 +906,7 @@ mod tests {
             &empty_backoff(),
             &hysteresis,
             &c,
+            &empty_roster(),
         );
         // out_ticks=0; hypothetical post-bump = 1; threshold=2 → NOT released.
         assert!(
@@ -901,6 +935,7 @@ mod tests {
             &empty_backoff(),
             &hysteresis,
             &c,
+            &empty_roster(),
         );
         assert!(dec.to_release.contains(&1), "out_ticks 1+1=2 >= 2 → released");
     }
@@ -923,6 +958,7 @@ mod tests {
             &empty_backoff(),
             &hysteresis,
             &c,
+            &empty_roster(),
         );
         // in_ticks=0; post-bump = 1; threshold=2 → NOT enrolled.
         assert!(
@@ -949,6 +985,7 @@ mod tests {
             &empty_backoff(),
             &hysteresis,
             &c,
+            &empty_roster(),
         );
         assert!(dec.to_enroll.contains(&1), "in_ticks 1+1=2 >= 2 → enrolled");
     }
@@ -968,6 +1005,7 @@ mod tests {
             &backoff,
             &empty_hysteresis(),
             &cfg(5),
+            &empty_roster(),
         );
         assert!(!dec.to_enroll.contains(&1), "backoff bot not enrolled");
         assert!(dec.skipped_due_to_backoff.contains(&1));
@@ -988,6 +1026,7 @@ mod tests {
             &empty_backoff(),
             &empty_hysteresis(),
             &cfg(5),
+            &empty_roster(),
         );
         assert!(dec.target_living_set.contains(&99));
         // Pinned bots are in sticky_pinned (they go through sticky bypass).
@@ -1013,6 +1052,7 @@ mod tests {
             &empty_backoff(),
             &hysteresis,
             &cfg(5),
+            &empty_roster(),
         );
         assert!(!dec.to_release.contains(&99), "pinned bot never released");
     }
@@ -1033,6 +1073,7 @@ mod tests {
             &empty_backoff(),
             &empty_hysteresis(),
             &c,
+            &empty_roster(),
         );
         // Only 3 bots in proximity_picks.
         assert_eq!(dec.proximity_picks.len(), 3);
@@ -1066,6 +1107,7 @@ mod tests {
             &empty_backoff(),
             &empty_hysteresis(),
             &c,
+            &empty_roster(),
         );
         assert!(dec.to_full.contains(&1), "same-map bot → FULL");
         assert!(dec.to_reduced.contains(&2), "diff-map bot → REDUCED");
@@ -1096,8 +1138,97 @@ mod tests {
             &empty_backoff(),
             &hysteresis,
             &cfg(5),
+            &empty_roster(),
         );
         assert!(!dec.to_release.contains(&5), "sticky bot not released despite high out_ticks");
+    }
+
+    // ── exec-roster exemption tests ───────────────────────────────────────────
+
+    /// Test 2 (SubsetGate exemption): a bot in the exec-roster set is NEVER
+    /// released by recompute_once even when it meets the hysteresis release
+    /// threshold (out_ticks >= hysteresis_out_ticks) and is not in proximity.
+    #[test]
+    fn test_exec_roster_bot_not_released_by_recompute() {
+        // Bot 1173 is in the exec-roster; it is enrolled but out of proximity.
+        let snap = WorldSnapshot {
+            players: vec![player(1, 0, 1000.0, 0.0, 0.0)], // player far from bot
+            bots: vec![bot(1173, 1, 0.0, 0.0, 0.0)],        // bot on different map → not in target
+        };
+        let enrolled: HashMap<i64, i64> = [(1173, 0)].into_iter().collect();
+        // Large out_ticks — would cause release without the exec-roster exemption.
+        let hysteresis: HashMap<i64, (i64, i64)> = [(1173, (0, 999))].into_iter().collect();
+        let mut c = cfg(5);
+        c.hysteresis_out_ticks = 2;
+
+        // Non-roster: bot would be released.
+        let dec_without_roster = recompute_once(
+            &snap,
+            &enrolled,
+            &empty_pinned(),
+            &empty_backoff(),
+            &hysteresis,
+            &c,
+            &empty_roster(),
+        );
+        assert!(
+            dec_without_roster.to_release.contains(&1173),
+            "without exec-roster exemption, bot 1173 would be released"
+        );
+
+        // With exec-roster containing 1173: must NOT be released.
+        let exec_roster: HashSet<i64> = [1173].into_iter().collect();
+        let dec_with_roster = recompute_once(
+            &snap,
+            &enrolled,
+            &empty_pinned(),
+            &empty_backoff(),
+            &hysteresis,
+            &c,
+            &exec_roster,
+        );
+        assert!(
+            !dec_with_roster.to_release.contains(&1173),
+            "exec-roster bot 1173 must NOT be released even at hysteresis threshold"
+        );
+    }
+
+    /// Exec-roster exemption does NOT affect non-roster bots: a non-roster bot
+    /// that meets the release threshold IS still released.
+    #[test]
+    fn test_non_roster_bot_still_released_when_roster_present() {
+        let snap = WorldSnapshot {
+            players: vec![player(1, 0, 1000.0, 0.0, 0.0)],
+            bots: vec![
+                bot(1173, 1, 0.0, 0.0, 0.0), // exec-roster bot (different map)
+                bot(99, 1, 0.0, 0.0, 0.0),   // non-roster bot (different map)
+            ],
+        };
+        let enrolled: HashMap<i64, i64> = [(1173, 0), (99, 0)].into_iter().collect();
+        let hysteresis: HashMap<i64, (i64, i64)> = [
+            (1173, (0, 999)),
+            (99, (0, 999)),
+        ]
+        .into_iter()
+        .collect();
+        let mut c = cfg(5);
+        c.hysteresis_out_ticks = 2;
+
+        let exec_roster: HashSet<i64> = [1173].into_iter().collect();
+        let dec = recompute_once(
+            &snap,
+            &enrolled,
+            &empty_pinned(),
+            &empty_backoff(),
+            &hysteresis,
+            &c,
+            &exec_roster,
+        );
+
+        // Exec-roster bot 1173 is protected.
+        assert!(!dec.to_release.contains(&1173), "exec-roster bot 1173 must not be released");
+        // Non-roster bot 99 is released normally.
+        assert!(dec.to_release.contains(&99), "non-roster bot 99 must still be released");
     }
 
     // ── async SubsetGate tests ────────────────────────────────────────────────
@@ -1190,6 +1321,7 @@ mod tests {
             enroll_fn,
             release_fn,
             c,
+            HashSet::new(),
         );
 
         // Build a decision: to_release={1}, to_enroll={2}.
@@ -1255,6 +1387,7 @@ mod tests {
             enroll_fn,
             release_fn,
             cfg(5),
+            HashSet::new(),
         );
 
         let decision = SubsetDecision {
@@ -1303,6 +1436,7 @@ mod tests {
             enroll_fn,
             release_fn,
             cfg(5),
+            HashSet::new(),
         );
 
         // Arm backoff for bot 7.
@@ -1320,6 +1454,7 @@ mod tests {
             &backoff,
             &empty_hysteresis(),
             &cfg(5),
+            &empty_roster(),
         );
         assert!(!dec.to_enroll.contains(&7), "backoff bot not enrolled");
         assert!(dec.skipped_due_to_backoff.contains(&7));
@@ -1338,7 +1473,7 @@ mod tests {
         let mut c = cfg(5);
         c.enabled = false;
 
-        let gate = SubsetGate::new(store, snapshot_fetcher, enroll_fn, release_fn, c);
+        let gate = SubsetGate::new(store, snapshot_fetcher, enroll_fn, release_fn, c, HashSet::new());
 
         // run() should return immediately without hanging.
         tokio::time::timeout(

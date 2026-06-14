@@ -659,7 +659,56 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
         profile_map,
     );
 
+    // ── Seed exec-roster bots as always-active (enrollment gap fix) ──────────
+    // The exec-embed block (above) claims these bots for the data-plane but never
+    // writes living_bots rows; rehydration (list_active below) then skips them
+    // because their persisted status may be 'released'. Fix: unconditionally
+    // set each exec-roster bot to status='active' before rehydration runs, so
+    // the list_active() call below picks them up and supervisor.start() is called
+    // for each one. supervisor.start() is idempotent, so a double-start is safe.
+    let exec_roster_i64: std::collections::HashSet<i64> = settings
+        .exec_roster()
+        .iter()
+        .map(|&g| g as i64)
+        .collect();
+
+    if !exec_roster_i64.is_empty() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        // Placeholder personality — preserved only if no real personality exists yet.
+        // enroll_via_api will overwrite this with a real identity on first proximity-
+        // driven enroll. The exec-roster brain loop needs SOME row to be active.
+        let placeholder_seed = crate::models::PersonalityCard {
+            name: "ExecBot".into(),
+            race: "Unknown".into(),
+            class_: "Unknown".into(),
+            backstory: "Exec-roster bot awaiting identity bootstrap.".into(),
+            talkativeness: 0.5,
+            courage: 0.5,
+            greed: 0.0,
+            attitude_to_master: 0.0,
+            party_invite_policy: "accept_from_known".into(),
+            pvp_appetite: None,
+            raid_appetite: None,
+            completionist_streak: None,
+            gold_motivation: None,
+            profession_appetite: None,
+        };
+        for &guid in &exec_roster_i64 {
+            if let Err(e) = state_store.seed_active(guid, now_ms, &placeholder_seed) {
+                warn!("exec_roster_seed_failed bot_guid={guid} err={e}");
+            } else {
+                info!("exec_roster_seeded bot_guid={guid} status=active");
+            }
+        }
+    }
+
     // ── Rehydrate active bots ─────────────────────────────────────────────────
+    // list_active() now includes the exec-roster bots seeded above.
+    // supervisor.start() is idempotent: a second call for an already-running
+    // loop returns immediately without spawning a duplicate task.
     let active_rows = state_store.list_active().unwrap_or_default();
     for row in &active_rows {
         supervisor.start(row.bot_guid);
@@ -741,6 +790,7 @@ pub async fn create_app(settings: Settings) -> anyhow::Result<Router> {
         enroll_fn,
         release_fn,
         subset_gate_config,
+        exec_roster_i64.clone(),
     ));
 
     // Spawn SubsetGate task (stored in the AppState for cancellation).

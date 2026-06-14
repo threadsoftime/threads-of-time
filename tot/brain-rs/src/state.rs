@@ -474,6 +474,59 @@ impl StateStore {
         Ok(())
     }
 
+    /// Ensure a bot is enrolled with `status='active'`, regardless of prior status.
+    ///
+    /// Used at startup to pin exec-roster bots into the brain:
+    /// * If the bot already has a row (any status) → UPDATE to `status='active'`,
+    ///   reset hysteresis counters, and preserve existing personality.
+    ///   Equivalent to `reactivate()`, but tolerates a bot that was never inserted.
+    /// * If no row exists → INSERT with `placeholder_seed` as the personality card
+    ///   (the SubsetGate's `enroll_via_api` will overwrite this with a real personality
+    ///   on the first proximity-driven enroll; for the exec-roster the LLM brain loop
+    ///   still needs SOME row to exist before `list_active()` can return it).
+    ///
+    /// Idempotent: calling it N times has the same effect as calling it once.
+    pub fn seed_active(
+        &self,
+        bot_guid: i64,
+        enrolled_at_ms: i64,
+        placeholder_seed: &PersonalityCard,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        // Check if a row already exists.
+        let existing: Option<i64> = conn
+            .query_row(
+                "SELECT bot_guid FROM living_bots WHERE bot_guid = ?",
+                params![bot_guid],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|e: rusqlite::Error| e.to_string())?;
+
+        if existing.is_some() {
+            // Row exists — reactivate in place (preserve existing personality_seed_json).
+            conn.execute(
+                "UPDATE living_bots \
+                 SET status='active', in_range_ticks=0, out_of_range_ticks=0 \
+                 WHERE bot_guid = ?",
+                params![bot_guid],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            // No row — insert with placeholder personality.
+            let seed_json = serde_json::to_string(placeholder_seed)
+                .map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT INTO living_bots \
+                 (bot_guid, enrolled_at, last_seen, status, personality_seed_json) \
+                 VALUES (?, ?, ?, 'active', ?)",
+                params![bot_guid, enrolled_at_ms, Option::<i64>::None, seed_json],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     /// Set the `pinned` flag for a bot.  Mirrors Python `set_pin()`.
     pub fn set_pin(&self, bot_guid: i64, pinned: bool) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
@@ -699,5 +752,99 @@ mod tests {
         let (in_t, out_t) = store.get_hysteresis(1001).unwrap();
         assert_eq!(in_t, 0);
         assert_eq!(out_t, 0);
+    }
+
+    // ── exec-roster enrollment fix tests ──────────────────────────────────────
+
+    /// Test 1 (state/seed): seeding an exec-roster guid that was previously
+    /// `set_status("released")` makes it appear in `list_active()`.
+    /// This is the fix for the "enrollment gap" where exec-roster bots were
+    /// skipped by rehydration after a restart because their status was 'released'.
+    #[test]
+    fn test_seed_active_reactivates_released_bot() {
+        let (store, _f) = temp_store();
+        let card = test_card();
+
+        // Enroll then release — simulates the state after a prior SubsetGate session.
+        store.enroll(1001, 0, &card).unwrap();
+        store.set_status(1001, "released").unwrap();
+
+        // Verify it does NOT appear in list_active after release.
+        let active_before = store.list_active().unwrap();
+        assert!(active_before.is_empty(), "released bot must not be in list_active");
+
+        // seed_active must flip it back to active.
+        store.seed_active(1001, 0, &card).unwrap();
+
+        let active_after = store.list_active().unwrap();
+        assert_eq!(active_after.len(), 1, "seed_active must make bot appear in list_active");
+        assert_eq!(active_after[0].bot_guid, 1001);
+        assert_eq!(active_after[0].status, "active");
+    }
+
+    /// seed_active on a bot that has never been enrolled inserts a new active row.
+    #[test]
+    fn test_seed_active_inserts_when_no_row_exists() {
+        let (store, _f) = temp_store();
+        let card = test_card();
+
+        // No prior enrollment.
+        store.seed_active(9999, 42_000, &card).unwrap();
+
+        let active = store.list_active().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].bot_guid, 9999);
+        assert_eq!(active[0].status, "active");
+        assert_eq!(active[0].enrolled_at, 42_000);
+    }
+
+    /// seed_active is idempotent: calling it N times leaves exactly one active row.
+    #[test]
+    fn test_seed_active_is_idempotent() {
+        let (store, _f) = temp_store();
+        let card = test_card();
+
+        store.seed_active(1001, 0, &card).unwrap();
+        store.seed_active(1001, 0, &card).unwrap(); // second call must not error
+        store.seed_active(1001, 0, &card).unwrap(); // third call
+
+        let active = store.list_active().unwrap();
+        assert_eq!(active.len(), 1, "idempotent: exactly one row");
+    }
+
+    /// seed_active preserves the existing personality when the bot already has a row.
+    #[test]
+    fn test_seed_active_preserves_existing_personality() {
+        let (store, _f) = temp_store();
+        let card = test_card(); // name = "Kael"
+
+        store.enroll(1001, 0, &card).unwrap();
+        store.set_status(1001, "released").unwrap();
+
+        // Seed with a different placeholder card.
+        let placeholder = PersonalityCard {
+            name: "Placeholder".into(),
+            race: "Gnome".into(),
+            class_: "Mage".into(),
+            backstory: "Unknown.".into(),
+            talkativeness: 0.5,
+            courage: 0.5,
+            greed: 0.0,
+            attitude_to_master: 0.0,
+            party_invite_policy: "none".into(),
+            pvp_appetite: None,
+            raid_appetite: None,
+            completionist_streak: None,
+            gold_motivation: None,
+            profession_appetite: None,
+        };
+
+        store.seed_active(1001, 0, &placeholder).unwrap();
+
+        // Existing personality ("Kael") must be preserved — seed_active does an UPDATE,
+        // not an INSERT OR REPLACE when a row exists.
+        let row = store.get_bot(1001).unwrap().unwrap();
+        assert_eq!(row.personality_seed.name, "Kael", "existing personality preserved");
+        assert_eq!(row.status, "active");
     }
 }
